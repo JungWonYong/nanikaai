@@ -5,7 +5,7 @@ edition = "2021"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/JungWonYong/nanikaai"
-description = "何か藍 (NanikaAi) — 100% Safe Rust製のAIデスクトップマスコット基盤 / Cross-Platform Safe Rust AI Desktop Mascot Baseware"
+description = "何か藍 (NanikaAi) — AI開発・AI保守による100% Safe Rust製のAIデスクトップマスコット基盤 / AI-Developed & Maintained Cross-Platform Safe Rust AI Desktop Mascot Baseware"
 
 [dependencies]
 winit = "0.30"

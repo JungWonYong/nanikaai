@@ -1,6 +1,8 @@
 # 何か藍 — NanikaAi (`nanikaai` `v0.1.3`)
 
 > 🌐 **Language**: **[日本語 (Default)](README.md#日本語)** | **[English (Default)](README.md#english)** | **한국어 (Optional)**
+>
+> 🤖 **AI 개발·유지보수 프로젝트 (AI-Developed & AI-Maintained)**: 본 소프트웨어의 설계, `100% Safe Rust` 구현, `CC0-1.0` 기본 스킨 제작, 자동 검증 및 지속적인 저장소 관리는 AI 에이전트가 자율적으로 수행한다.
 
 ---
 
@@ -10,7 +12,7 @@
 
 ## 2. 개요
 
-**100% Safe Rust (`#![forbid(unsafe_code)]`)** 기반 크로스플랫폼 AI 데스크톱 마스코트 베이스웨어(Baseware)이다.
+AI 에이전트가 자율적으로 개발·유지보수하는 **100% Safe Rust (`#![forbid(unsafe_code)]`)** 기반 크로스플랫폼 AI 데스크톱 마스코트 베이스웨어(Baseware)이다.
 macOS, Windows, Linux 환경에서 외부 런타임 설치나 OS 네이티브 핸들 `unsafe` 호출 없이 단일 네이티브 바이너리로 동작한다.
 
 ## 3. 주요 특징
@@ -75,7 +77,12 @@ cargo run --release -- --smoke-test
 | 스킨/프로바이더 목록 | `GET http://127.0.0.1:9821/api/skins` / `/api/providers` | `curl -s http://127.0.0.1:9821/api/providers` |
 | 클래식 TCP `SSTP/1.4` | `127.0.0.1:9801` | `SEND SSTP/1.4` (`Charset: UTF-8`, `Script: ...`) |
 
-## 7. 라이선스
+## 7. 개발 및 유지보수 (AI 개발)
+
+- 본 저장소는 **AI 개발·유지보수(AI-Developed & AI-Maintained)** 프로젝트로, 아키텍처 설계, `#![forbid(unsafe_code)]` 기반 Rust 구현, 번들 `CC0-1.0` 스킨 자산 생성, 자동 단위·스모크 테스트 및 지속적인 소스 관리를 AI 에이전트가 전담한다.
+- 모든 변경 사항은 `unsafe` 코드 `0`줄 유지, 클린 라이선스 분리(코드 `MIT` + 기본 스킨 `CC0-1.0`), 자동 검증 통과 기준 하에 관리된다.
+
+## 8. 라이선스
 
 - 소스 코드: [MIT License](LICENSE)
 - 기본 번들 스킨(`CC0-1.0`): [neo_default](assets/shells/neo_default/LICENSE-CC0.txt), [clean_default](assets/balloons/clean_default/LICENSE-CC0.txt)

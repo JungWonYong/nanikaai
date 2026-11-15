@@ -1,6 +1,8 @@
 # 何か藍 — NanikaAi (`nanikaai` `v0.1.3`)
 
 > 🌐 **Language**: **[日本語 (Default)](#日本語)** | **[English (Default)](#english)** | **[한국어 (Optional)](README.ko.md)**
+>
+> 🤖 **AI-Developed & AI-Maintained / AI開発・AI保守プロジェクト**: 本ソフトウェアの設計・`100% Safe Rust` 実装・`CC0-1.0` 既定スキン制作・検証・継続保守は AI エージェントによって自律的に行われている。 / Designed, implemented in `100% Safe Rust`, verified, and continuously maintained by AI coding agents.
 
 ---
 
@@ -14,7 +16,7 @@
 
 ### 概要
 
-**100% Safe Rust（`#![forbid(unsafe_code)]`）** で実装したマルチ OS 対応の AI デスクトップマスコット基盤（ベースウェア）である。
+AI エージェントによる自律開発・継続保守で構築された、**100% Safe Rust（`#![forbid(unsafe_code)]`）** 製のマルチ OS 対応 AI デスクトップマスコット基盤（ベースウェア）である。
 macOS・Windows・Linux 環境において、外部ランタイムの導入や OS ネイティブハンドルの `unsafe` 呼び出しを一切行わず、単一ネイティブバイナリとして動作する。
 
 ### 主な特徴
@@ -79,6 +81,11 @@ cargo run --release -- --smoke-test
 | 一覧取得 | `GET http://127.0.0.1:9821/api/skins` / `/api/providers` | `curl -s http://127.0.0.1:9821/api/providers` |
 | クラシック `SSTP/1.4` | TCP `127.0.0.1:9801` | `SEND SSTP/1.4`（`Charset: UTF-8`, `Script: ...`） |
 
+### 開発・保守体制（AI 開発）
+
+- 本リポジトリは **AI 開発（AI-Developed & AI-Maintained）** プロジェクトであり、アーキテクチャ設計、`#![forbid(unsafe_code)]` 準拠の Rust 実装、同梱 `CC0-1.0` スキン資産の生成、自動単体・スモーク検証、および継続的な保守管理を AI エージェントが担う。
+- すべての変更は `unsafe` コードゼロ、クリーンな権利分離（コード `MIT` ＋既定スキン `CC0-1.0`）、および自動テスト通過を必須条件として管理される。
+
 ### ライセンス
 
 - ソースコード: [MIT License](LICENSE)
@@ -96,7 +103,7 @@ Named **`何か藍 (NanikaAi)`** by combining **`何か (Nanika)`** — the pred
 
 ### Overview
 
-A **100% Safe Rust (`#![forbid(unsafe_code)]`)** cross-platform AI desktop mascot baseware.
+An **AI-developed and AI-maintained**, **100% Safe Rust (`#![forbid(unsafe_code)]`)** cross-platform AI desktop mascot baseware.
 It compiles into a single native binary for macOS, Windows, and Linux without external runtime dependencies or any `unsafe` OS handle calls.
 
 ### Key Features
@@ -161,6 +168,11 @@ cargo run --release -- --smoke-test
 | List skins / providers | `GET http://127.0.0.1:9821/api/skins` / `/api/providers` | `curl -s http://127.0.0.1:9821/api/providers` |
 | Classic TCP `SSTP/1.4` | `127.0.0.1:9801` | `SEND SSTP/1.4` (`Charset: UTF-8`, `Script: ...`) |
 
+### Development & Maintenance (AI-Developed)
+
+- This repository is an **AI-developed and AI-maintained** software project: architecture design, `#![forbid(unsafe_code)]` Rust source implementation, bundled `CC0-1.0` skin generation, automated unit/smoke verification, and ongoing maintenance are carried out autonomously by AI coding agents.
+- Every change is governed by strict guardrails: zero `unsafe` blocks, clean open-source licensing (`MIT` code + `CC0-1.0` default skins), and automated test verification.
+
 ### License
 
 - Source Code: [MIT License](LICENSE)
@@ -171,7 +183,8 @@ cargo run --release -- --smoke-test
 <details>
 <summary>🇰🇷 한국어 안내 (Optional Korean Documentation)</summary>
 
-- **100% Safe Rust (`#![forbid(unsafe_code)]`)** 기반 크로스플랫폼 AI 데스크톱 마스코트 베이스웨어(macOS / Windows / Linux 단일 네이티브 바이너리)이다.
+- **AI 개발·유지보수 프로젝트 (AI-Developed & AI-Maintained)**: 아키텍처 설계부터 **100% Safe Rust (`#![forbid(unsafe_code)]`)** 소스 구현, `CC0-1.0` 기본 스킨 제작, 자동 검증 및 지속적인 저장소 유지보수까지 AI 에이전트가 자율적으로 전담한다.
+- 크로스플랫폼 AI 데스크톱 마스코트 베이스웨어로서 macOS / Windows / Linux 환경에서 외부 런타임 없이 단일 네이티브 바이너리로 동작한다.
 - `wgpu` WGSL 기반 **계층형 Live2D 관절·감쇠 스프링 물리 리깅**(원본 RGB 색상 무변경, 발끝 고정·흉부 호흡·목 회전·시차·머리카락/바보털/치마 물리, SERIKO `talk` 립싱크)과 **모에 사쿠라(`\0`) + 선명한 페리윙클 블루(`#94A3FF`) 말랑 우뉴(`\1`) `@2x` 스킨**을 제공한다.
 - 내용에 따라 자동 신축·스크롤되는 **유리 글래스 말풍선**과 점멸 커서·IME 밑줄·닫기/전송 버튼이 포함된 **사파이어 블루 Siri 스타일 입력 바**(기본 UI 일/영 병기)를 탑재했다.
 - **엄격한 `\0`/`\1` 스코프 분리**, 원클릭 기본 스킨 복구·스크롤 메뉴, `.pna` 알파 마스크/`seriko.use_self_alpha`/SERIKO(`overlayf`·`replace`·`alternativestart`)·Shift-JIS 클래식 스킨 호환 및 **멀티 AI 백엔드 + HTTP JSON (`127.0.0.1:9821`) · 클래식 `SSTP/1.4` (`127.0.0.1:9801`)** 듀얼 서버를 지원한다.
