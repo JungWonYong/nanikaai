@@ -1,85 +1,179 @@
-# 何か藍 — NanikaAi (`nanikaai` `v1.2.0`)
+# 何か藍 — NanikaAi (`nanikaai` `v1.2.1`)
 
-> **명칭의 유래**: 우카가카(`伺か`)의 전신 명칭인 **`何か(나니카)`**와 시그니처 블루 테마 **`藍(쪽빛 남 · 훈독 あい = AI)`** 및 원작에 대한 **`愛`**를 겹쳐 **`なにかあい (NanikaAi)`**로 명명했습니다.
+> 🌐 **Language**: **[日本語 (Default)](#日本語)** | **[English (Default)](#english)** | **[한국어 (Optional)](README.ko.md)**
 
-**100% Safe Rust (`#![forbid(unsafe_code)]`)** 기반 크로스플랫폼 AI 데스크톱 마스코트 베이스웨어(Baseware)입니다.
-macOS, Windows, Linux 환경에서 별도 런타임 설치나 OS 네이티브 핸들 `unsafe` 호출 없이 단일 네이티브 바이너리로 동작합니다.
+---
 
-## 주요 특징
+<a id="日本語"></a>
 
-1. **Zero `unsafe` 크로스플랫폼 네이티브 GUI & OS별 작업 영역 정밀 배치**
-   - `winit 0.30` + `wgpu 24` 투명 알파 컴포지팅 + `cosmic-text 0.12` CJK 텍스트 렌더링
-   - `display.scale` 기반 HiDPI(@2x) 캐릭터·말풍선 고해상도 렌더링 및 `Window::set_cursor_hittest` 클릭 투과(Click-through)
-   - OS별 UI 인셋 자동 인식(macOS 메뉴바/Dock 크기·위치, Windows 작업 표시줄, X11/Wayland `_NET_WORKAREA` 및 패널 인셋) 및 발끝·단면 자동 접지(Ground snapping)
-   - 전역 50ms 커서 폴링을 통한 **비활성 상태 머리 쓰다듬기(Wobble-tolerant Head Stroking)** 및 SERIKO 애니메이션 지원
-   - 한국어/일본어/영어 IME 입력이 가능한 대화창(`Communicate`) 및 시스템 트레이(`tray-icon`) 통합
-2. **엄격한 캐릭터 스코프 분리 (`\0` / `\1`)**
-   - 사쿠라 스크립트 `\0`(주 캐릭터)와 `\1`(파트너 캐릭터)의 서피스 해결과 대화 히스토리를 완전 분리하여 스킨 혼선 방지
-   - 기존 Ukagaka `.nar` / `.zip` 아카이브 드래그 앤 드롭 및 메뉴 설치 지원 (`.png` / `.pna` / Shift-JIS `surfaces.txt` 호환)
-3. **클린 오픈소스 자산 분리 (`MIT` + `CC0-1.0`)**
-   - 저장소 기본 탑재 스킨(`neo_default`, `clean_default`)은 본 프로젝트에서 직접 제작한 **CC0-1.0** 퍼블릭 도메인 원본 자산만 포함
-     - **사쿠라(`neo_default` `\0`)**: 블루·화이트 컨셉을 계승한 성인 미래풍 전신 부츠 디자인 (`@2x` HiDPI, 발끝 포함)
-     - **우뉴(`neo_default` `\1`)**: 아저씨 감성의 작은 둥근 선글라스를 코 아래쪽에 걸쳐 써서 위로 두 눈이 모두 보이는 파트너 + 가는 소닉 스타일 다리·대형 하이톱 운동화 (`@2x` HiDPI, 발끝 포함)
-     - **모던 말풍선(`clean_default`)**: 반투명 펄 글래스모피즘 카드·그라데이션 상단 바·곡선형 말꼬리 및 스크롤바 (`@2x` HiDPI)
-   - 개인 소장 클래식 셸/말풍선은 각 OS 사용자 데이터 디렉터리에서 자동 로드
-4. **멀티 AI 백엔드 & SSTP/HTTP 듀얼 서버**
-   - 로컬 Ollama (`gemma4` 등), 원격 Ollama, Gemini CLI/API, Claude CLI/API, ChatGPT Codex, OpenAI 호환 엔드포인트 지원
-   - HTTP JSON (`127.0.0.1:9821`) 및 클래식 `SSTP/1.4` TCP (`127.0.0.1:9801`) 동시 제공
+## 日本語 (Default)
 
-## 사용자 스킨(.nar) 저장 경로
+### 名称の由来
 
-외부 배포 `.nar` 또는 `.zip` 스킨을 앱 창에 드래그 앤 드롭하면 아래 경로에 자동 설치됩니다.
+デスクトップマスコット文化「伺か」の前身呼称である **`何か（なにか）`** に、象徴色の **`藍（あい = AI）`** と原作文化への **`愛（あい）`** を重ねて **`何か藍（なにかあい / NanikaAi）`** と命名した。
 
-| 운영체제 | 사용자 데이터 디렉터리 |
+### 概要
+
+**100% Safe Rust（`#![forbid(unsafe_code)]`）** で実装したマルチ OS 対応の AI デスクトップマスコット基盤（ベースウェア）である。
+macOS・Windows・Linux 環境において、外部ランタイムの導入や OS ネイティブハンドルの `unsafe` 呼び出しを一切行わず、単一ネイティブバイナリとして動作する。
+
+### 主な特徴
+
+| 領域 | 仕様・実装内容 |
+| :--- | :--- |
+| **Zero `unsafe` ネイティブ GUI と作業領域接地** | `winit 0.30` + `wgpu 24` 透過アルファ合成と `cosmic-text 0.12` CJK 文字描画を採用している。`display.scale` に基づく HiDPI（`@2x`）高精細表示、`Window::set_cursor_hittest` による透過領域クリック透過、OS 別 UI 領域（macOS メニューバー／Dock、Windows タスクバー、X11／Wayland `_NET_WORKAREA`）の自動認識と足元の自動接地、50ms カーソル監視による非アクティブ時の頭なで検知・SERIKO 連続アニメ、日・英・韓 IME 対応対話欄（`Communicate`）およびトレイ統合（`tray-icon`）を備える。 |
+| **厳格なスコープ分離（`\0` / `\1`）** | Sakura Script の `\0`（メイン側）と `\1`（パートナー側）のサーフェス解決および会話履歴を完全に分離し、表示混線を防ぐ。既存の伺か `.nar` / `.zip` アーカイブのドラッグ＆ドロップおよびメニュー導入に対応する（`.png` / `.pna` / Shift-JIS `descript.txt`・`surfaces.txt` 互換）。 |
+| **クリーンな資産分離（`MIT` + `CC0-1.0`）** | 同梱の既定スキン（`neo_default`、`clean_default`）は本プロジェクトで独自制作した **CC0-1.0** パブリックドメイン資産のみを含む。`\0`（青白基調の未来風全身ブーツ `@2x`）、`\1`（小さな丸眼鏡を鼻先に掛けて両目が上から見えるパートナー＋ハイトップ靴 `@2x`）、半透明パール調グラス吹き出し（`@2x`）で構成する。個人所有のクラシックシェル／バルーンは各 OS のユーザー領域から自動読み込みする。 |
+| **マルチ AI 接続 & SSTP/HTTP 二重サーバー** | ローカル・リモート Ollama（`gemma4` 等）、Gemini CLI/API、Claude CLI/API、ChatGPT Codex、OpenAI 互換先に対応し、中国製 LLM 遮断保護を内蔵する。HTTP JSON（`127.0.0.1:9821`）とクラシック `SSTP/1.4` TCP（`127.0.0.1:9801`）を同時提供する。 |
+
+### ユーザースキン（`.nar`）保存先
+
+外部配布 `.nar` / `.zip` スキンをアプリ画面へドラッグ＆ドロップすると、下記ディレクトリへ自動配置される。
+
+| OS | ユーザーデータディレクトリ |
 | :--- | :--- |
 | macOS | `~/Library/Application Support/NanikaAi/` |
 | Windows | `%APPDATA%\NanikaAi\` |
-| Linux | `$XDG_CONFIG_HOME/nanikaai/` (기본 `~/.config/nanikaai/`) |
+| Linux | `$XDG_CONFIG_HOME/nanikaai/`（既定 `~/.config/nanikaai/`） |
 
-## 빌드 및 실행 방법
+### ビルドおよび起動方法
 
-### 공통 사전 요구사항
-- Rust 툴체인 (`cargo`, `rustc` 1.80+)
-- Linux 빌드 시 X11/Wayland/GTK 트레이 개발 헤더 (`libgtk-3-dev`, `libxdo-dev` 등 배포판 패키지)
+#### 前提条件
 
-### macOS (`.app` 번들 생성)
+- Rust ツールチェーン（`cargo`, `rustc` 1.80+）
+- Linux ビルド時は X11/Wayland/GTK トレイ開発パッケージ（`libgtk-3-dev`, `libxdo-dev` 等）
+
+#### OS 別ビルド・実行
 
 ```bash
+# macOS（.app バンドル作成と起動）
 bash scripts/build_macos.sh
 open "dist/NanikaAi.app"
-```
 
-### Linux
-
-```bash
+# Linux
 bash scripts/build_linux.sh
 ./dist/nanikaai-linux/nanikaai
 ```
 
-### Windows
-
 ```bat
+REM Windows
 scripts\build_windows.bat
 dist\NanikaAi-win64\nanikaai.exe
 ```
 
-### 스모크 테스트 실행
+#### 単体テストおよびスモーク検証
 
 ```bash
 cargo test
 cargo run --release -- --smoke-test
 ```
 
-## HTTP / SSTP 연동 API
+### HTTP / SSTP 連携 API
 
-- 상태 확인: `GET http://127.0.0.1:9821/api/health`
-- AI 대화 요청: `POST http://127.0.0.1:9821/api/chat` (`{"message": "오늘 날씨 어때?"}`)
-- 사쿠라 스크립트 발화: `POST http://127.0.0.1:9821/api/speak` (`{"script": "\\0\\s[5]안녕!\\1\\s[10]반가워!\\e"}`)
-- 스킨 전환: `POST http://127.0.0.1:9821/api/skin` (`{"shell": "neo_default", "balloon": "clean_default"}`)
-- 스킨/프로바이더 목록: `GET http://127.0.0.1:9821/api/skins`, `GET http://127.0.0.1:9821/api/providers`
-- 클래식 TCP `SSTP/1.4`: `127.0.0.1:9801`
+| 機能 | 接続先 / メソッド | リクエスト例 |
+| :--- | :--- | :--- |
+| 稼働確認 | `GET http://127.0.0.1:9821/api/health` | `curl -s http://127.0.0.1:9821/api/health` |
+| AI 対話実行 | `POST http://127.0.0.1:9821/api/chat` | `{"message": "今日の天気はどう？"}` |
+| スクリプト発話 | `POST http://127.0.0.1:9821/api/speak` | `{"script": "\\0\\s[5]こんにちは！\\1\\s[10]よろしくな！\\e"}` |
+| スキン切替 | `POST http://127.0.0.1:9821/api/skin` | `{"shell": "neo_default", "balloon": "clean_default"}` |
+| 一覧取得 | `GET http://127.0.0.1:9821/api/skins` / `/api/providers` | `curl -s http://127.0.0.1:9821/api/providers` |
+| クラシック `SSTP/1.4` | TCP `127.0.0.1:9801` | `SEND SSTP/1.4`（`Charset: UTF-8`, `Script: ...`） |
 
-## 라이선스
+### ライセンス
 
-- 소스 코드: [MIT License](LICENSE)
-- 기본 번들 스킨(`assets/shells/neo_default`, `assets/balloons/clean_default`): CC0-1.0
+- ソースコード: [MIT License](LICENSE)
+- 同梱既定スキン（`CC0-1.0`）: [neo_default](assets/shells/neo_default/LICENSE-CC0.txt)、[clean_default](assets/balloons/clean_default/LICENSE-CC0.txt)
+
+---
+
+<a id="english"></a>
+
+## English (Default)
+
+### Origin of the Name
+
+Named **`何か藍 (NanikaAi)`** by combining **`何か (Nanika)`** — the predecessor name of the classic desktop mascot culture *Ukagaka* (`伺か`) — with the signature indigo-blue theme **`藍 (Ai)`**, echoing both **AI** and affection (**`愛 / Ai`**) for the original culture.
+
+### Overview
+
+A **100% Safe Rust (`#![forbid(unsafe_code)]`)** cross-platform AI desktop mascot baseware.
+It compiles into a single native binary for macOS, Windows, and Linux without external runtime dependencies or any `unsafe` OS handle calls.
+
+### Key Features
+
+| Area | Capabilities |
+| :--- | :--- |
+| **Zero `unsafe` Native GUI & Ground Snapping** | Built on `winit 0.30` + `wgpu 24` transparent compositing and `cosmic-text 0.12` CJK text shaping. Supports `display.scale` HiDPI (`@2x`) rendering, `Window::set_cursor_hittest` transparent click-through, automatic OS work-area inset detection (macOS menu bar/Dock, Windows taskbar, X11/Wayland `_NET_WORKAREA`) with foot-level ground snapping, 50 ms cursor polling for wobble-tolerant head stroking and SERIKO animations, multilingual IME input (`Communicate`), and system tray integration (`tray-icon`). |
+| **Strict Character Scope Isolation (`\0` / `\1`)** | Strictly isolates Sakura Script `\0` (main character) and `\1` (partner character) surface resolution and dialogue history to prevent cross-character mix-ups. Supports drag-and-drop and menu installation of classic `.nar` / `.zip` packages (`.png` / `.pna` / Shift-JIS `descript.txt` & `surfaces.txt`). |
+| **Clean Open-Source Asset Separation (`MIT` + `CC0-1.0`)** | Bundled default skins (`neo_default`, `clean_default`) contain only original **CC0-1.0** public-domain assets created for this project: Sakura (`\0`) in a blue-and-white futuristic full-body outfit with boots (`@2x`), Unyu (`\1`) wearing small round sunglasses perched low on the nose so both eyes remain visible above plus high-top sneakers (`@2x`), and a translucent pearl glassmorphism balloon (`@2x`). Classic personal shells load automatically from the OS user data directory. |
+| **Multi-AI Backends & Dual SSTP/HTTP Server** | Connects to local/remote Ollama (`gemma4`, etc.), Gemini CLI/API, Claude CLI/API, ChatGPT Codex, and OpenAI-compatible endpoints with a built-in guard blocking restricted models. Exposes both HTTP JSON (`127.0.0.1:9821`) and classic `SSTP/1.4` TCP (`127.0.0.1:9801`). |
+
+### User Skin (`.nar`) Data Directories
+
+Drag and drop `.nar` or `.zip` skin archives onto the character window to install them into the OS-specific directory below.
+
+| Operating System | User Data Directory |
+| :--- | :--- |
+| macOS | `~/Library/Application Support/NanikaAi/` |
+| Windows | `%APPDATA%\NanikaAi\` |
+| Linux | `$XDG_CONFIG_HOME/nanikaai/` (default `~/.config/nanikaai/`) |
+
+### Build & Run
+
+#### Prerequisites
+
+- Rust toolchain (`cargo`, `rustc` 1.80+)
+- On Linux: X11/Wayland/GTK tray development headers (`libgtk-3-dev`, `libxdo-dev`, etc.)
+
+#### Platform Builds
+
+```bash
+# macOS (.app bundle)
+bash scripts/build_macos.sh
+open "dist/NanikaAi.app"
+
+# Linux
+bash scripts/build_linux.sh
+./dist/nanikaai-linux/nanikaai
+```
+
+```bat
+REM Windows
+scripts\build_windows.bat
+dist\NanikaAi-win64\nanikaai.exe
+```
+
+#### Tests & Smoke Verification
+
+```bash
+cargo test
+cargo run --release -- --smoke-test
+```
+
+### HTTP / SSTP Integration API
+
+| Action | Endpoint / Protocol | Example Payload / Command |
+| :--- | :--- | :--- |
+| Health check | `GET http://127.0.0.1:9821/api/health` | `curl -s http://127.0.0.1:9821/api/health` |
+| AI chat | `POST http://127.0.0.1:9821/api/chat` | `{"message": "How is the weather today?"}` |
+| Speak Sakura Script | `POST http://127.0.0.1:9821/api/speak` | `{"script": "\\0\\s[5]Hello!\\1\\s[10]Nice to meet you!\\e"}` |
+| Switch skin | `POST http://127.0.0.1:9821/api/skin` | `{"shell": "neo_default", "balloon": "clean_default"}` |
+| List skins / providers | `GET http://127.0.0.1:9821/api/skins` / `/api/providers` | `curl -s http://127.0.0.1:9821/api/providers` |
+| Classic TCP `SSTP/1.4` | `127.0.0.1:9801` | `SEND SSTP/1.4` (`Charset: UTF-8`, `Script: ...`) |
+
+### License
+
+- Source Code: [MIT License](LICENSE)
+- Bundled Default Skins (`CC0-1.0`): [neo_default](assets/shells/neo_default/LICENSE-CC0.txt), [clean_default](assets/balloons/clean_default/LICENSE-CC0.txt)
+
+---
+
+<details>
+<summary>🇰🇷 한국어 안내 (Optional Korean Documentation)</summary>
+
+- **100% Safe Rust (`#![forbid(unsafe_code)]`)** 기반 크로스플랫폼 AI 데스크톱 마스코트 베이스웨어(macOS / Windows / Linux 단일 네이티브 바이너리)이다.
+- **엄격한 `\0`/`\1` 스코프 분리** 및 기존 `.nar`/`.zip`·Shift-JIS 호환과 **CC0-1.0 `@2x` HiDPI 기본 스킨(`neo_default`, `clean_default`)**을 제공한다.
+- **멀티 AI 백엔드**(Ollama, Gemini, Claude, Codex, OpenAI 호환) 및 **HTTP JSON (`127.0.0.1:9821`) + 클래식 `SSTP/1.4` (`127.0.0.1:9801`)** 듀얼 서버를 지원한다.
+- 전체 한국어 안내 및 빌드·API 사용법은 **[README.ko.md](README.ko.md)** 에서 확인할 수 있다.
+
+</details>

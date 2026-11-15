@@ -1,9 +1,11 @@
 [package]
 name = "nanikaai"
-version = "1.2.0"
+version = "1.2.1"
 edition = "2021"
 license = "MIT"
-description = "何か藍 (NanikaAi) — Cross-platform Pure Safe Rust AI desktop mascot baseware (macOS, Windows, Linux)"
+readme = "README.md"
+repository = "https://github.com/JungWonYong/nanikaai"
+description = "何か藍 (NanikaAi) — 100% Safe Rust製のAIデスクトップマスコット基盤 / Cross-Platform Safe Rust AI Desktop Mascot Baseware"
 
 [dependencies]
 winit = "0.30"
