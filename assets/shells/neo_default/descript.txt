@@ -1,8 +1,8 @@
 charset,UTF-8
 type,shell
 name,Neo Sakura & Unyu (CC0 Default)
-sakura.name,사쿠라
-kero.name,우뉴
+sakura.name,さくら · Sakura
+kero.name,うにゅう · Unyu
 display.scale,2
 sakura.balloon.offsetx,38
 sakura.balloon.offsety,68

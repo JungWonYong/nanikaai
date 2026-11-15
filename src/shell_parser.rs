@@ -211,6 +211,341 @@ impl RgbaBitmap {
         }
     }
 
+    fn set_pixel(&mut self, x: i32, y: i32, r: u8, g: u8, b: u8, a: u8) {
+        if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+            return;
+        }
+        let didx = ((y as u32 * self.width + x as u32) * 4) as usize;
+        self.data[didx] = r;
+        self.data[didx + 1] = g;
+        self.data[didx + 2] = b;
+        self.data[didx + 3] = a;
+    }
+
+    /// Evaluates the signed distance to an axis-aligned rounded rectangle.
+    fn sdf_rounded_rect(px: f32, py: f32, x0: f32, y0: f32, x1: f32, y1: f32, radius: f32) -> f32 {
+        let hx_full = ((x1 - x0) * 0.5).max(0.5);
+        let hy_full = ((y1 - y0) * 0.5).max(0.5);
+        let r = radius.clamp(0.0, hx_full.min(hy_full));
+        let cx = (x0 + x1) * 0.5;
+        let cy = (y0 + y1) * 0.5;
+        let qx = (px - cx).abs() - (hx_full - r);
+        let qy = (py - cy).abs() - (hy_full - r);
+        let out_dist = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt();
+        let in_dist = qx.max(qy).min(0.0);
+        out_dist + in_dist - r
+    }
+
+    fn lerp_rgba(a: [u8; 4], b: [u8; 4], t: f32) -> [u8; 4] {
+        let u = t.clamp(0.0, 1.0);
+        let mix = |ca: u8, cb: u8| -> u8 {
+            ((ca as f32) + ((cb as f32) - (ca as f32)) * u)
+                .round()
+                .clamp(0.0, 255.0) as u8
+        };
+        [mix(a[0], b[0]), mix(a[1], b[1]), mix(a[2], b[2]), mix(a[3], b[3])]
+    }
+
+    /// Draws an anti-aliased rounded glass box with vertical fill gradient, gradient border, shadow/glow, and inner specular rim.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_aa_rounded_box(
+        &mut self,
+        rect: (f32, f32, f32, f32),
+        radius: f32,
+        top_rgba: [u8; 4],
+        bot_rgba: [u8; 4],
+        border_w: f32,
+        border_l_rgba: [u8; 4],
+        border_r_rgba: [u8; 4],
+        shadow_blur: f32,
+        shadow_off_y: f32,
+        shadow_rgba: [u8; 4],
+        inner_hi_alpha: u8,
+    ) {
+        let (x0, y0, x1, y1) = rect;
+        let pad = shadow_blur.max(2.0) + shadow_off_y.abs() + 2.0;
+        let min_x = ((x0 - pad).floor() as i32).max(0);
+        let min_y = ((y0 - pad).floor() as i32).max(0);
+        let max_x = ((x1 + pad).ceil() as i32).min(self.width as i32);
+        let max_y = ((y1 + pad).ceil() as i32).min(self.height as i32);
+        let inv_w = 1.0 / (x1 - x0).max(1.0);
+        let inv_h = 1.0 / (y1 - y0).max(1.0);
+
+        for py in min_y..max_y {
+            let cy = py as f32 + 0.5;
+            let ty = ((cy - y0) * inv_h).clamp(0.0, 1.0);
+            let fill_c = Self::lerp_rgba(top_rgba, bot_rgba, ty);
+            for px in min_x..max_x {
+                let cx = px as f32 + 0.5;
+                let sd = Self::sdf_rounded_rect(cx, cy, x0, y0, x1, y1, radius);
+                let card_cov = (0.5 - sd).clamp(0.0, 1.0);
+
+                if shadow_blur > 0.1 && shadow_rgba[3] > 0 && card_cov < 1.0 {
+                    let sd_sh = Self::sdf_rounded_rect(
+                        cx,
+                        cy - shadow_off_y,
+                        x0,
+                        y0,
+                        x1,
+                        y1,
+                        radius,
+                    );
+                    if sd_sh < shadow_blur {
+                        let t = (1.0 - (sd_sh.max(0.0) / shadow_blur)).clamp(0.0, 1.0);
+                        let sa = ((t * t * (shadow_rgba[3] as f32) * (1.0 - card_cov)).round())
+                            .clamp(0.0, 255.0) as u8;
+                        if sa > 0 {
+                            self.blend_pixel(px, py, shadow_rgba[0], shadow_rgba[1], shadow_rgba[2], sa);
+                        }
+                    }
+                }
+
+                if card_cov <= 0.0 {
+                    continue;
+                }
+                let fa = ((fill_c[3] as f32) * card_cov).round().clamp(0.0, 255.0) as u8;
+                if fa > 0 {
+                    self.blend_pixel(px, py, fill_c[0], fill_c[1], fill_c[2], fa);
+                }
+
+                let inner_sd = sd + border_w.max(0.0);
+                if inner_hi_alpha > 0 && inner_sd <= 0.0 && inner_sd >= -2.4 {
+                    let rim = (1.0 - ((-inner_sd) / 2.4)).clamp(0.0, 1.0);
+                    let top_fade = (1.0 - ty * 1.45).clamp(0.0, 1.0);
+                    let ha = ((inner_hi_alpha as f32) * rim * top_fade).round().clamp(0.0, 255.0) as u8;
+                    if ha > 0 {
+                        self.blend_pixel(px, py, 255, 255, 255, ha);
+                    }
+                }
+
+                if border_w > 0.0 {
+                    let inside_cov = (0.5 - inner_sd).clamp(0.0, 1.0);
+                    let border_cov = (card_cov - inside_cov).clamp(0.0, 1.0);
+                    if border_cov > 0.0 {
+                        let tx = ((cx - x0) * inv_w).clamp(0.0, 1.0);
+                        let bc = Self::lerp_rgba(border_l_rgba, border_r_rgba, tx * 0.72 + ty * 0.28);
+                        let ba = ((bc[3] as f32) * border_cov).round().clamp(0.0, 255.0) as u8;
+                        if ba > 0 {
+                            self.blend_pixel(px, py, bc[0], bc[1], bc[2], ba);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn dist_to_segment(px: f32, py: f32, x0: f32, y0: f32, x1: f32, y1: f32) -> f32 {
+        let dx = x1 - x0;
+        let dy = y1 - y0;
+        let len_sq = dx * dx + dy * dy;
+        if len_sq <= 1e-6 {
+            return ((px - x0).powi(2) + (py - y0).powi(2)).sqrt();
+        }
+        let t = (((px - x0) * dx + (py - y0) * dy) / len_sq).clamp(0.0, 1.0);
+        let proj_x = x0 + dx * t;
+        let proj_y = y0 + dy * t;
+        ((px - proj_x).powi(2) + (py - proj_y).powi(2)).sqrt()
+    }
+
+    /// Draws an anti-aliased triangular speech-balloon pointer seamlessly fused into the card edge.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_aa_tail_pointer(
+        &mut self,
+        card_rect: (f32, f32, f32, f32),
+        side_right_edge: bool,
+        tip_y: f32,
+        tail_w: f32,
+        tail_half_h: f32,
+        fill_rgba: [u8; 4],
+        border_w: f32,
+        border_rgba: [u8; 4],
+    ) {
+        let (x0, _y0, x1, _y1) = card_rect;
+        let base_x = if side_right_edge { x1 } else { x0 };
+        let inner_x = if side_right_edge {
+            x1 - border_w - 1.5
+        } else {
+            x0 + border_w + 1.5
+        };
+        let tip_x = if side_right_edge {
+            x1 + tail_w
+        } else {
+            x0 - tail_w
+        };
+        let top_y = tip_y - tail_half_h;
+        let bot_y = tip_y + tail_half_h;
+
+        let min_x = (base_x.min(tip_x).min(inner_x).floor() as i32 - 2).max(0);
+        let max_x = (base_x.max(tip_x).max(inner_x).ceil() as i32 + 2).min(self.width as i32);
+        let min_y = ((top_y - border_w).floor() as i32 - 2).max(0);
+        let max_y = ((bot_y + border_w).ceil() as i32 + 2).min(self.height as i32);
+
+        let min_span = tail_w.max(1.0);
+        for py in min_y..max_y {
+            let cy = py as f32 + 0.5;
+            for px in min_x..max_x {
+                let cx = px as f32 + 0.5;
+                let span_from_base = if side_right_edge {
+                    cx - base_x
+                } else {
+                    base_x - cx
+                };
+                if span_from_base < -(border_w + 2.6) || span_from_base > tail_w + 1.0 {
+                    continue;
+                }
+                let t = (span_from_base.max(0.0) / min_span).clamp(0.0, 1.0);
+                let allowed_half_h = tail_half_h * (1.0 - t);
+                let dy = (cy - tip_y).abs();
+                if span_from_base < 0.0 {
+                    // Seamlessly open the card border across the tail mouth without double-darkening fill
+                    if dy <= (tail_half_h - border_w * 0.65).max(1.0) {
+                        self.set_pixel(px, py, fill_rgba[0], fill_rgba[1], fill_rgba[2], fill_rgba[3]);
+                    }
+                    continue;
+                }
+                let d_edge = Self::dist_to_segment(cx, cy, base_x, top_y, tip_x, tip_y)
+                    .min(Self::dist_to_segment(cx, cy, tip_x, tip_y, base_x, bot_y));
+                let inside = dy <= allowed_half_h;
+                let fill_cov = if inside {
+                    1.0
+                } else {
+                    (0.5 - (dy - allowed_half_h)).clamp(0.0, 1.0)
+                };
+                if fill_cov > 0.0 {
+                    let fa = ((fill_rgba[3] as f32) * fill_cov).round().clamp(0.0, 255.0) as u8;
+                    self.blend_pixel(px, py, fill_rgba[0], fill_rgba[1], fill_rgba[2], fa);
+                }
+                if border_w > 0.0 && d_edge <= border_w + 0.5 {
+                    let bcov = (border_w + 0.5 - d_edge).clamp(0.0, 1.0);
+                    let ba = ((border_rgba[3] as f32) * bcov).round().clamp(0.0, 255.0) as u8;
+                    if ba > 0 {
+                        self.blend_pixel(px, py, border_rgba[0], border_rgba[1], border_rgba[2], ba);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Draws an anti-aliased radially shaded circle.
+    pub fn draw_aa_circle(
+        &mut self,
+        cx: f32,
+        cy: f32,
+        radius: f32,
+        inner_rgba: [u8; 4],
+        outer_rgba: [u8; 4],
+    ) {
+        if radius <= 0.1 {
+            return;
+        }
+        let min_x = ((cx - radius - 1.5).floor() as i32).max(0);
+        let max_x = ((cx + radius + 1.5).ceil() as i32).min(self.width as i32);
+        let min_y = ((cy - radius - 1.5).floor() as i32).max(0);
+        let max_y = ((cy + radius + 1.5).ceil() as i32).min(self.height as i32);
+        for py in min_y..max_y {
+            let y = py as f32 + 0.5;
+            for px in min_x..max_x {
+                let x = px as f32 + 0.5;
+                let d = ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
+                let cov = (radius + 0.5 - d).clamp(0.0, 1.0);
+                if cov <= 0.0 {
+                    continue;
+                }
+                let col = Self::lerp_rgba(inner_rgba, outer_rgba, (d / radius).clamp(0.0, 1.0));
+                let a = ((col[3] as f32) * cov).round().clamp(0.0, 255.0) as u8;
+                if a > 0 {
+                    self.blend_pixel(px, py, col[0], col[1], col[2], a);
+                }
+            }
+        }
+    }
+
+    /// Draws an anti-aliased line segment with rounded caps.
+    pub fn draw_aa_segment(
+        &mut self,
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+        thickness: f32,
+        rgba: [u8; 4],
+    ) {
+        let half_t = (thickness * 0.5).max(0.4);
+        let pad = half_t + 1.5;
+        let min_x = ((x0.min(x1) - pad).floor() as i32).max(0);
+        let max_x = ((x0.max(x1) + pad).ceil() as i32).min(self.width as i32);
+        let min_y = ((y0.min(y1) - pad).floor() as i32).max(0);
+        let max_y = ((y0.max(y1) + pad).ceil() as i32).min(self.height as i32);
+        for py in min_y..max_y {
+            let y = py as f32 + 0.5;
+            for px in min_x..max_x {
+                let x = px as f32 + 0.5;
+                let d = Self::dist_to_segment(x, y, x0, y0, x1, y1);
+                let cov = (half_t + 0.5 - d).clamp(0.0, 1.0);
+                if cov > 0.0 {
+                    let a = ((rgba[3] as f32) * cov).round().clamp(0.0, 255.0) as u8;
+                    if a > 0 {
+                        self.blend_pixel(px, py, rgba[0], rgba[1], rgba[2], a);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Scales horizontally to `new_w` while vertically preserving top/bottom caps via 3-slice scaling.
+    pub fn resized_three_slice_v(&self, new_w: u32, new_h: u32, cap_ratio: f32) -> Self {
+        let nw = new_w.max(1);
+        let nh = new_h.max(1);
+        let horiz = self.resized(nw, self.height);
+        if nh == horiz.height || horiz.height < 12 || nh < 12 {
+            return horiz.resized(nw, nh);
+        }
+        let max_cap = (horiz.height / 2 - 2).min(nh / 2);
+        let cap = ((horiz.height as f32) * cap_ratio.clamp(0.05, 0.42))
+            .round()
+            .max(2.0) as u32;
+        let cap = cap.min(max_cap);
+        if cap < 2 {
+            return horiz.resized(nw, nh);
+        }
+        let Some(img) = image::RgbaImage::from_raw(horiz.width, horiz.height, horiz.data.clone()) else {
+            return horiz.resized(nw, nh);
+        };
+        let top_view = image::imageops::crop_imm(&img, 0, 0, nw, cap).to_image();
+        let bot_view = image::imageops::crop_imm(&img, 0, horiz.height - cap, nw, cap).to_image();
+        let src_mid_h = horiz.height - cap * 2;
+        let dst_mid_h = nh.saturating_sub(cap * 2);
+
+        let mut out = Self::new_transparent(nw, nh);
+        let row_bytes = (nw as usize) * 4;
+        for y in 0..cap {
+            let s0 = (y as usize) * row_bytes;
+            let d0 = (y as usize) * row_bytes;
+            out.data[d0..d0 + row_bytes].copy_from_slice(&top_view.as_raw()[s0..s0 + row_bytes]);
+        }
+        if dst_mid_h > 0 && src_mid_h > 0 {
+            let mid_view = image::imageops::crop_imm(&img, 0, cap, nw, src_mid_h).to_image();
+            let mid_scaled = image::imageops::resize(
+                &mid_view,
+                nw,
+                dst_mid_h,
+                image::imageops::FilterType::CatmullRom,
+            );
+            for y in 0..dst_mid_h {
+                let s0 = (y as usize) * row_bytes;
+                let d0 = ((cap + y) as usize) * row_bytes;
+                out.data[d0..d0 + row_bytes].copy_from_slice(&mid_scaled.as_raw()[s0..s0 + row_bytes]);
+            }
+        }
+        let bot_dst_y = nh - cap;
+        for y in 0..cap {
+            let s0 = (y as usize) * row_bytes;
+            let d0 = ((bot_dst_y + y) as usize) * row_bytes;
+            out.data[d0..d0 + row_bytes].copy_from_slice(&bot_view.as_raw()[s0..s0 + row_bytes]);
+        }
+        out
+    }
+
     pub fn save_png(&self, path: &Path) -> Result<(), String> {
         let img = image::RgbaImage::from_raw(self.width, self.height, self.data.clone())
             .ok_or_else(|| "Invalid RGBA buffer dimensions".to_string())?;
@@ -2121,5 +2456,42 @@ mod tests {
                 "surface {sid} blink presence mismatch (expected {expect_blink})"
             );
         }
+    }
+
+    #[test]
+    fn sdf_primitives_and_three_slice_resize_render_cleanly() {
+        let mut bmp = RgbaBitmap::new_transparent(120, 80);
+        bmp.draw_aa_rounded_box(
+            (8.0, 8.0, 102.0, 72.0),
+            12.0,
+            [248, 251, 255, 245],
+            [236, 244, 255, 245],
+            2.0,
+            [110, 148, 220, 235],
+            [59, 130, 246, 235],
+            6.0,
+            2.0,
+            [20, 40, 80, 90],
+            120,
+        );
+        bmp.draw_aa_tail_pointer(
+            (8.0, 8.0, 102.0, 72.0),
+            true,
+            34.0,
+            12.0,
+            7.0,
+            [242, 247, 255, 245],
+            2.0,
+            [80, 140, 230, 235],
+        );
+        bmp.draw_aa_circle(24.0, 24.0, 6.0, [147, 197, 253, 255], [37, 99, 235, 255]);
+        bmp.draw_aa_segment(84.0, 20.0, 92.0, 28.0, 2.0, [255, 255, 255, 255]);
+        assert!(bmp.count_opaque_pixels() > 4500);
+        // Pointer tip outside box x=102..112 should now contain opaque pixels
+        assert!(bmp.is_opaque_at(107, 34), "tail pointer interior should be filled");
+
+        let stretched = bmp.resized_three_slice_v(120, 160, 0.25);
+        assert_eq!((stretched.width, stretched.height), (120, 160));
+        assert!(stretched.count_opaque_pixels() > 8000);
     }
 }

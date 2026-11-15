@@ -208,8 +208,38 @@ fn more_dialogue_re() -> &'static Regex {
     })
 }
 
+fn byte_fallback_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(?:<0x[0-9A-Fa-f]{2}>)+").unwrap())
+}
+
+/// Decodes contiguous SentencePiece/LLM `<0xHH>` byte-fallback tokens into UTF-8 text.
+pub fn decode_byte_fallback_tokens(raw: &str) -> String {
+    if !raw.contains("<0x") {
+        return raw.to_string();
+    }
+    byte_fallback_re()
+        .replace_all(raw, |caps: &regex::Captures| {
+            let m = &caps[0];
+            let mut bytes = Vec::with_capacity(m.len() / 6);
+            for chunk in m.as_bytes().chunks_exact(6) {
+                if let Ok(hex) = std::str::from_utf8(&chunk[3..5]) {
+                    if let Ok(b) = u8::from_str_radix(hex, 16) {
+                        bytes.push(b);
+                    }
+                }
+            }
+            String::from_utf8_lossy(&bytes)
+                .chars()
+                .filter(|&c| !c.is_control() || matches!(c, '\n' | '\r' | '\t'))
+                .collect::<String>()
+        })
+        .into_owned()
+}
+
 pub fn strip_reasoning_blocks(raw: &str) -> String {
-    let pass1 = think_complete_re().replace_all(raw, "");
+    let decoded = decode_byte_fallback_tokens(raw);
+    let pass1 = think_complete_re().replace_all(&decoded, "");
     let pass2 = think_open_re().replace_all(&pass1, "");
     pass2.trim().to_string()
 }
@@ -438,5 +468,19 @@ mod tests {
         assert!(acts.iter().any(|a| a.kind == ActionKind::Text && a.scope == Scope::Sakura && a.text.contains("안녕!")));
         assert!(acts.iter().any(|a| a.kind == ActionKind::Surface && a.scope == Scope::Kero && a.surface_id == 10));
         assert!(acts.iter().any(|a| a.kind == ActionKind::Choice && a.label == "날씨" && a.choice_id == "weather"));
+    }
+
+    #[test]
+    fn decodes_gemma_byte_fallback_tokens_cleanly() {
+        let raw = "\\1\\s[10]よし、仕事せんとな！<0xE3><0x80><0x80>何か手伝うことある？<0xF0><0x9F><0x98><0x8A>\\e";
+        let acts = parse_dialogue(raw);
+        let kero_text: String = acts
+            .iter()
+            .filter(|a| a.kind == ActionKind::Text && a.scope == Scope::Kero)
+            .map(|a| a.text.as_str())
+            .collect();
+        assert!(!kero_text.contains("<0x"), "raw byte token leaked: {kero_text}");
+        assert!(kero_text.contains('\u{3000}'), "expected fullwidth space in {kero_text}");
+        assert!(kero_text.contains('😊'), "expected UTF-8 emoji in {kero_text}");
     }
 }

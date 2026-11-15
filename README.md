@@ -1,4 +1,4 @@
-# 何か藍 — NanikaAi (`nanikaai` `v1.2.3`)
+# 何か藍 — NanikaAi (`nanikaai` `v1.3.0`)
 
 > 🌐 **Language**: **[日本語 (Default)](#日本語)** | **[English (Default)](#english)** | **[한국어 (Optional)](README.ko.md)**
 
@@ -21,7 +21,7 @@ macOS・Windows・Linux 環境において、外部ランタイムの導入や O
 
 | 領域 | 仕様・実装内容 |
 | :--- | :--- |
-| **Zero `unsafe` ネイティブ GUI・Live2D 2.5D モーション** | `winit 0.30` + `wgpu 24` 透過アルファ合成（WGSL 2.5D 変形シェーダーによる呼吸・揺らぎ・カーソル視線追従・撫で/クリック弾性バウンス・発話時の揺れ＋全表情 SERIKO まばたき・リップシンクを備え、RGB 色調は完全保持・メニューで切替可）と `cosmic-text 0.12` CJK 文字描画を採用している。`display.scale` 基準の HiDPI（`@2x`）表示、透過領域クリック透過、OS 別 UI 領域（macOS メニューバー／Dock、Windows タスクバー、X11／Wayland `_NET_WORKAREA`）の自動接地、33ms カーソル監視、日・英・韓 IME 対話欄（`Communicate`）およびトレイ統合を備える。 |
+| **Zero `unsafe` ネイティブ GUI・階層 Live2D リグ & Siri 風入力** | `winit 0.30` + `wgpu 24` 透過アルファ合成（足元完全固定・胸部呼吸・首支点アスペクト補正・2.5D 顔輪郭視差・髪/アホ毛/スカートの減衰バネ物理を備えた WGSL 階層リグと `\1` 専用もちリグを搭載、RGB 色調完全保持・メニュー切替可）と `cosmic-text 0.12` CJK 文字描画を採用している。文字量連動で自動伸縮し上限超え時はマウスホイールで滑らかにスクロールできる吹き出し、サファイアブルー基調・点滅キャレット・IME 下線・送信/閉じるボタン付きの Siri 風 `Communicate` 入力バー（既定 UI 日・英表記）、OS 別ワークエリア自動接地、トレイ統合を備える。 |
 | **厳格なスコープ分離（`\0` / `\1`）** | Sakura Script の `\0`（メイン側）と `\1`（パートナー側）のサーフェス解決および会話履歴を完全に分離し、表示混線を防ぐ。既存の伺か `.nar` / `.zip` アーカイブのドラッグ＆ドロップおよびメニュー導入に対応する（`.png` / `.pna` / Shift-JIS `descript.txt`・`surfaces.txt` 互換）。 |
 | **クリーンな資産分離（`MIT` + `CC0-1.0`）** | 同梱の既定スキン（`neo_default`、`clean_default`）は本プロジェクトで独自制作した **CC0-1.0** パブリックドメイン資産のみを含む。`\0`（正統派萌えテイストの紺白リボン衣装＋全身ブーツ、`330x675 pt` `@2x`）、`\1`（鮮明なペリウィンクルブルー `#94A3FF` の丸もち体型と控えめな 2.5D 陰影・鼻先に小さく掛けた丸サングラスの上から両目が見えるデザイン `@2x`）、半透明パール調グラス吹き出し（`@2x`）で構成する。個人所有のクラシックシェル／バルーンは各 OS のユーザー領域から自動読み込みする。 |
 | **マルチ AI 接続 & SSTP/HTTP 二重サーバー** | ローカル・リモート Ollama（`gemma4` 等）、Gemini CLI/API、Claude CLI/API、ChatGPT Codex、OpenAI 互換先に対応し、中国製 LLM 遮断保護を内蔵する。HTTP JSON（`127.0.0.1:9821`）とクラシック `SSTP/1.4` TCP（`127.0.0.1:9801`）を同時提供する。 |
@@ -103,7 +103,7 @@ It compiles into a single native binary for macOS, Windows, and Linux without ex
 
 | Area | Capabilities |
 | :--- | :--- |
-| **Zero `unsafe` Native GUI, Live2D 2.5D Motion & Snapping** | Built on `winit 0.30` + `wgpu 24` transparent compositing (with a Safe Rust WGSL 2.5D deformation shader for breathing, sway, cursor gaze parallax, jelly squish bounce on pat/click, and speaking bob with all-expression SERIKO blinking and `talk` lip-sync — preserving exact RGB colors and menu-toggleable) and `cosmic-text 0.12` CJK shaping. Supports HiDPI (`@2x`), click-through, OS work-area ground snapping, 33 ms cursor polling, multilingual IME (`Communicate`), and `tray-icon`. |
+| **Zero `unsafe` Native GUI, Hierarchical Live2D Rig & Siri-Style Chat** | Built on `winit 0.30` + `wgpu 24` transparent compositing (Safe Rust WGSL hierarchical deformer rig with locked soles, localized chest breath, aspect-corrected neck pivot, 2.5D facial parallax, damped-spring hair/ahoge/cloth pendulums, plus a dedicated Mochi mesh for `\1` and all-expression SERIKO blink/`talk` lip-sync — preserving exact RGB colors and menu-toggleable) and `cosmic-text 0.12` CJK shaping. Features dynamically auto-sizing & scrollable speech balloons, a sapphire Siri-style `Communicate` glass bar with blinking caret, IME preedit underline, Send/Close buttons and Japanese/English default chrome, OS work-area snapping, and `tray-icon`. |
 | **Strict Character Scope Isolation (`\0` / `\1`)** | Strictly isolates Sakura Script `\0` (main character) and `\1` (partner character) surface resolution and dialogue history to prevent cross-character mix-ups. Supports drag-and-drop and menu installation of classic `.nar` / `.zip` packages (`.png` / `.pna` / Shift-JIS `descript.txt` & `surfaces.txt`). |
 | **Clean Open-Source Asset Separation (`MIT` + `CC0-1.0`)** | Bundled default skins (`neo_default`, `clean_default`) contain only original **CC0-1.0** public-domain assets created for this project: Sakura (`\0`) in a classic cute navy-and-white ribbon outfit with full-body boots (`330x675 pt` `@2x`), Unyu (`\1`) in vivid periwinkle blue (`#94A3FF`) with soft 2.5D shading, plump squishy paws, and small round sunglasses perched low on the nose with both eyes clearly visible above (`@2x`), plus a translucent pearl glassmorphism balloon (`@2x`). Classic personal shells load automatically from the OS user data directory. |
 | **Multi-AI Backends & Dual SSTP/HTTP Server** | Connects to local/remote Ollama (`gemma4`, etc.), Gemini CLI/API, Claude CLI/API, ChatGPT Codex, and OpenAI-compatible endpoints with a built-in guard blocking restricted models. Exposes both HTTP JSON (`127.0.0.1:9821`) and classic `SSTP/1.4` TCP (`127.0.0.1:9801`). |
@@ -172,7 +172,8 @@ cargo run --release -- --smoke-test
 <summary>🇰🇷 한국어 안내 (Optional Korean Documentation)</summary>
 
 - **100% Safe Rust (`#![forbid(unsafe_code)]`)** 기반 크로스플랫폼 AI 데스크톱 마스코트 베이스웨어(macOS / Windows / Linux 단일 네이티브 바이너리)이다.
-- `wgpu` WGSL 기반 **Live2D 스타일 2.5D GPU 모션**(원본 RGB 색상 무변경, 호흡·흔들림·시선 추적·쓰다듬기 탄성 바운스·SERIKO `talk` 립싱크, 메뉴 ON/OFF)과 **모에 사쿠라(`\0`) + 선명한 페리윙클 블루(`#94A3FF`) 말랑 우뉴(`\1`) `@2x` CC0-1.0 스킨**을 제공한다.
+- `wgpu` WGSL 기반 **계층형 Live2D 관절·감쇠 스프링 물리 리깅**(원본 RGB 색상 무변경, 발끝 고정·흉부 호흡·목 회전·시차·머리카락/바보털/치마 물리, SERIKO `talk` 립싱크)과 **모에 사쿠라(`\0`) + 선명한 페리윙클 블루(`#94A3FF`) 말랑 우뉴(`\1`) `@2x` 스킨**을 제공한다.
+- 내용에 따라 자동 신축·스크롤되는 **유리 글래스 말풍선**과 점멸 커서·IME 밑줄·닫기/전송 버튼이 포함된 **사파이어 블루 Siri 스타일 입력 바**(기본 UI 일/영 병기)를 탑재했다.
 - **엄격한 `\0`/`\1` 스코프 분리**, `.nar`/`.zip`·Shift-JIS 호환 및 **멀티 AI 백엔드 + HTTP JSON (`127.0.0.1:9821`) · 클래식 `SSTP/1.4` (`127.0.0.1:9801`)** 듀얼 서버를 지원한다.
 - 전체 한국어 안내 및 빌드·API 사용법은 **[README.ko.md](README.ko.md)** 에서 확인할 수 있다.
 

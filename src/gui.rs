@@ -42,16 +42,24 @@ const TYPEWRITER_INTERVAL_MS: u64 = 38;
 struct ShaderParams {
     premul: u32,
     live2d: u32,
-    pad0: u32,
+    rig_kind: u32,
     pad1: u32,
     breath: f32,
-    sway_x: f32,
-    tilt: f32,
+    angle_x: f32,
+    angle_y: f32,
+    angle_z: f32,
+    hair_swing_x: f32,
+    hair_swing_y: f32,
+    ahoge_swing: f32,
+    cloth_swing: f32,
+    body_sway: f32,
     squish: f32,
-    gaze_x: f32,
-    gaze_y: f32,
-    anchor_v: f32,
     talk_bob: f32,
+    top_v: f32,
+    anchor_v: f32,
+    center_u: f32,
+    aspect_hw: f32,
+    pad2: f32,
     extra: [f32; 4],
 }
 
@@ -60,39 +68,55 @@ impl ShaderParams {
         Self {
             premul,
             live2d: 0,
-            pad0: 0,
+            rig_kind: 0,
             pad1: 0,
             breath: 0.0,
-            sway_x: 0.0,
-            tilt: 0.0,
+            angle_x: 0.0,
+            angle_y: 0.0,
+            angle_z: 0.0,
+            hair_swing_x: 0.0,
+            hair_swing_y: 0.0,
+            ahoge_swing: 0.0,
+            cloth_swing: 0.0,
+            body_sway: 0.0,
             squish: 0.0,
-            gaze_x: 0.0,
-            gaze_y: 0.0,
-            anchor_v: 0.96,
             talk_bob: 0.0,
+            top_v: 0.02,
+            anchor_v: 0.96,
+            center_u: 0.50,
+            aspect_hw: 1.5,
+            pad2: 0.0,
             extra: [0.0; 4],
         }
     }
 }
 
-fn as_bytes_shader_params(p: &ShaderParams) -> [u8; 64] {
-    let mut out = [0u8; 64];
+fn as_bytes_shader_params(p: &ShaderParams) -> [u8; 96] {
+    let mut out = [0u8; 96];
     out[0..4].copy_from_slice(&p.premul.to_ne_bytes());
     out[4..8].copy_from_slice(&p.live2d.to_ne_bytes());
-    out[8..12].copy_from_slice(&p.pad0.to_ne_bytes());
+    out[8..12].copy_from_slice(&p.rig_kind.to_ne_bytes());
     out[12..16].copy_from_slice(&p.pad1.to_ne_bytes());
     out[16..20].copy_from_slice(&p.breath.to_ne_bytes());
-    out[20..24].copy_from_slice(&p.sway_x.to_ne_bytes());
-    out[24..28].copy_from_slice(&p.tilt.to_ne_bytes());
-    out[28..32].copy_from_slice(&p.squish.to_ne_bytes());
-    out[32..36].copy_from_slice(&p.gaze_x.to_ne_bytes());
-    out[36..40].copy_from_slice(&p.gaze_y.to_ne_bytes());
-    out[40..44].copy_from_slice(&p.anchor_v.to_ne_bytes());
-    out[44..48].copy_from_slice(&p.talk_bob.to_ne_bytes());
-    out[48..52].copy_from_slice(&p.extra[0].to_ne_bytes());
-    out[52..56].copy_from_slice(&p.extra[1].to_ne_bytes());
-    out[56..60].copy_from_slice(&p.extra[2].to_ne_bytes());
-    out[60..64].copy_from_slice(&p.extra[3].to_ne_bytes());
+    out[20..24].copy_from_slice(&p.angle_x.to_ne_bytes());
+    out[24..28].copy_from_slice(&p.angle_y.to_ne_bytes());
+    out[28..32].copy_from_slice(&p.angle_z.to_ne_bytes());
+    out[32..36].copy_from_slice(&p.hair_swing_x.to_ne_bytes());
+    out[36..40].copy_from_slice(&p.hair_swing_y.to_ne_bytes());
+    out[40..44].copy_from_slice(&p.ahoge_swing.to_ne_bytes());
+    out[44..48].copy_from_slice(&p.cloth_swing.to_ne_bytes());
+    out[48..52].copy_from_slice(&p.body_sway.to_ne_bytes());
+    out[52..56].copy_from_slice(&p.squish.to_ne_bytes());
+    out[56..60].copy_from_slice(&p.talk_bob.to_ne_bytes());
+    out[60..64].copy_from_slice(&p.top_v.to_ne_bytes());
+    out[64..68].copy_from_slice(&p.anchor_v.to_ne_bytes());
+    out[68..72].copy_from_slice(&p.center_u.to_ne_bytes());
+    out[72..76].copy_from_slice(&p.aspect_hw.to_ne_bytes());
+    out[76..80].copy_from_slice(&p.pad2.to_ne_bytes());
+    out[80..84].copy_from_slice(&p.extra[0].to_ne_bytes());
+    out[84..88].copy_from_slice(&p.extra[1].to_ne_bytes());
+    out[88..92].copy_from_slice(&p.extra[2].to_ne_bytes());
+    out[92..96].copy_from_slice(&p.extra[3].to_ne_bytes());
     out
 }
 
@@ -100,16 +124,24 @@ const QUAD_SHADER_WGSL: &str = r#"
 struct Params {
     premul: u32,
     live2d: u32,
-    pad0: u32,
+    rig_kind: u32,
     pad1: u32,
     breath: f32,
-    sway_x: f32,
-    tilt: f32,
+    angle_x: f32,
+    angle_y: f32,
+    angle_z: f32,
+    hair_swing_x: f32,
+    hair_swing_y: f32,
+    ahoge_swing: f32,
+    cloth_swing: f32,
+    body_sway: f32,
     squish: f32,
-    gaze_x: f32,
-    gaze_y: f32,
-    anchor_v: f32,
     talk_bob: f32,
+    top_v: f32,
+    anchor_v: f32,
+    center_u: f32,
+    aspect_hw: f32,
+    pad2: f32,
     extra: vec4<f32>,
 };
 
@@ -145,42 +177,144 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     var su = in.uv.x;
     var sv = in.uv.y;
     if (u_params.live2d != 0u) {
-        let av = max(u_params.anchor_v, 0.2);
-        let h = clamp((av - in.uv.y) / av, 0.0, 1.0);
-        let h2 = h * h;
-        let torso = sin(h * 3.14159265);
-        var p = vec2<f32>(in.uv.x - 0.5, in.uv.y - av);
+        let tv = clamp(u_params.top_v, 0.0, 0.35);
+        let av = clamp(u_params.anchor_v, 0.55, 0.995);
+        let span = max(av - tv, 0.25);
+        let yn = clamp((in.uv.y - tv) / span, 0.0, 1.0);
+        let cx = clamp(u_params.center_u, 0.32, 0.68);
+        let aspect = max(u_params.aspect_hw, 0.5);
+        let dx_raw = in.uv.x - cx;
+        let abs_dx = abs(dx_raw);
 
-        let ang = u_params.tilt * (0.30 + 0.70 * h) + u_params.gaze_x * 0.42 * h;
-        let ca = cos(ang);
-        let sa = sin(ang);
-        p = vec2<f32>(p.x * ca + p.y * sa, -p.x * sa + p.y * ca);
+        if (u_params.rig_kind == 0u) {
+            // === Humanoid Live2D Hierarchical Rig (\0 Sakura) ===
+            // 1. Boots/soles (yn >= 0.89) remain 100% rigid & planted
+            let foot_lock = smoothstep(0.89, 0.68, yn);
+            // 2. Neck-pivoted head rotation (aspect-corrected so zero squashing/shearing)
+            let head_mask = smoothstep(0.35, 0.25, yn);
+            let neck_v = mix(tv, av, 0.31);
+            let rot_ang = u_params.angle_z * head_mask;
+            let ca = cos(rot_ang);
+            let sa = sin(rot_ang);
+            let dy_neck = (sv - neck_v) * aspect;
+            let rx_n = dx_raw * ca + dy_neck * sa;
+            let ry_n = (-dx_raw * sa + dy_neck * ca) / aspect;
+            su = rx_n + cx;
+            sv = ry_n + neck_v;
 
-        let depth_center = exp(-p.x * p.x * 4.5);
-        let shift_x = u_params.sway_x * (h * (0.75 + 0.25 * h))
-            + u_params.gaze_x * (0.50 * h + 0.50 * h2)
-            + u_params.gaze_x * 0.30 * depth_center * h;
-        let scale_x = 1.0
-            + u_params.breath * (0.35 + 0.65 * torso)
-            + u_params.squish * (0.40 + 0.75 * torso);
-        let scale_y = 1.0
-            + u_params.breath * 0.50
-            - u_params.squish * 0.90
-            + u_params.talk_bob * 0.55
-            - u_params.gaze_y * 0.35 * h;
-        let shift_y = u_params.gaze_y * 0.30 * (1.0 - depth_center) * h;
+            // 3. Localized ParamBreath chest lift & ribcage expand (legs/head unstretched)
+            let chest_lift = smoothstep(0.60, 0.35, yn);
+            let chest_band = smoothstep(0.24, 0.35, yn) * (1.0 - smoothstep(0.43, 0.56, yn));
+            sv = sv + u_params.breath * 0.0046 * chest_lift + u_params.talk_bob * 0.0042 * smoothstep(0.55, 0.22, yn);
+            su = su - (su - cx) * (u_params.breath * 0.014 * chest_band + u_params.squish * 0.018 * chest_band);
 
-        su = (p.x - shift_x) / max(scale_x, 0.75) + 0.5;
-        sv = (p.y - shift_y) / max(scale_y, 0.75) + av;
+            // 4. Upper-body weight shift & squish (zero effect on planted boots)
+            let upper_shift = smoothstep(0.86, 0.36, yn);
+            su = su - u_params.body_sway * 0.0085 * upper_shift;
+            sv = sv - u_params.squish * 0.010 * smoothstep(0.88, 0.20, yn);
+
+            // 5. Sailor ribbon & pleated skirt hem cloth pendulum
+            let ribbon_w = smoothstep(0.31, 0.36, yn)
+                * (1.0 - smoothstep(0.44, 0.50, yn))
+                * (1.0 - smoothstep(0.05, 0.14, abs_dx));
+            let skirt_root = smoothstep(0.46, 0.65, yn);
+            let skirt_hem = smoothstep(0.47, 0.65, yn) * (1.0 - smoothstep(0.66, 0.74, yn));
+            let pleat = 1.0 + 0.32 * sin(dx_raw * 26.0);
+            su = su - u_params.cloth_swing * (0.007 * ribbon_w + 0.013 * skirt_hem * pleat);
+            sv = sv + abs(u_params.cloth_swing) * 0.0035 * skirt_root * skirt_hem;
+
+            // 6. 2.5D differential face vs head outline parallax (AngleX / AngleY)
+            let face_v = mix(tv, av, 0.225);
+            let fx = (su - cx) / 0.19;
+            let fy = (sv - face_v) / 0.105;
+            let r2 = fx * fx + fy * fy;
+            let face_inner = exp(-r2 * 1.45) * head_mask;
+            let head_outer = exp(-r2 * 0.35) * head_mask;
+            su = su - u_params.angle_x * (0.0065 * head_outer + 0.0125 * face_inner);
+            sv = sv - u_params.angle_y * (0.0040 * head_outer + 0.0075 * face_inner);
+            // Cheek perspective foreshortening when turning head
+            su = su + (su - cx) * (u_params.angle_x * 0.040 * face_inner);
+
+            // 7. Side hair curl & crown ahoge damped-spring pendulums
+            let curl_t = clamp((yn - 0.12) / 0.24, 0.0, 1.0);
+            let curl_cubic = curl_t * curl_t * (3.0 - 2.0 * curl_t);
+            let side_hair = smoothstep(0.075, 0.17, abs_dx)
+                * smoothstep(0.08, 0.20, yn)
+                * (1.0 - smoothstep(0.32, 0.42, yn));
+            su = su - u_params.hair_swing_x * (0.014 * curl_cubic * side_hair);
+            sv = sv - u_params.hair_swing_y * (0.0065 * curl_cubic * side_hair);
+
+            let ahoge_mask = smoothstep(0.115, 0.02, yn) * (1.0 - smoothstep(0.06, 0.16, abs_dx));
+            su = su - u_params.ahoge_swing * 0.019 * ahoge_mask;
+            sv = sv - abs(u_params.ahoge_swing) * 0.004 * ahoge_mask;
+
+            // Blend full deformation cleanly inside foot_lock envelope
+            su = mix(in.uv.x, su, max(foot_lock, head_mask));
+            sv = mix(in.uv.y, sv, max(foot_lock, head_mask));
+        } else {
+            // === Mochi Companion Live2D Rig (\1 Unyu) ===
+            let sole_lock = smoothstep(0.94, 0.80, yn);
+            let face_mask = smoothstep(0.76, 0.26, yn);
+            let head_v = mix(tv, av, 0.46);
+            let rot_ang = u_params.angle_z * face_mask;
+            let ca = cos(rot_ang);
+            let sa = sin(rot_ang);
+            let dy_h = (sv - head_v) * aspect;
+            su = (dx_raw * ca + dy_h * sa) + cx;
+            sv = (-dx_raw * sa + dy_h * ca) / aspect + head_v;
+
+            // Plump mochi belly breath + bouncy squish + speech bounce
+            let belly = smoothstep(0.90, 0.58, yn) * smoothstep(0.14, 0.48, yn);
+            su = su - (su - cx) * (u_params.breath * 0.018 * belly + u_params.squish * 0.028 * belly);
+            sv = sv + (u_params.breath * 0.006 * smoothstep(0.88, 0.42, yn)
+                - u_params.squish * 0.014 * smoothstep(0.92, 0.24, yn)
+                + u_params.talk_bob * 0.009 * smoothstep(0.86, 0.30, yn));
+
+            // 2.5D spherical gaze parallax (eyes & low-perched round sunglasses)
+            let fx = (su - cx) / 0.26;
+            let fy = (yn - 0.42) / 0.22;
+            let inner = exp(-(fx * fx + fy * fy) * 1.15) * face_mask;
+            su = su - (u_params.angle_x * (0.012 * inner + 0.006 * face_mask) + u_params.body_sway * 0.008 * sole_lock);
+            sv = sv - (u_params.angle_y * (0.008 * inner + 0.003 * face_mask));
+
+            // Top spiky crest / tuft spring + paw wave on speech
+            let tuft = smoothstep(0.32, 0.06, yn) * smoothstep(0.56, 0.24, su);
+            su = su - u_params.ahoge_swing * 0.018 * tuft - u_params.hair_swing_x * 0.010 * smoothstep(0.38, 0.14, yn);
+            let paws = smoothstep(0.16, 0.28, abs_dx) * smoothstep(0.48, 0.58, yn) * (1.0 - smoothstep(0.68, 0.78, yn));
+            sv = sv + u_params.talk_bob * 0.008 * paws;
+
+            su = mix(in.uv.x, su, sole_lock);
+            sv = mix(in.uv.y, sv, sole_lock);
+        }
     }
     if (su < 0.0 || su > 1.0 || sv < 0.0 || sv > 1.0) {
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
-    let c = textureSampleLevel(u_tex, u_samp, vec2<f32>(su, sv), 0.0);
-    if (u_params.premul != 0u) {
-        return vec4<f32>(c.rgb * c.a, c.a);
+    if (u_params.premul == 999u) {
+        return textureSampleLevel(u_tex, u_samp, vec2<f32>(su, sv), 0.0);
     }
-    return c;
+    let dims_u = textureDimensions(u_tex, 0);
+    let dims = vec2<f32>(dims_u);
+    let px = vec2<f32>(su, sv) * dims - vec2<f32>(0.5, 0.5);
+    let p0 = vec2<i32>(floor(px));
+    let f = fract(px);
+    let max_c = vec2<i32>(dims_u) - vec2<i32>(1, 1);
+    let t00 = textureLoad(u_tex, clamp(p0, vec2<i32>(0, 0), max_c), 0);
+    let t10 = textureLoad(u_tex, clamp(p0 + vec2<i32>(1, 0), vec2<i32>(0, 0), max_c), 0);
+    let t01 = textureLoad(u_tex, clamp(p0 + vec2<i32>(0, 1), vec2<i32>(0, 0), max_c), 0);
+    let t11 = textureLoad(u_tex, clamp(p0 + vec2<i32>(1, 1), vec2<i32>(0, 0), max_c), 0);
+    let pm00 = vec4<f32>(t00.rgb * t00.a, t00.a);
+    let pm10 = vec4<f32>(t10.rgb * t10.a, t10.a);
+    let pm01 = vec4<f32>(t01.rgb * t01.a, t01.a);
+    let pm11 = vec4<f32>(t11.rgb * t11.a, t11.a);
+    let pm = mix(mix(pm00, pm10, f.x), mix(pm01, pm11, f.x), f.y);
+    if (u_params.premul != 0u) {
+        return pm;
+    }
+    if (pm.a <= 0.0001) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+    return vec4<f32>(pm.rgb / pm.a, pm.a);
 }
 "#;
 
@@ -571,6 +705,64 @@ impl TextRenderer {
         (lines, (lines as f32) * line_h)
     }
 
+    fn measure_inline_width(&mut self, text: &str, font_px: f32) -> f32 {
+        if text.is_empty() {
+            return 0.0;
+        }
+        let line_h = font_px * 1.3;
+        let measure_raw = |fs: &mut FontSystem, s: &str| -> f32 {
+            let mut b = Buffer::new(fs, Metrics::new(font_px, line_h));
+            b.set_wrap(fs, Wrap::None);
+            b.set_size(fs, None, None);
+            b.set_text(fs, s, Attrs::new().family(Family::SansSerif), Shaping::Advanced);
+            b.shape_until_scroll(fs, false);
+            b.layout_runs().map(|r| r.line_w).fold(0.0_f32, f32::max)
+        };
+        let with_sentinel = format!("{text}|");
+        let w_all = measure_raw(&mut self.font_system, &with_sentinel);
+        let w_mark = measure_raw(&mut self.font_system, "|");
+        (w_all - w_mark).max(0.0)
+    }
+
+    fn draw_inline_text(
+        &mut self,
+        bmp: &mut RgbaBitmap,
+        text: &str,
+        x: i32,
+        y: i32,
+        clip_x0: i32,
+        clip_x1: i32,
+        font_px: f32,
+        line_h: f32,
+        rgb: (u8, u8, u8),
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        let mut buf = Buffer::new(&mut self.font_system, Metrics::new(font_px, line_h));
+        buf.set_wrap(&mut self.font_system, Wrap::None);
+        buf.set_size(&mut self.font_system, None, None);
+        buf.set_text(
+            &mut self.font_system,
+            text,
+            Attrs::new().family(Family::SansSerif),
+            Shaping::Advanced,
+        );
+        buf.shape_until_scroll(&mut self.font_system, false);
+        let color = TextColor::rgba(rgb.0, rgb.1, rgb.2, 255);
+        buf.draw(&mut self.font_system, &mut self.swash_cache, color, |gx, gy, _gw, _gh, col| {
+            let px = x + gx;
+            let py = y + gy;
+            if px < clip_x0 || px >= clip_x1 || py < 0 || py >= bmp.height as i32 {
+                return;
+            }
+            let (r, g, b, a) = col.as_rgba_tuple();
+            if a > 0 {
+                bmp.blend_pixel(px, py, r, g, b, a);
+            }
+        });
+    }
+
     fn draw_text(
         &mut self,
         bmp: &mut RgbaBitmap,
@@ -586,7 +778,8 @@ impl TextRenderer {
     ) -> f32 {
         let mut buf = Buffer::new(&mut self.font_system, Metrics::new(font_px, line_h));
         buf.set_wrap(&mut self.font_system, Wrap::WordOrGlyph);
-        buf.set_size(&mut self.font_system, Some(max_w.max(20.0)), max_h);
+        // Keep vertical layout unbounded so scrolled lines remain shapeable prior to clipping.
+        buf.set_size(&mut self.font_system, Some(max_w.max(20.0)), None);
         buf.set_text(
             &mut self.font_system,
             text,
@@ -619,6 +812,58 @@ impl TextRenderer {
             }
         });
         (total_lines.max(1) as f32) * line_h
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct Spring1D {
+    pos: f32,
+    vel: f32,
+}
+
+impl Spring1D {
+    fn step(&mut self, target: f32, omega: f32, zeta: f32, dt: f32) {
+        let sub_dt = dt.clamp(0.001, 0.045) * 0.5;
+        for _ in 0..2 {
+            let acc = omega * omega * (target - self.pos) - 2.0 * zeta * omega * self.vel;
+            self.vel = (self.vel + acc * sub_dt).clamp(-8.0, 8.0);
+            self.pos = (self.pos + self.vel * sub_dt).clamp(-2.0, 2.0);
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct Live2dRigState {
+    last_tick: Instant,
+    angle_x: f32,
+    angle_y: f32,
+    angle_z: f32,
+    prev_angle_x: f32,
+    prev_angle_y: f32,
+    hair_x: Spring1D,
+    hair_y: Spring1D,
+    ahoge: Spring1D,
+    cloth: Spring1D,
+}
+
+impl Live2dRigState {
+    fn new() -> Self {
+        Self {
+            last_tick: Instant::now(),
+            angle_x: 0.0,
+            angle_y: 0.0,
+            angle_z: 0.0,
+            prev_angle_x: 0.0,
+            prev_angle_y: 0.0,
+            hair_x: Spring1D::default(),
+            hair_y: Spring1D::default(),
+            ahoge: Spring1D::default(),
+            cloth: Spring1D::default(),
+        }
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new();
     }
 }
 
@@ -656,7 +901,11 @@ struct CharacterWindowState {
     smooth_gaze: (f32, f32),
     bounce_at: Option<Instant>,
     bounce_strength: f32,
+    top_v: f32,
     anchor_v: f32,
+    center_u: f32,
+    aspect_hw: f32,
+    rig: Live2dRigState,
     was_speaking: bool,
     visible: bool,
 }
@@ -929,11 +1178,18 @@ impl CharacterWindowState {
             }
             self.win_size = (new_w, new_h);
         }
-        self.anchor_v = if let Some((_x0, _y0, _x1, y1)) = comp.opaque_bbox() {
-            ((y1 as f32 + 1.0) / (comp.height.max(1) as f32)).clamp(0.5, 0.995)
+        let h_f = comp.height.max(1) as f32;
+        let w_f = comp.width.max(1) as f32;
+        if let Some((x0, y0, x1, y1)) = comp.opaque_bbox() {
+            self.top_v = ((y0 as f32) / h_f).clamp(0.0, 0.35);
+            self.anchor_v = (((y1 as f32) + 1.0) / h_f).clamp(0.55, 0.995);
+            self.center_u = (((x0 + x1) as f32 * 0.5) / w_f).clamp(0.35, 0.65);
         } else {
-            0.96
-        };
+            self.top_v = 0.02;
+            self.anchor_v = 0.96;
+            self.center_u = 0.50;
+        }
+        self.aspect_hw = (h_f / w_f).clamp(0.5, 4.0);
         let phys = self.ws.window.inner_size();
         self.ws.resize(gpu, phys);
         self.ws.upload_rgba(gpu, &comp);
@@ -948,7 +1204,8 @@ impl CharacterWindowState {
         global_cursor: Option<(f64, f64)>,
         is_speaking: bool,
     ) {
-        if !self.was_speaking && is_speaking && enabled {
+        let was_speaking = self.was_speaking;
+        if !was_speaking && is_speaking && enabled {
             self.trigger_bounce(0.016);
         }
         self.was_speaking = is_speaking;
@@ -956,6 +1213,7 @@ impl CharacterWindowState {
         if !enabled {
             self.smooth_gaze = (0.0, 0.0);
             self.bounce_at = None;
+            self.rig.reset();
             if self.ws.last_live2d_active {
                 self.ws.update_params(gpu, &ShaderParams::idle(gpu.premul));
                 self.ws.window.request_redraw();
@@ -963,15 +1221,19 @@ impl CharacterWindowState {
             return;
         }
 
+        let dt = self.rig.last_tick.elapsed().as_secs_f32().clamp(0.005, 0.05);
+        self.rig.last_tick = Instant::now();
+
         let t = self.anim_start.elapsed().as_secs_f32() + self.phase_offset;
-        let breath = (t * 1.85).sin() * 0.0085;
-        let sway_x = (t * 1.12).sin() * 0.0075 + (t * 0.53).cos() * 0.0035;
-        let tilt = (t * 0.95 + 0.6).sin() * 0.012;
+        // Smooth biological chest inhalation curve (0.0 .. 1.0 biased upward on inhale)
+        let breath_raw = 0.5 - 0.5 * (t * 1.75).cos();
+        let breath = breath_raw * (0.75 + 0.25 * (t * 0.62).sin()) * 0.92;
+        let body_sway = (t * 0.88).sin() * 0.55 + (t * 0.41).cos() * 0.28;
 
         let squish = if let Some(bt) = self.bounce_at {
-            let dt = bt.elapsed().as_secs_f32();
-            if dt < 0.65 {
-                self.bounce_strength * (-dt * 6.2).exp() * (dt * 21.0).sin()
+            let b_dt = bt.elapsed().as_secs_f32();
+            if b_dt < 0.72 {
+                self.bounce_strength * (-b_dt * 6.0).exp() * (b_dt * 20.0).sin()
             } else {
                 self.bounce_at = None;
                 0.0
@@ -980,7 +1242,10 @@ impl CharacterWindowState {
             0.0
         };
 
-        let target_gaze = if self.dragging {
+        // Target gaze angle (-1..1) from cursor relative to head pivot + gentle autonomous idle saccades
+        let idle_x = (t * 0.47).sin() * 0.16 + (t * 0.21).cos() * 0.09;
+        let idle_y = (t * 0.36 + 0.5).sin() * 0.12;
+        let target_angle = if self.dragging {
             (0.0_f32, 0.0_f32)
         } else if let Some((gx, gy)) = global_cursor {
             if let Ok(outer) = self.ws.window.outer_position() {
@@ -992,45 +1257,84 @@ impl CharacterWindowState {
                 };
                 #[cfg(not(target_os = "macos"))]
                 let (wx, wy) = (outer.x as f64 / scale, outer.y as f64 / scale);
-                let head_cx = wx + (self.win_size.0 as f64) * 0.5;
-                let head_ratio = if self.scope == Scope::Sakura { 0.22 } else { 0.38 };
+                let head_cx = wx + (self.win_size.0 as f64) * (self.center_u as f64);
+                let head_ratio = if self.scope == Scope::Sakura { 0.22 } else { 0.40 };
                 let head_cy = wy + (self.win_size.1 as f64) * head_ratio;
                 #[cfg(target_os = "macos")]
                 let (cgx, cgy) = (gx, gy);
                 #[cfg(not(target_os = "macos"))]
                 let (cgx, cgy) = (gx / scale, gy / scale);
-                let nx = (((cgx - head_cx) / 420.0).clamp(-1.0, 1.0) as f32) * 0.015;
-                let ny = (((cgy - head_cy) / 360.0).clamp(-1.0, 1.0) as f32) * 0.012;
-                (nx, ny)
+                let dx = cgx - head_cx;
+                let dy = cgy - head_cy;
+                let dist = (dx * dx + dy * dy).sqrt();
+                let focus_mix = (1.0 - ((dist - 220.0) / 700.0).clamp(0.0, 0.85)) as f32;
+                let cur_x = (dx / 380.0).clamp(-1.0, 1.0) as f32;
+                let cur_y = (dy / 320.0).clamp(-1.0, 1.0) as f32;
+                (
+                    cur_x * focus_mix + idle_x * (1.0 - focus_mix),
+                    cur_y * focus_mix + idle_y * (1.0 - focus_mix),
+                )
             } else {
-                (0.0, 0.0)
+                (idle_x, idle_y)
             }
         } else {
-            (0.0, 0.0)
+            (idle_x, idle_y)
         };
 
-        self.smooth_gaze.0 += (target_gaze.0 - self.smooth_gaze.0) * 0.14;
-        self.smooth_gaze.1 += (target_gaze.1 - self.smooth_gaze.1) * 0.14;
+        let follow = 1.0 - (-dt * 8.5).exp();
+        self.rig.angle_x += (target_angle.0 - self.rig.angle_x) * follow;
+        self.rig.angle_y += (target_angle.1 - self.rig.angle_y) * follow;
+        self.smooth_gaze = (self.rig.angle_x, self.rig.angle_y);
+
+        let vel_x = (self.rig.angle_x - self.rig.prev_angle_x) / dt;
+        let vel_y = (self.rig.angle_y - self.rig.prev_angle_y) / dt;
+        self.rig.prev_angle_x = self.rig.angle_x;
+        self.rig.prev_angle_y = self.rig.angle_y;
 
         let talk_bob = if is_speaking {
-            (t * 13.5).sin().abs() * 0.009
+            (t * 12.5).sin().abs() * 0.72
         } else {
             0.0
         };
+        let target_z = self.rig.angle_x * 0.032
+            + (t * 0.92 + self.phase_offset).sin() * 0.015
+            + if is_speaking { (t * 6.4).sin() * 0.015 } else { 0.0 };
+        self.rig.angle_z += (target_z - self.rig.angle_z) * (1.0 - (-dt * 9.0).exp());
 
+        // Step 3 physical damped-spring pendulums driven by head velocity + idle breeze + speech impulse
+        let breeze = (t * 1.35).sin() * 0.22 + (t * 2.2).cos() * 0.10;
+        let head_lag_x = (-vel_x * 0.22 - body_sway * 0.18 + breeze).clamp(-1.6, 1.6);
+        let head_lag_y = (-vel_y * 0.16 + breath * 0.22 + talk_bob * 0.55 + squish * 24.0).clamp(-1.6, 1.6);
+        let ahoge_target = (-vel_x * 0.34 + (t * 1.9).sin() * 0.32 + if !was_speaking && is_speaking { 0.5 } else { 0.0 }).clamp(-1.8, 1.8);
+        let cloth_target = (-body_sway * 0.42 - vel_x * 0.12 + (t * 1.05).sin() * 0.24).clamp(-1.5, 1.5);
+
+        self.rig.hair_x.step(head_lag_x, 9.5, 0.36, dt);
+        self.rig.hair_y.step(head_lag_y, 11.0, 0.38, dt);
+        self.rig.ahoge.step(ahoge_target, 15.0, 0.24, dt);
+        self.rig.cloth.step(cloth_target, 6.8, 0.44, dt);
+
+        let rig_kind = if self.scope == Scope::Kero { 1 } else { 0 };
         let params = ShaderParams {
             premul: gpu.premul,
             live2d: 1,
-            pad0: 0,
+            rig_kind,
             pad1: 0,
             breath,
-            sway_x,
-            tilt,
+            angle_x: self.rig.angle_x,
+            angle_y: self.rig.angle_y,
+            angle_z: self.rig.angle_z,
+            hair_swing_x: self.rig.hair_x.pos,
+            hair_swing_y: self.rig.hair_y.pos,
+            ahoge_swing: self.rig.ahoge.pos,
+            cloth_swing: self.rig.cloth.pos,
+            body_sway,
             squish,
-            gaze_x: self.smooth_gaze.0,
-            gaze_y: self.smooth_gaze.1,
-            anchor_v: self.anchor_v,
             talk_bob,
+            top_v: self.top_v,
+            anchor_v: self.anchor_v,
+            center_u: self.center_u,
+            aspect_hw: self.aspect_hw,
+            pad2: 0.0,
             extra: [0.0; 4],
         };
         self.ws.update_params(gpu, &params);
@@ -1057,63 +1361,377 @@ struct BalloonWindowState {
     status_line: String,
     scroll_px: f32,
     max_scroll_px: f32,
+    user_scrolled_up: bool,
+    utterance_min_w: u32,
     win_size: (u32, u32),
     last_render_bmp: RgbaBitmap,
 }
 
 impl BalloonWindowState {
-    fn redraw_content(
+    fn render_bitmap(
         &mut self,
         skin: &BalloonSkin,
+        speaker_name: &str,
+        auto_follow_bottom: bool,
         text_renderer: &mut TextRenderer,
-        gpu: &GpuContext,
-    ) {
-        let (frame_raw, metrics) = skin.load_frame_rgba(self.scope, &self.side, self.large);
-        let b_scale = skin.display_scale.clamp(0.5, 4.0) as f32;
-        let logical_w = ((frame_raw.width as f32) / b_scale).round().max(160.0) as u32;
-        let logical_h = ((frame_raw.height as f32) / b_scale).round().max(80.0) as u32;
-        if self.win_size != (logical_w, logical_h) {
-            let _ = self
-                .ws
-                .window
-                .request_inner_size(LogicalSize::new(logical_w, logical_h));
-            self.win_size = (logical_w, logical_h);
+        scale: f32,
+    ) -> ((u32, u32), RgbaBitmap) {
+        let is_custom = skin.balloon_id != "clean_default";
+        let font_pt = (skin.font_height.clamp(12, 16) as f32).max(13.0);
+        let line_h_pt = font_pt * 1.44;
+        let choice_h_pt = line_h_pt + 10.0;
+
+        if !is_custom {
+            let min_w_pt = if self.scope == Scope::Sakura { 216.0 } else { 202.0 };
+            let max_w_pt = if self.scope == Scope::Sakura { 366.0 } else { 334.0 };
+            let min_h_pt = 78.0_f32;
+            let max_h_pt = 288.0_f32;
+
+            let left_out = if self.side == "right" { 14.0_f32 } else { 6.0 };
+            let right_out = if self.side == "left" { 14.0_f32 } else { 6.0 };
+            let top_out = 5.0_f32;
+            let bot_out = 8.0_f32;
+            let pad_x = 16.0_f32;
+            let pad_top = 12.0_f32;
+            let pad_bot = 12.0_f32;
+            let header_h = if speaker_name.trim().is_empty() { 0.0 } else { 23.0 };
+            let status_h = if self.status_line.is_empty() { 0.0 } else { 18.0 };
+
+            // 1. Adapt width smoothly from single-line content width (never shrinking mid-utterance)
+            let mut widest_pt = if speaker_name.trim().is_empty() {
+                0.0_f32
+            } else {
+                text_renderer.measure_inline_width(&format!("✦ {}", speaker_name.trim()), 11.0 * scale) / scale + 28.0
+            };
+            let display_str = if self.text.is_empty() { " " } else { self.text.as_str() };
+            for raw_ln in display_str.lines() {
+                let lw = text_renderer.measure_inline_width(raw_ln, font_pt * scale) / scale;
+                widest_pt = widest_pt.max(lw);
+            }
+            for ch in &self.choices {
+                let cw = text_renderer.measure_inline_width(&format!("▸ {}", ch.label), font_pt * scale) / scale + 24.0;
+                widest_pt = widest_pt.max(cw);
+            }
+            let desired_w = (left_out + right_out + pad_x * 2.0 + widest_pt + 16.0)
+                .ceil()
+                .clamp(min_w_pt, max_w_pt) as u32;
+            self.utterance_min_w = self.utterance_min_w.max(desired_w).min(max_w_pt as u32);
+            let logical_w = self.utterance_min_w.max(desired_w);
+
+            // 2. Wrap & measure total height at logical_w (reserve scroll gutter proactively if near cap)
+            let font_px = font_pt * scale;
+            let line_h_px = line_h_pt * scale;
+            let inner_w_no_scroll = ((logical_w as f32) - left_out - right_out - pad_x * 2.0 - 6.0).max(80.0);
+            let (_, est_text_h_px) =
+                text_renderer.measure_lines(display_str, font_px, line_h_px, inner_w_no_scroll * scale);
+            let choices_block_pt = if self.choices.is_empty() {
+                0.0
+            } else {
+                8.0 + (self.choices.len() as f32) * (choice_h_pt + 5.0)
+            };
+            let est_total_pt = (est_text_h_px / scale) + choices_block_pt;
+            let chrome_h_pt = top_out + bot_out + pad_top + header_h + status_h + pad_bot;
+            let needs_scroll = (chrome_h_pt + est_total_pt) > max_h_pt;
+            let scroll_gutter_pt = if needs_scroll { 12.0 } else { 0.0 };
+
+            let usable_w_pt = ((logical_w as f32) - left_out - right_out - pad_x * 2.0 - scroll_gutter_pt).max(80.0);
+            let usable_w = usable_w_pt * scale;
+            let (_, text_h_px) = text_renderer.measure_lines(display_str, font_px, line_h_px, usable_w);
+            let total_content_pt = (text_h_px / scale) + choices_block_pt;
+            let logical_h = (chrome_h_pt + total_content_pt)
+                .ceil()
+                .clamp(min_h_pt, max_h_pt) as u32;
+
+            let phys_w = ((logical_w as f32) * scale).round().max(1.0) as u32;
+            let phys_h = ((logical_h as f32) * scale).round().max(1.0) as u32;
+            let mut canvas = RgbaBitmap::new_transparent(phys_w, phys_h);
+
+            let cx0 = left_out * scale;
+            let cy0 = top_out * scale;
+            let cx1 = (logical_w as f32 - right_out) * scale;
+            let cy1 = (logical_h as f32 - bot_out) * scale;
+            let border_w = 1.6 * scale;
+            let (top_c, bot_c, br_l, br_r, badge_c) = if self.scope == Scope::Kero {
+                (
+                    [247, 250, 255, 246],
+                    [229, 238, 255, 246],
+                    [120, 134, 246, 235],
+                    [92, 108, 242, 235],
+                    [99, 102, 241, 255],
+                )
+            } else {
+                (
+                    [250, 253, 255, 247],
+                    [234, 244, 255, 247],
+                    [96, 146, 235, 235],
+                    [59, 130, 246, 238],
+                    [37, 99, 235, 255],
+                )
+            };
+
+            canvas.draw_aa_rounded_box(
+                (cx0, cy0, cx1, cy1),
+                16.0 * scale,
+                top_c,
+                bot_c,
+                border_w,
+                br_l,
+                br_r,
+                5.5 * scale,
+                2.0 * scale,
+                [18, 35, 72, 68],
+                185,
+            );
+
+            // Side pointer tail seamlessly integrated with glass gradient
+            let tail_y = (cy0 + 34.0 * scale).min(cy1 - 18.0 * scale).max(cy0 + 18.0 * scale);
+            let ty_tail = ((tail_y - cy0) / (cy1 - cy0).max(1.0)).clamp(0.0, 1.0);
+            let tail_fill = [
+                ((top_c[0] as f32) + (bot_c[0] as f32 - top_c[0] as f32) * ty_tail).round() as u8,
+                ((top_c[1] as f32) + (bot_c[1] as f32 - top_c[1] as f32) * ty_tail).round() as u8,
+                ((top_c[2] as f32) + (bot_c[2] as f32 - top_c[2] as f32) * ty_tail).round() as u8,
+                top_c[3],
+            ];
+            let side_right_edge = self.side == "left";
+            canvas.draw_aa_tail_pointer(
+                (cx0, cy0, cx1, cy1),
+                side_right_edge,
+                tail_y,
+                10.5 * scale,
+                7.0 * scale,
+                tail_fill,
+                border_w,
+                if side_right_edge { br_r } else { br_l },
+            );
+
+            // Speaker pill header & delicate gradient accent line
+            let content_left = cx0 + pad_x * scale;
+            if header_h > 0.0 {
+                let bx = content_left;
+                let by = cy0 + 8.5 * scale;
+                canvas.draw_aa_circle(
+                    bx + 4.5 * scale,
+                    by + 7.0 * scale,
+                    3.2 * scale,
+                    [147, 197, 253, 255],
+                    badge_c,
+                );
+                let sp_font = 11.0 * scale;
+                text_renderer.draw_inline_text(
+                    &mut canvas,
+                    speaker_name.trim(),
+                    (bx + 11.0 * scale).round() as i32,
+                    (by + 0.5 * scale).round() as i32,
+                    bx.round() as i32,
+                    (cx1 - 24.0 * scale).round() as i32,
+                    sp_font,
+                    sp_font * 1.25,
+                    (46, 82, 165),
+                );
+                let line_y = (cy0 + (pad_top + header_h - 6.0) * scale).round() as i32;
+                let line_w = (cx1 - content_left - pad_x * scale).max(20.0) as i32;
+                canvas.fill_rect_alpha(content_left.round() as i32, line_y, line_w, (1.0 * scale).round().max(1.0) as i32, 96, 146, 235, 65);
+            }
+
+            let content_top = cy0 + (pad_top + header_h) * scale;
+            let content_bot = cy1 - (pad_bot + status_h) * scale;
+            let usable_h = (content_bot - content_top).max(24.0 * scale);
+            let total_content_px = total_content_pt * scale;
+            self.max_scroll_px = (total_content_px - usable_h).max(0.0);
+            if auto_follow_bottom && !self.user_scrolled_up && self.max_scroll_px > 0.5 {
+                self.scroll_px = self.max_scroll_px;
+            } else {
+                self.scroll_px = self.scroll_px.clamp(0.0, self.max_scroll_px);
+            }
+
+            let drawn_h = text_renderer.draw_text(
+                &mut canvas,
+                &self.text,
+                content_left.round() as i32,
+                content_top.round() as i32,
+                usable_w,
+                Some(usable_h),
+                font_px,
+                line_h_px,
+                skin.font_rgb,
+                self.scroll_px,
+            );
+
+            let mut y_cursor = content_top + drawn_h + 7.0 * scale - self.scroll_px;
+            for (idx, ch) in self.choices.iter_mut().enumerate() {
+                let item_h = choice_h_pt * scale;
+                if y_cursor + item_h >= content_top && y_cursor <= content_bot {
+                    let hovered = self.hovered_choice == Some(idx);
+                    let (ctop, cbot, cbr, txt_rgb) = if hovered {
+                        (
+                            [219, 234, 254, 240],
+                            [191, 219, 254, 240],
+                            [37, 99, 235, 225],
+                            (24, 72, 185),
+                        )
+                    } else {
+                        (
+                            [240, 246, 255, 220],
+                            [228, 239, 255, 220],
+                            [147, 185, 245, 165],
+                            (34, 92, 200),
+                        )
+                    };
+                    let rx0 = content_left - 2.0 * scale;
+                    let ry0 = y_cursor.max(content_top);
+                    let rx1 = content_left + usable_w + 2.0 * scale;
+                    let ry1 = (y_cursor + item_h).min(content_bot);
+                    if ry1 - ry0 > 6.0 * scale {
+                        canvas.draw_aa_rounded_box(
+                            (rx0, ry0, rx1, ry1),
+                            8.0 * scale,
+                            ctop,
+                            cbot,
+                            1.1 * scale,
+                            cbr,
+                            cbr,
+                            0.0,
+                            0.0,
+                            [0, 0, 0, 0],
+                            90,
+                        );
+                        text_renderer.draw_text(
+                            &mut canvas,
+                            &format!("▸ {}", ch.label),
+                            (content_left + 8.0 * scale).round() as i32,
+                            (y_cursor + 4.5 * scale).round() as i32,
+                            (usable_w - 14.0 * scale).max(20.0),
+                            Some((ry1 - ry0).max(12.0)),
+                            font_px,
+                            line_h_px,
+                            txt_rgb,
+                            0.0,
+                        );
+                    }
+                    ch.rect = (
+                        (rx0 / scale) as f64,
+                        (ry0 / scale) as f64,
+                        (rx1 / scale) as f64,
+                        (ry1 / scale) as f64,
+                    );
+                } else {
+                    ch.rect = (0.0, 0.0, 0.0, 0.0);
+                }
+                y_cursor += item_h + 5.0 * scale;
+            }
+
+            if !self.status_line.is_empty() {
+                let st_font = (font_px * 0.82).max(10.0 * scale);
+                text_renderer.draw_inline_text(
+                    &mut canvas,
+                    &self.status_line,
+                    content_left.round() as i32,
+                    (cy1 - (pad_bot + 14.0) * scale).round() as i32,
+                    content_left.round() as i32,
+                    (cx1 - 12.0 * scale).round() as i32,
+                    st_font,
+                    st_font * 1.2,
+                    (96, 114, 146),
+                );
+            }
+
+            if self.max_scroll_px > 1.0 {
+                let track_x = (cx1 - 9.5 * scale).max(content_left + usable_w + 3.0 * scale);
+                let track_w = 3.5 * scale;
+                let track_top = content_top + 2.0 * scale;
+                let track_h = (usable_h - 4.0 * scale).max(20.0 * scale);
+                canvas.draw_aa_rounded_box(
+                    (track_x, track_top, track_x + track_w, track_top + track_h),
+                    track_w * 0.5,
+                    [148, 163, 184, 55],
+                    [148, 163, 184, 55],
+                    0.0,
+                    [0, 0, 0, 0],
+                    [0, 0, 0, 0],
+                    0.0,
+                    0.0,
+                    [0, 0, 0, 0],
+                    0,
+                );
+                let ratio = (self.scroll_px / self.max_scroll_px).clamp(0.0, 1.0);
+                let thumb_h = (track_h * (usable_h / (usable_h + self.max_scroll_px))).max(18.0 * scale);
+                let thumb_y = track_top + ratio * (track_h - thumb_h);
+                canvas.draw_aa_rounded_box(
+                    (track_x, thumb_y, track_x + track_w, thumb_y + thumb_h),
+                    track_w * 0.5,
+                    [96, 165, 250, 215],
+                    [37, 99, 235, 215],
+                    0.0,
+                    [0, 0, 0, 0],
+                    [0, 0, 0, 0],
+                    0.0,
+                    0.0,
+                    [0, 0, 0, 0],
+                    0,
+                );
+            }
+
+            return ((logical_w, logical_h), canvas);
         }
 
-        let scale = self.ws.window.scale_factor().clamp(1.0, 3.0) as f32;
-        let phys_w = ((logical_w as f32) * scale).round().max(1.0) as u32;
-        let phys_h = ((logical_h as f32) * scale).round().max(1.0) as u32;
-        let mut canvas = frame_raw.resized(phys_w, phys_h);
+        // Custom `.nar` balloon skin: preserve bitmap art via 3-slice vertical stretching with dynamic height + scroll
+        let (frame_raw, metrics) = skin.load_frame_rgba(self.scope, &self.side, self.large);
+        let b_scale = skin.display_scale.clamp(0.5, 4.0) as f32;
+        let base_w = ((frame_raw.width as f32) / b_scale).round().clamp(200.0, 420.0) as u32;
+        let base_h = ((frame_raw.height as f32) / b_scale).round().clamp(84.0, 320.0);
 
-        let left = (metrics.origin_x.max(12) as f32) * scale;
-        let top = (metrics.origin_y.max(10) as f32) * scale;
-        let right = if metrics.wordwrappoint_x < 0 {
-            (logical_w as i32 + metrics.wordwrappoint_x).max(60) as f32 * scale
+        let left_pt = metrics.origin_x.max(12) as f32;
+        let top_pt = metrics.origin_y.max(10) as f32;
+        let right_pt = if metrics.wordwrappoint_x < 0 {
+            (base_w as i32 + metrics.wordwrappoint_x).max(80) as f32
         } else {
-            metrics.wordwrappoint_x.max(60) as f32 * scale
+            metrics.wordwrappoint_x.max(80) as f32
         };
-        let bot = if metrics.validrect_bottom < 0 {
-            (logical_h as i32 + metrics.validrect_bottom).max(40) as f32 * scale
+        let bot_margin_pt = if metrics.validrect_bottom < 0 {
+            (-metrics.validrect_bottom).max(12) as f32
         } else {
-            metrics.validrect_bottom.max(40) as f32 * scale
+            (base_h - metrics.validrect_bottom as f32).max(12.0)
         };
-        let status_reserve = if self.status_line.is_empty() {
+        let usable_w_pt = (right_pt - left_pt).max(80.0);
+        let status_reserve_pt = if self.status_line.is_empty() { 0.0 } else { 18.0 };
+
+        let font_px = font_pt * scale;
+        let line_h = line_h_pt * scale;
+        let (_, text_h_px) = text_renderer.measure_lines(
+            if self.text.is_empty() { " " } else { &self.text },
+            font_px,
+            line_h,
+            usable_w_pt * scale,
+        );
+        let choice_h_total_pt = if self.choices.is_empty() {
             0.0
         } else {
-            18.0 * scale
+            8.0 + (self.choices.len() as f32) * (choice_h_pt + 2.0)
         };
-        let usable_w = (right - left).max(80.0);
-        let usable_h = (bot - top - status_reserve).max(36.0);
+        let needed_h_pt = (top_pt + (text_h_px / scale) + choice_h_total_pt + status_reserve_pt + bot_margin_pt)
+            .ceil()
+            .clamp(84.0, 292.0);
+        let logical_w = base_w;
+        let logical_h = needed_h_pt as u32;
 
-        let font_px = (skin.font_height.clamp(11, 16) as f32) * scale;
-        let line_h = font_px * 1.42;
+        let phys_w = ((logical_w as f32) * scale).round().max(1.0) as u32;
+        let phys_h = ((logical_h as f32) * scale).round().max(1.0) as u32;
+        let mut canvas = frame_raw.resized_three_slice_v(phys_w, phys_h, 0.24);
 
-        // Calculate needed content height so scroll bounds stay accurate
-        let (_, text_h) = text_renderer.measure_lines(&self.text, font_px, line_h, usable_w);
-        let choice_h = (self.choices.len() as f32) * (line_h + 6.0 * scale);
-        let total_content_h = text_h + if self.choices.is_empty() { 0.0 } else { 8.0 * scale + choice_h };
+        let left = left_pt * scale;
+        let top = top_pt * scale;
+        let usable_w = usable_w_pt * scale;
+        let bot = ((logical_h as f32) - bot_margin_pt) * scale;
+        let status_reserve = status_reserve_pt * scale;
+        let usable_h = (bot - top - status_reserve).max(32.0);
+
+        let total_content_h = text_h_px + choice_h_total_pt * scale;
         self.max_scroll_px = (total_content_h - usable_h).max(0.0);
-        self.scroll_px = self.scroll_px.clamp(0.0, self.max_scroll_px);
+        if auto_follow_bottom && !self.user_scrolled_up && self.max_scroll_px > 0.5 {
+            self.scroll_px = self.max_scroll_px;
+        } else {
+            self.scroll_px = self.scroll_px.clamp(0.0, self.max_scroll_px);
+        }
 
         let drawn_h = text_renderer.draw_text(
             &mut canvas,
@@ -1196,7 +1814,7 @@ impl BalloonWindowState {
         }
 
         if self.max_scroll_px > 1.0 {
-            let track_x = (right + 6.0 * scale).min((phys_w as f32) - 10.0 * scale).round() as i32;
+            let track_x = (left + usable_w + 4.0 * scale).min((phys_w as f32) - 10.0 * scale).round() as i32;
             let track_h = (usable_h - 4.0 * scale).max(20.0);
             let ratio = (self.scroll_px / self.max_scroll_px).clamp(0.0, 1.0);
             let thumb_h = (track_h * (usable_h / (usable_h + self.max_scroll_px))).max(18.0 * scale);
@@ -1209,7 +1827,7 @@ impl BalloonWindowState {
                 148,
                 163,
                 184,
-                50,
+                55,
             );
             canvas.fill_rect_alpha(
                 track_x,
@@ -1219,97 +1837,298 @@ impl BalloonWindowState {
                 59,
                 130,
                 246,
-                150,
+                170,
             );
         }
 
-        let phys = self.ws.window.inner_size();
+        ((logical_w, logical_h), canvas)
+    }
+
+    fn redraw_content(
+        &mut self,
+        skin: &BalloonSkin,
+        speaker_name: &str,
+        auto_follow_bottom: bool,
+        text_renderer: &mut TextRenderer,
+        gpu: &GpuContext,
+    ) -> bool {
+        let scale = self.ws.window.scale_factor().clamp(1.0, 3.0) as f32;
+        let ((logical_w, logical_h), canvas) =
+            self.render_bitmap(skin, speaker_name, auto_follow_bottom, text_renderer, scale);
+        let size_changed = self.win_size != (logical_w, logical_h);
+        if size_changed {
+            let _ = self
+                .ws
+                .window
+                .request_inner_size(LogicalSize::new(logical_w, logical_h));
+            self.win_size = (logical_w, logical_h);
+        }
+        let phys = PhysicalSize::new(canvas.width.max(1), canvas.height.max(1));
         self.ws.resize(gpu, phys);
         self.ws.upload_rgba(gpu, &canvas);
         self.last_render_bmp = canvas;
         self.ws.window.request_redraw();
+        size_changed
     }
 }
 
 struct CommunicateWindowState {
     ws: WindowSurface,
     visible: bool,
+    focused: bool,
     text: String,
     ime_preedit: String,
     win_size: (u32, u32),
     cursor_on: bool,
     last_blink: Instant,
+    anim_start: Instant,
+    hovered_close: bool,
+    hovered_send: bool,
+    last_local_cursor: Option<(f64, f64)>,
+    close_rect: (f64, f64, f64, f64),
+    send_rect: (f64, f64, f64, f64),
+    last_render_bmp: RgbaBitmap,
 }
 
 impl CommunicateWindowState {
-    fn redraw(&mut self, skin: &BalloonSkin, text_renderer: &mut TextRenderer, gpu: &GpuContext) {
+    fn render_bitmap(
+        &mut self,
+        text_renderer: &mut TextRenderer,
+        scale: f32,
+        phase_s: f32,
+    ) -> RgbaBitmap {
         let (logical_w, logical_h) = self.win_size;
-        let scale = self.ws.window.scale_factor().clamp(1.0, 3.0) as f32;
-        let pw = ((logical_w as f32) * scale).round() as u32;
-        let ph = ((logical_h as f32) * scale).round() as u32;
+        let pw = ((logical_w as f32) * scale).round().max(1.0) as u32;
+        let ph = ((logical_h as f32) * scale).round().max(1.0) as u32;
+        let mut canvas = RgbaBitmap::new_transparent(pw, ph);
 
-        let mut canvas = if let Some(bg) = skin.load_communicate_rgba() {
-            bg.resized(pw, ph)
+        // Generous 10pt transparent glow margin around pill so shadow/aura never touches window edges
+        let px0 = 10.0 * scale;
+        let py0 = 10.0 * scale;
+        let px1 = (logical_w as f32 - 10.0) * scale;
+        let py1 = (logical_h as f32 - 10.0) * scale;
+
+        let pulse = 0.5 + 0.5 * (phase_s * 2.8).sin();
+        let shift = 0.5 + 0.5 * (phase_s * 1.4).sin();
+        let aura_alpha = if self.focused {
+            (72.0 + 48.0 * pulse).round() as u8
         } else {
-            let mut b = RgbaBitmap::from_solid(pw, ph, 248, 250, 255, 242);
-            b.fill_rect_alpha(0, 0, pw as i32, (3.0 * scale) as i32, 95, 130, 210, 220);
-            b
+            40
         };
+        let br_left = [
+            (56.0 + 38.0 * (1.0 - shift)).round() as u8,
+            (130.0 + 60.0 * shift).round() as u8,
+            248,
+            248,
+        ];
+        let br_right = [
+            (37.0 + 58.0 * shift).round() as u8,
+            (99.0 + 36.0 * (1.0 - shift)).round() as u8,
+            246,
+            248,
+        ];
 
-        // Subtle inner input card border
-        let pad = (12.0 * scale).round() as i32;
-        let field_y = (28.0 * scale).round() as i32;
-        let field_h = (ph as i32 - field_y - (14.0 * scale).round() as i32).max(24);
-        let field_w = (pw as i32 - pad * 2).max(40);
-        canvas.fill_rect_alpha(pad, field_y, field_w, field_h, 255, 255, 255, 235);
-        canvas.fill_rect_alpha(pad, field_y + field_h - 2, field_w, 2, 110, 145, 225, 210);
-
-        let header_font = 11.5 * scale;
-        text_renderer.draw_text(
-            &mut canvas,
-            "💬 메시지 입력 (Enter 전송 / Esc 닫기)",
-            pad,
-            (8.0 * scale).round() as i32,
-            field_w as f32,
-            Some(18.0 * scale),
-            header_font,
-            header_font * 1.3,
-            (70, 85, 115),
+        canvas.draw_aa_rounded_box(
+            (px0, py0, px1, py1),
+            22.0 * scale,
+            [14, 24, 52, 242],
+            [21, 36, 74, 246],
+            if self.focused { 2.1 * scale } else { 1.4 * scale },
+            br_left,
+            br_right,
+            if self.focused { 8.5 * scale } else { 5.0 * scale },
             0.0,
+            [56, 189, 248, aura_alpha],
+            105,
         );
 
-        let caret = if self.cursor_on { "|" } else { "" };
-        let shown = if self.ime_preedit.is_empty() {
-            if self.text.is_empty() {
-                "여기에 말을 걸어보세요...".to_string()
+        // Generously padded header inside pill: Japanese & English default labels
+        let hdr_font = 10.5 * scale;
+        text_renderer.draw_inline_text(
+            &mut canvas,
+            "何か藍に話しかける · Ask NanikaAi",
+            (28.0 * scale).round() as i32,
+            (17.5 * scale).round() as i32,
+            (24.0 * scale).round() as i32,
+            (315.0 * scale).round() as i32,
+            hdr_font,
+            hdr_font * 1.25,
+            (147, 197, 253),
+        );
+        let hint_font = 9.5 * scale;
+        text_renderer.draw_inline_text(
+            &mut canvas,
+            "Enter · Esc",
+            (328.0 * scale).round() as i32,
+            (18.5 * scale).round() as i32,
+            (318.0 * scale).round() as i32,
+            (398.0 * scale).round() as i32,
+            hint_font,
+            hint_font * 1.25,
+            (125, 152, 198),
+        );
+
+        // Top-right Close (×) button inside pill header
+        let cl_cx = (logical_w as f32 - 33.0) * scale;
+        let cl_cy = 24.5 * scale;
+        let cl_r = 8.8 * scale;
+        self.close_rect = (
+            (cl_cx / scale - 13.0) as f64,
+            (cl_cy / scale - 13.0) as f64,
+            (cl_cx / scale + 13.0) as f64,
+            (cl_cy / scale + 13.0) as f64,
+        );
+        let (cl_in, cl_out) = if self.hovered_close {
+            ([239, 68, 68, 235], [185, 28, 28, 235])
+        } else {
+            ([44, 68, 122, 220], [30, 48, 92, 220])
+        };
+        canvas.draw_aa_circle(cl_cx, cl_cy, cl_r, cl_in, cl_out);
+        let d_x = 3.2 * scale;
+        canvas.draw_aa_segment(cl_cx - d_x, cl_cy - d_x, cl_cx + d_x, cl_cy + d_x, 1.7 * scale, [241, 245, 255, 245]);
+        canvas.draw_aa_segment(cl_cx - d_x, cl_cy + d_x, cl_cx + d_x, cl_cy - d_x, 1.7 * scale, [241, 245, 255, 245]);
+
+        // Inner dark sapphire editable input well + active glowing AI orb + Send (↑) button
+        let well_x0 = 22.0 * scale;
+        let well_y0 = 38.0 * scale;
+        let well_x1 = (logical_w as f32 - 60.0) * scale;
+        let well_y1 = 72.0 * scale;
+        canvas.draw_aa_rounded_box(
+            (well_x0, well_y0, well_x1, well_y1),
+            12.0 * scale,
+            [9, 16, 36, 220],
+            [12, 22, 46, 225],
+            1.1 * scale,
+            [59, 130, 246, if self.focused { 130 } else { 65 }],
+            [56, 189, 248, if self.focused { 130 } else { 65 }],
+            0.0,
+            0.0,
+            [0, 0, 0, 0],
+            20,
+        );
+
+        // Pulsing Glowing Blue AI Orb at left of input well
+        let orb_cx = 39.0 * scale;
+        let orb_cy = 55.0 * scale;
+        let orb_halo = (7.2 + 1.4 * pulse) * scale;
+        canvas.draw_aa_circle(orb_cx, orb_cy, orb_halo, [56, 189, 248, 85], [37, 99, 235, 0]);
+        canvas.draw_aa_circle(orb_cx, orb_cy, 4.8 * scale, [186, 230, 253, 255], [37, 99, 235, 255]);
+
+        // Right Send (↑) button
+        let sd_cx = (logical_w as f32 - 33.0) * scale;
+        let sd_cy = 55.0 * scale;
+        let sd_r = 13.0 * scale;
+        self.send_rect = (
+            (sd_cx / scale - 15.0) as f64,
+            (sd_cy / scale - 15.0) as f64,
+            (sd_cx / scale + 15.0) as f64,
+            (sd_cy / scale + 15.0) as f64,
+        );
+        let has_input = !self.text.trim().is_empty() || !self.ime_preedit.is_empty();
+        let (sd_in, sd_out) = if has_input {
+            if self.hovered_send {
+                ([96, 165, 250, 255], [37, 99, 235, 255])
             } else {
-                format!("{}{}", self.text, caret)
+                ([59, 130, 246, 245], [29, 78, 216, 245])
             }
+        } else if self.hovered_send {
+            ([48, 76, 138, 210], [32, 52, 98, 210])
         } else {
-            format!("{}[{}]{}", self.text, self.ime_preedit, caret)
+            ([34, 54, 102, 185], [24, 38, 76, 185])
         };
-        let text_rgb = if self.text.is_empty() && self.ime_preedit.is_empty() {
-            (150, 155, 170)
-        } else {
-            (25, 28, 38)
-        };
-        let input_font = 13.5 * scale;
-        text_renderer.draw_text(
-            &mut canvas,
-            &shown,
-            pad + (8.0 * scale).round() as i32,
-            field_y + (8.0 * scale).round() as i32,
-            (field_w as f32 - 16.0 * scale).max(20.0),
-            Some((field_h as f32 - 14.0 * scale).max(18.0)),
-            input_font,
-            input_font * 1.35,
-            text_rgb,
-            0.0,
-        );
+        canvas.draw_aa_circle(sd_cx, sd_cy, sd_r, sd_in, sd_out);
+        let arrow_col = if has_input { [255, 255, 255, 255] } else { [148, 174, 214, 200] };
+        canvas.draw_aa_segment(sd_cx, sd_cy + 4.5 * scale, sd_cx, sd_cy - 4.5 * scale, 1.9 * scale, arrow_col);
+        canvas.draw_aa_segment(sd_cx, sd_cy - 4.8 * scale, sd_cx - 4.0 * scale, sd_cy - 0.8 * scale, 1.9 * scale, arrow_col);
+        canvas.draw_aa_segment(sd_cx, sd_cy - 4.8 * scale, sd_cx + 4.0 * scale, sd_cy - 0.8 * scale, 1.9 * scale, arrow_col);
 
-        let phys = self.ws.window.inner_size();
+        // Single-line input text, Siri-style blue IME underline, and unmistakable blinking caret
+        let clip_x0 = (52.0 * scale).round() as i32;
+        let clip_x1 = (well_x1 - 8.0 * scale).round() as i32;
+        let text_y = (45.0 * scale).round() as i32;
+        let input_font = 13.8 * scale;
+        let input_line_h = input_font * 1.28;
+
+        let w_text = text_renderer.measure_inline_width(&self.text, input_font);
+        let w_ime = text_renderer.measure_inline_width(&self.ime_preedit, input_font);
+        let total_w = w_text + w_ime;
+        let vis_w = ((clip_x1 - clip_x0) as f32 - 8.0 * scale).max(40.0);
+        let h_scroll = (total_w - vis_w).max(0.0);
+        let text_x = (clip_x0 as f32) + 2.0 * scale - h_scroll;
+
+        if self.text.is_empty() && self.ime_preedit.is_empty() {
+            let ph_x = ((clip_x0 as f32) + 7.5 * scale).round() as i32;
+            text_renderer.draw_inline_text(
+                &mut canvas,
+                "メッセージを入力… / Type a message…",
+                ph_x,
+                text_y,
+                clip_x0,
+                clip_x1,
+                input_font,
+                input_line_h,
+                (148, 174, 214),
+            );
+        } else {
+            text_renderer.draw_inline_text(
+                &mut canvas,
+                &self.text,
+                text_x.round() as i32,
+                text_y,
+                clip_x0,
+                clip_x1,
+                input_font,
+                input_line_h,
+                (245, 249, 255),
+            );
+            if !self.ime_preedit.is_empty() {
+                let ime_x = text_x + w_text;
+                text_renderer.draw_inline_text(
+                    &mut canvas,
+                    &self.ime_preedit,
+                    ime_x.round() as i32,
+                    text_y,
+                    clip_x0,
+                    clip_x1,
+                    input_font,
+                    input_line_h,
+                    (255, 255, 255),
+                );
+                let ul_x0 = ime_x.max(clip_x0 as f32);
+                let ul_x1 = (ime_x + w_ime).min(clip_x1 as f32);
+                if ul_x1 > ul_x0 + 1.0 {
+                    let ul_y = (text_y as f32) + 18.8 * scale;
+                    canvas.draw_aa_segment(ul_x0, ul_y, ul_x1, ul_y, 2.2 * scale, [56, 189, 248, 255]);
+                }
+            }
+        }
+
+        // Always render blinking electric-blue vertical caret (even when empty!) so focus/input readiness is unmistakable
+        if self.cursor_on {
+            let caret_x = if self.text.is_empty() && self.ime_preedit.is_empty() {
+                (clip_x0 as f32) + 2.0 * scale
+            } else {
+                (text_x + total_w + 1.5 * scale).min((clip_x1 as f32) - 2.5 * scale)
+            };
+            let cx_i = caret_x.round() as i32;
+            let cy_i = (well_y0 + 7.0 * scale).round() as i32;
+            let ch_i = (19.5 * scale).round() as i32;
+            let cw_i = (2.2 * scale).round().max(2.0) as i32;
+            canvas.fill_rect_alpha(cx_i - 2, cy_i - 1, cw_i + 4, ch_i + 2, 56, 189, 248, 90);
+            canvas.fill_rect_alpha(cx_i, cy_i, cw_i, ch_i, 96, 165, 250, 255);
+        }
+
+        canvas
+    }
+
+    fn redraw(&mut self, _skin: &BalloonSkin, text_renderer: &mut TextRenderer, gpu: &GpuContext) {
+        let scale = self.ws.window.scale_factor().clamp(1.0, 3.0) as f32;
+        let phase_s = self.anim_start.elapsed().as_secs_f32();
+        let canvas = self.render_bitmap(text_renderer, scale, phase_s);
+        let phys = PhysicalSize::new(canvas.width.max(1), canvas.height.max(1));
         self.ws.resize(gpu, phys);
         self.ws.upload_rgba(gpu, &canvas);
+        self.last_render_bmp = canvas;
         self.ws.window.request_redraw();
     }
 }
@@ -1979,6 +2798,21 @@ impl AppRuntime {
         self.reposition_balloon(Scope::Kero);
     }
 
+    fn speaker_name(&self, scope: Scope) -> String {
+        let m = self.manifest.lock().expect("manifest mutex poisoned");
+        let name = match scope {
+            Scope::Sakura => m.descript.sakura_name.trim(),
+            Scope::Kero => m.descript.kero_name.trim(),
+        };
+        if !name.is_empty() {
+            return name.to_string();
+        }
+        match scope {
+            Scope::Sakura => "何か藍".to_string(),
+            Scope::Kero => "うにゅう".to_string(),
+        }
+    }
+
     fn reposition_balloon(&mut self, scope: Scope) {
         let (mx, my, mw, mh) = self.desktop_safe_work_area();
         let (char_x, char_y, char_w, _char_h, sid) = match scope {
@@ -2015,12 +2849,12 @@ impl AppRuntime {
             }
         };
 
+        let sp_name = self.speaker_name(scope);
         let bal = match scope {
             Scope::Sakura => self.sakura_balloon.as_mut(),
             Scope::Kero => self.kero_balloon.as_mut(),
         };
         let Some(bal) = bal else { return };
-        let bh = bal.win_size.1 as f64;
 
         let prefer_left = match align.as_str() {
             "left" => true,
@@ -2031,9 +2865,10 @@ impl AppRuntime {
         if bal.side != new_side {
             bal.side = new_side;
             if let Some(ref gpu) = self.gpu {
-                bal.redraw_content(&self.balloon_skin, &mut self.text_renderer, gpu);
+                bal.redraw_content(&self.balloon_skin, &sp_name, false, &mut self.text_renderer, gpu);
             }
         }
+        let bh = bal.win_size.1 as f64;
         let bw = bal.win_size.0 as f64;
         let bx = if bal.side == "left" {
             char_x - bw + ox
@@ -2078,12 +2913,14 @@ impl AppRuntime {
                 active_balloon_id: Some(bid.clone()),
                 ..Default::default()
             });
+            let sp_sak = self.speaker_name(Scope::Sakura);
+            let sp_ker = self.speaker_name(Scope::Kero);
             if let Some(ref gpu) = self.gpu {
                 if let Some(ref mut sb) = self.sakura_balloon {
-                    sb.redraw_content(&self.balloon_skin, &mut self.text_renderer, gpu);
+                    sb.redraw_content(&self.balloon_skin, &sp_sak, false, &mut self.text_renderer, gpu);
                 }
                 if let Some(ref mut kb) = self.kero_balloon {
-                    kb.redraw_content(&self.balloon_skin, &mut self.text_renderer, gpu);
+                    kb.redraw_content(&self.balloon_skin, &sp_ker, false, &mut self.text_renderer, gpu);
                 }
             }
         }
@@ -2129,36 +2966,36 @@ impl AppRuntime {
         let balloons: Vec<BalloonSummary> = self.balloon_manager.list_balloons();
         let mut rows = vec![
             MenuRow {
-                label: "💬 대화창 열기 (더블클릭)".to_string(),
+                label: "💬 話しかける · Chat (Double-Click)".to_string(),
                 cmd: MenuCommand::OpenCommunicate,
             },
             MenuRow {
-                label: "📁 .nar / .zip 스킨 설치...".to_string(),
+                label: "📁 スキン追加 (.nar / .zip)...".to_string(),
                 cmd: MenuCommand::InstallNarDialog,
             },
             MenuRow {
                 label: if cfg.show_kero {
-                    "✓ 파트너 (\\1) 표시"
+                    "✓ パートナー (\\1) · Partner"
                 } else {
-                    "   파트너 (\\1) 표시"
+                    "   パートナー (\\1) · Partner"
                 }
                 .to_string(),
                 cmd: MenuCommand::ToggleKero,
             },
             MenuRow {
                 label: if cfg.always_on_top {
-                    "✓ 항상 위에 표시"
+                    "✓ 常に手前 · Always on Top"
                 } else {
-                    "   항상 위에 표시"
+                    "   常に手前 · Always on Top"
                 }
                 .to_string(),
                 cmd: MenuCommand::ToggleAlwaysOnTop,
             },
             MenuRow {
                 label: if cfg.live2d_motion {
-                    "✓ ✨ Live2D 모션 효과"
+                    "✓ ✨ Live2D モーション · Motion"
                 } else {
-                    "   ✨ Live2D 모션 효과"
+                    "   ✨ Live2D モーション · Motion"
                 }
                 .to_string(),
                 cmd: MenuCommand::ToggleLive2dMotion,
@@ -2168,7 +3005,7 @@ impl AppRuntime {
                 cmd: MenuCommand::Separator,
             },
             MenuRow {
-                label: "[AI 모델 / 프로바이더]".to_string(),
+                label: "[AI プロバイダー · Providers]".to_string(),
                 cmd: MenuCommand::Separator,
             },
         ];
@@ -2183,7 +3020,7 @@ impl AppRuntime {
         }
 
         rows.push(MenuRow {
-            label: "[캐릭터 셸 스킨]".to_string(),
+            label: "[キャラクターシェル · Shells]".to_string(),
             cmd: MenuCommand::Separator,
         });
         for s in shells {
@@ -2195,7 +3032,7 @@ impl AppRuntime {
         }
 
         rows.push(MenuRow {
-            label: "[말풍선 스킨]".to_string(),
+            label: "[バルーン · Balloons]".to_string(),
             cmd: MenuCommand::Separator,
         });
         for b in balloons {
@@ -2211,15 +3048,15 @@ impl AppRuntime {
             cmd: MenuCommand::Separator,
         });
         rows.push(MenuRow {
-            label: "🧭 위치 초기화".to_string(),
+            label: "🧭 位置リセット · Reset Positions".to_string(),
             cmd: MenuCommand::ResetPositions,
         });
         rows.push(MenuRow {
-            label: "🧹 대화 히스토리 초기화".to_string(),
+            label: "🧹 履歴クリア · Clear History".to_string(),
             cmd: MenuCommand::ClearHistory,
         });
         rows.push(MenuRow {
-            label: "❌ 종료 (Quit)".to_string(),
+            label: "❌ 終了 · Quit".to_string(),
             cmd: MenuCommand::Quit,
         });
         rows
@@ -2237,16 +3074,16 @@ impl AppRuntime {
         let menu = Menu::new();
         let mut map = HashMap::new();
 
-        let chat_item = MenuItem::new("💬 대화창 열기", true, None);
+        let chat_item = MenuItem::new("💬 話しかける · Chat", true, None);
         map.insert(chat_item.id().clone(), MenuCommand::OpenCommunicate);
         let _ = menu.append(&chat_item);
 
-        let nar_item = MenuItem::new("📁 .nar / .zip 설치...", true, None);
+        let nar_item = MenuItem::new("📁 スキン追加 (.nar / .zip)...", true, None);
         map.insert(nar_item.id().clone(), MenuCommand::InstallNarDialog);
         let _ = menu.append(&nar_item);
 
         let kero_item = MenuItem::new(
-            if cfg.show_kero { "✓ 파트너 표시" } else { "파트너 표시" },
+            if cfg.show_kero { "✓ パートナー · Partner" } else { "パートナー · Partner" },
             true,
             None,
         );
@@ -2254,7 +3091,7 @@ impl AppRuntime {
         let _ = menu.append(&kero_item);
 
         let aot_item = MenuItem::new(
-            if cfg.always_on_top { "✓ 항상 위에" } else { "항상 위에" },
+            if cfg.always_on_top { "✓ 常に手前 · Pin Top" } else { "常に手前 · Pin Top" },
             true,
             None,
         );
@@ -2263,9 +3100,9 @@ impl AppRuntime {
 
         let live2d_item = MenuItem::new(
             if cfg.live2d_motion {
-                "✓ ✨ Live2D 모션 효과"
+                "✓ ✨ Live2D モーション · Motion"
             } else {
-                "✨ Live2D 모션 효과"
+                "✨ Live2D モーション · Motion"
             },
             true,
             None,
@@ -2281,21 +3118,21 @@ impl AppRuntime {
             let _ = target.append(&item);
         };
 
-        let shell_sub = Submenu::new("캐릭터 셸 전환", true);
+        let shell_sub = Submenu::new("キャラクターシェル · Shells", true);
         for s in self.shell_manager.list_shells() {
             let mark = if cfg.active_shell_id == s.id { "✓ " } else { "   " };
             add_item(&shell_sub, &format!("{mark}{}", s.name), MenuCommand::SwitchShell(s.id));
         }
         let _ = menu.append(&shell_sub);
 
-        let bal_sub = Submenu::new("말풍선 전환", true);
+        let bal_sub = Submenu::new("バルーン · Balloons", true);
         for b in self.balloon_manager.list_balloons() {
             let mark = if cfg.active_balloon_id == b.id { "✓ " } else { "   " };
             add_item(&bal_sub, &format!("{mark}{}", b.name), MenuCommand::SwitchBalloon(b.id));
         }
         let _ = menu.append(&bal_sub);
 
-        let prov_sub = Submenu::new("AI 프로바이더", true);
+        let prov_sub = Submenu::new("AI プロバイダー · Providers", true);
         for p in provider_catalog() {
             let mark = if cfg.provider == p.id { "✓ " } else { "   " };
             add_item(
@@ -2308,15 +3145,15 @@ impl AppRuntime {
 
         let _ = menu.append(&PredefinedMenuItem::separator());
 
-        let reset_item = MenuItem::new("🧭 위치 초기화", true, None);
+        let reset_item = MenuItem::new("🧭 位置リセット · Reset", true, None);
         map.insert(reset_item.id().clone(), MenuCommand::ResetPositions);
         let _ = menu.append(&reset_item);
 
-        let clear_item = MenuItem::new("🧹 히스토리 초기화", true, None);
+        let clear_item = MenuItem::new("🧹 履歴クリア · Clear", true, None);
         map.insert(clear_item.id().clone(), MenuCommand::ClearHistory);
         let _ = menu.append(&clear_item);
 
-        let quit_item = MenuItem::new("❌ 종료", true, None);
+        let quit_item = MenuItem::new("❌ 終了 · Quit", true, None);
         map.insert(quit_item.id().clone(), MenuCommand::Quit);
         let _ = menu.append(&quit_item);
 
@@ -2458,8 +3295,14 @@ impl AppRuntime {
         if let Some(ref mut cw) = self.communicate {
             let x = (sx + sw * 0.5 - cw.win_size.0 as f64 * 0.5)
                 .clamp(mx + 12.0, (mx + mw - cw.win_size.0 as f64 - 12.0).max(mx + 12.0));
-            let y = (sy + sh - 40.0).clamp(my + 6.0, (my + mh - cw.win_size.1 as f64 - 8.0).max(my + 6.0));
+            let y = (sy + sh - 54.0).clamp(my + 6.0, (my + mh - cw.win_size.1 as f64 - 8.0).max(my + 6.0));
             cw.visible = true;
+            cw.focused = true;
+            cw.cursor_on = true;
+            cw.last_blink = Instant::now();
+            cw.anim_start = Instant::now();
+            cw.hovered_close = false;
+            cw.hovered_send = false;
             cw.text.clear();
             cw.ime_preedit.clear();
             cw.ws.window.set_outer_position(LogicalPosition::new(x, y));
@@ -2618,10 +3461,20 @@ impl AppRuntime {
                                 self.playback.kero_buf.clear();
                                 self.playback.kero_choices.clear();
                                 self.playback.kero_dirty = true;
+                                if let Some(ref mut kb) = self.kero_balloon {
+                                    kb.scroll_px = 0.0;
+                                    kb.user_scrolled_up = false;
+                                    kb.utterance_min_w = 0;
+                                }
                             } else {
                                 self.playback.sakura_buf.clear();
                                 self.playback.sakura_choices.clear();
                                 self.playback.sakura_dirty = true;
+                                if let Some(ref mut sb) = self.sakura_balloon {
+                                    sb.scroll_px = 0.0;
+                                    sb.user_scrolled_up = false;
+                                    sb.utterance_min_w = 0;
+                                }
                             }
                         }
                         ActionKind::Choice => {
@@ -2692,40 +3545,67 @@ impl AppRuntime {
     }
 
     fn sync_balloons_to_playback(&mut self) {
+        let sp_sak = self.speaker_name(Scope::Sakura);
+        let sp_ker = self.speaker_name(Scope::Kero);
+        let streaming_active = !self.playback.steps.is_empty();
         if self.playback.sakura_dirty {
             self.playback.sakura_dirty = false;
+            let mut need_reposition = self.playback.sakura_show;
             if let (Some(ref gpu), Some(ref mut sb)) = (&self.gpu, &mut self.sakura_balloon) {
+                let was_vis = sb.visible;
                 sb.text = self.playback.sakura_buf.clone();
                 sb.choices = self.playback.sakura_choices.clone();
-                sb.large = sb.large || sb.text.chars().count() > 85 || !sb.choices.is_empty();
+                sb.large = sb.text.chars().count() > 85 || !sb.choices.is_empty();
                 sb.visible = self.playback.sakura_show;
                 if sb.visible {
-                    sb.redraw_content(&self.balloon_skin, &mut self.text_renderer, gpu);
-                    sb.ws.window.set_visible(true);
+                    let resized = sb.redraw_content(
+                        &self.balloon_skin,
+                        &sp_sak,
+                        streaming_active,
+                        &mut self.text_renderer,
+                        gpu,
+                    );
+                    if !was_vis {
+                        sb.ws.window.set_visible(true);
+                    }
+                    need_reposition = !was_vis || resized;
                 } else {
                     sb.ws.window.set_visible(false);
+                    need_reposition = false;
                 }
             }
-            if self.playback.sakura_show {
+            if self.playback.sakura_show && need_reposition {
                 self.reposition_balloon(Scope::Sakura);
             }
         }
         if self.playback.kero_dirty {
             self.playback.kero_dirty = false;
             let show_kero = self.config_store.get().show_kero;
+            let mut need_reposition = self.playback.kero_show && show_kero;
             if let (Some(ref gpu), Some(ref mut kb)) = (&self.gpu, &mut self.kero_balloon) {
+                let was_vis = kb.visible;
                 kb.text = self.playback.kero_buf.clone();
                 kb.choices = self.playback.kero_choices.clone();
-                kb.large = kb.large || kb.text.chars().count() > 75 || !kb.choices.is_empty();
+                kb.large = kb.text.chars().count() > 75 || !kb.choices.is_empty();
                 kb.visible = self.playback.kero_show && show_kero;
                 if kb.visible {
-                    kb.redraw_content(&self.balloon_skin, &mut self.text_renderer, gpu);
-                    kb.ws.window.set_visible(true);
+                    let resized = kb.redraw_content(
+                        &self.balloon_skin,
+                        &sp_ker,
+                        streaming_active,
+                        &mut self.text_renderer,
+                        gpu,
+                    );
+                    if !was_vis {
+                        kb.ws.window.set_visible(true);
+                    }
+                    need_reposition = !was_vis || resized;
                 } else {
                     kb.ws.window.set_visible(false);
+                    need_reposition = false;
                 }
             }
-            if self.playback.kero_show && show_kero {
+            if self.playback.kero_show && show_kero && need_reposition {
                 self.reposition_balloon(Scope::Kero);
             }
         }
@@ -2893,16 +3773,75 @@ impl AppRuntime {
             *self.manifest.lock().expect("manifest mutex poisoned") = active_manifest;
             self.reset_character_positions();
 
-            let demo_script = "\\0\\s[0]안녕! 100% Safe Rust 何か藍(NanikaAi) v1.2.3 스모크 테스트 완료예요!\\w3\\1\\s[10]선글라스 위로 내 눈 잘 보이지?\\e";
+            // Phase A: short greeting -> compact dynamic balloon (< 120 pt tall)
+            if let Some(ref mut sb) = self.sakura_balloon {
+                sb.scroll_px = 0.0;
+                sb.user_scrolled_up = false;
+                sb.utterance_min_w = 0;
+                sb.large = false;
+            }
+            let short_script = "\\0\\s[0]안녕! 何か藍(NanikaAi) v1.3.0!\\e";
+            self.playback.enqueue(parse_dialogue(short_script));
+            let _ = self.playback.fast_forward();
+            self.sync_balloons_to_playback();
+            let sb_short_h = self
+                .sakura_balloon
+                .as_ref()
+                .ok_or("사쿠라 말풍선 창 없음")?
+                .win_size
+                .1;
+            if sb_short_h >= 120 {
+                return Err(format!("단문 말풍선 동적 축소 실패: h={sb_short_h}"));
+            }
+            self.sakura_balloon
+                .as_ref()
+                .ok_or("사쿠라 말풍선 창 없음")?
+                .last_render_bmp
+                .save_png(&proof_dir.join("proof-balloon-short.png"))?;
+
+            // Phase B: long multi-paragraph text -> capped max height + scrollbar
+            if let Some(ref mut sb) = self.sakura_balloon {
+                sb.scroll_px = 0.0;
+                sb.user_scrolled_up = false;
+                sb.utterance_min_w = 0;
+                sb.large = false;
+            }
+            let demo_script = "\\0\\s[0]안녕! 100% Safe Rust 何か藍(NanikaAi) v1.3.0 テスト完了だよ！\\n\\n長い文章では吹き出しが内容に合わせて滑らかに広がり、最大サイズに達すると自動的にスクロールバーとトラックが表示されて、マウスホイールで快適に読み進められます。\\n\\n1行目: Live2D骨格・胸部呼吸・髪/アホ毛/スカートの物理揺れを有効化。\\n2行目: うにゅうの体型専用メッシュと自然な色味を保持。\\n3行目: Gemma/SentencePieceのバイトフォールバック文字も完全復元。\\w3\\1\\s[10]サングラスの上からもバッチリ見えてるぜ。\\e";
             self.playback.enqueue(parse_dialogue(demo_script));
             let _ = self.playback.fast_forward();
             self.sync_balloons_to_playback();
 
-            let sb = self.sakura_balloon.as_ref().ok_or("사쿠라 말풍선 창 없음")?;
-            sb.last_render_bmp
-                .save_png(&proof_dir.join("native-balloon-sakura.png"))?;
-            sb.last_render_bmp
-                .save_png(&proof_dir.join("neo-balloon-sakura.png"))?;
+            let (sb_long_h, sb_max_scroll) = {
+                let sb = self.sakura_balloon.as_ref().ok_or("사쿠라 말풍선 창 없음")?;
+                sb.last_render_bmp
+                    .save_png(&proof_dir.join("native-balloon-sakura.png"))?;
+                sb.last_render_bmp
+                    .save_png(&proof_dir.join("neo-balloon-sakura.png"))?;
+                sb.last_render_bmp
+                    .save_png(&proof_dir.join("proof-balloon-scroll.png"))?;
+                (sb.win_size.1, sb.max_scroll_px)
+            };
+            if sb_long_h < 270 || sb_max_scroll <= 40.0 {
+                return Err(format!(
+                    "장문 말풍선 확장/스크롤 검증 실패: h={sb_long_h}, max_scroll={sb_max_scroll:.1}"
+                ));
+            }
+
+            // Phase C: Communicate Siri-style sapphire input bar proofs
+            if let Some(ref mut cw) = self.communicate {
+                cw.focused = true;
+                cw.cursor_on = true;
+                cw.text.clear();
+                cw.ime_preedit.clear();
+                cw.render_bitmap(&mut self.text_renderer, 2.0, 0.35)
+                    .save_png(&proof_dir.join("proof-comm-empty.png"))?;
+                cw.text = "入力".to_string();
+                cw.ime_preedit = "中です".to_string();
+                cw.render_bitmap(&mut self.text_renderer, 2.0, 1.10)
+                    .save_png(&proof_dir.join("proof-comm-ime.png"))?;
+                cw.text.clear();
+                cw.ime_preedit.clear();
+            }
 
             // Exercise HTTP GET /api/health, POST /api/speak, and raw TCP SSTP/1.4
             let srv = self.server.as_ref().ok_or("서버 미기동")?;
@@ -3056,9 +3995,9 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
             false,
             cfg.show_kero,
         );
-        let sak_bal_ws = make_ws("NanikaAi Balloon Sakura", 360, 168, cfg.always_on_top, false, false);
-        let kero_bal_ws = make_ws("NanikaAi Balloon Kero", 330, 152, cfg.always_on_top, false, false);
-        let comm_ws = make_ws("NanikaAi Communicate", 360, 108, true, true, false);
+        let sak_bal_ws = make_ws("NanikaAi Balloon Sakura", 260, 108, cfg.always_on_top, false, false);
+        let kero_bal_ws = make_ws("NanikaAi Balloon Kero", 240, 96, cfg.always_on_top, false, false);
+        let comm_ws = make_ws("NanikaAi Communicate", 452, 92, true, true, false);
         let menu_ws = make_ws("NanikaAi Menu", 270, 320, true, true, false);
 
         self.sakura = Some(CharacterWindowState {
@@ -3091,6 +4030,10 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
             anchor_v: 0.96,
             was_speaking: false,
             visible: true,
+            top_v: 0.02,
+            center_u: 0.50,
+            aspect_hw: 1.5,
+            rig: Live2dRigState::new(),
         });
 
         if let Some(kws) = kero_ws {
@@ -3124,6 +4067,10 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                 anchor_v: 0.96,
                 was_speaking: false,
                 visible: cfg.show_kero,
+                top_v: 0.02,
+                center_u: 0.50,
+                aspect_hw: 1.5,
+                rig: Live2dRigState::new(),
             });
         }
 
@@ -3140,7 +4087,9 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                 status_line: String::new(),
                 scroll_px: 0.0,
                 max_scroll_px: 0.0,
-                win_size: (360, 168),
+                user_scrolled_up: false,
+                utterance_min_w: 0,
+                win_size: (260, 108),
                 last_render_bmp: RgbaBitmap::new_transparent(16, 16),
             });
         }
@@ -3157,7 +4106,9 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                 status_line: String::new(),
                 scroll_px: 0.0,
                 max_scroll_px: 0.0,
-                win_size: (330, 152),
+                user_scrolled_up: false,
+                utterance_min_w: 0,
+                win_size: (240, 96),
                 last_render_bmp: RgbaBitmap::new_transparent(16, 16),
             });
         }
@@ -3165,11 +4116,19 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
             self.communicate = Some(CommunicateWindowState {
                 ws: cws,
                 visible: false,
+                focused: false,
                 text: String::new(),
                 ime_preedit: String::new(),
-                win_size: (360, 108),
+                win_size: (452, 92),
                 cursor_on: true,
                 last_blink: Instant::now(),
+                anim_start: Instant::now(),
+                hovered_close: false,
+                hovered_send: false,
+                last_local_cursor: None,
+                close_rect: (0.0, 0.0, 0.0, 0.0),
+                send_rect: (0.0, 0.0, 0.0, 0.0),
+                last_render_bmp: RgbaBitmap::new_transparent(16, 16),
             });
         }
         if let Some(mws) = menu_ws {
@@ -3253,21 +4212,49 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::PlayActions(actions) => {
+                if actions.iter().any(|a| a.scope == Scope::Sakura) {
+                    if let Some(ref mut sb) = self.sakura_balloon {
+                        sb.scroll_px = 0.0;
+                        sb.user_scrolled_up = false;
+                        sb.utterance_min_w = 0;
+                    }
+                }
+                if actions.iter().any(|a| a.scope == Scope::Kero) {
+                    if let Some(ref mut kb) = self.kero_balloon {
+                        kb.scroll_px = 0.0;
+                        kb.user_scrolled_up = false;
+                        kb.utterance_min_w = 0;
+                    }
+                }
                 self.playback.enqueue(actions);
             }
             UserEvent::StatusUpdate(msg, _active) => {
+                let sp_sak = self.speaker_name(Scope::Sakura);
+                let mut need_repo = false;
                 if let Some(ref mut sb) = self.sakura_balloon {
                     sb.status_line = msg.clone();
                     if sb.visible {
                         if let Some(ref gpu) = self.gpu {
-                            sb.redraw_content(&self.balloon_skin, &mut self.text_renderer, gpu);
+                            need_repo = sb.redraw_content(
+                                &self.balloon_skin,
+                                &sp_sak,
+                                !sb.user_scrolled_up,
+                                &mut self.text_renderer,
+                                gpu,
+                            );
                         }
                     } else if !msg.is_empty() {
+                        sb.scroll_px = 0.0;
+                        sb.user_scrolled_up = false;
+                        sb.utterance_min_w = 0;
                         self.playback.sakura_buf = "…".to_string();
                         self.playback.sakura_show = true;
                         self.playback.sakura_dirty = true;
                         self.sync_balloons_to_playback();
                     }
+                }
+                if need_repo {
+                    self.reposition_balloon(Scope::Sakura);
                 }
             }
             UserEvent::ServerGetHealth(tx) => {
@@ -3423,6 +4410,19 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
             WindowEvent::Focused(focused) => {
                 if is_menu && !focused {
                     self.hide_menu();
+                } else if is_comm {
+                    if let Some(ref mut cw) = self.communicate {
+                        cw.focused = focused;
+                        if focused {
+                            cw.cursor_on = true;
+                            cw.last_blink = Instant::now();
+                        }
+                        if cw.visible {
+                            if let Some(ref gpu) = self.gpu {
+                                cw.redraw(&self.balloon_skin, &mut self.text_renderer, gpu);
+                            }
+                        }
+                    }
                 }
             }
             WindowEvent::DroppedFile(path) => {
@@ -3462,7 +4462,9 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                         }
                     }
                 } else if let Some(sb) = target_bal {
+                    let sp_name = self.speaker_name(sb);
                     let mut redraw = false;
+                    let mut need_repo = false;
                     if let Some(b) = if sb == Scope::Sakura { self.sakura_balloon.as_mut() } else { self.kero_balloon.as_mut() } {
                         let local = position.to_logical::<f64>(b.ws.window.scale_factor().max(1.0));
                         let hovered = b.choices.iter().position(|ch| {
@@ -3478,7 +4480,35 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                         }
                         if redraw {
                             if let Some(ref gpu) = self.gpu {
-                                b.redraw_content(&self.balloon_skin, &mut self.text_renderer, gpu);
+                                need_repo = b.redraw_content(
+                                    &self.balloon_skin,
+                                    &sp_name,
+                                    false,
+                                    &mut self.text_renderer,
+                                    gpu,
+                                );
+                            }
+                        }
+                    }
+                    if need_repo {
+                        self.reposition_balloon(sb);
+                    }
+                } else if is_comm {
+                    if let Some(ref mut cw) = self.communicate {
+                        let scale = cw.ws.window.scale_factor().max(1.0);
+                        let local = position.to_logical::<f64>(scale);
+                        cw.last_local_cursor = Some((local.x, local.y));
+                        let in_rect = |r: (f64, f64, f64, f64)| -> bool {
+                            r.2 > r.0 && local.x >= r.0 && local.x <= r.2 && local.y >= r.1 && local.y <= r.3
+                        };
+                        let has_text = !cw.text.trim().is_empty() || !cw.ime_preedit.trim().is_empty();
+                        let new_close = in_rect(cw.close_rect);
+                        let new_send = has_text && in_rect(cw.send_rect);
+                        if cw.hovered_close != new_close || cw.hovered_send != new_send {
+                            cw.hovered_close = new_close;
+                            cw.hovered_send = new_send;
+                            if let Some(ref gpu) = self.gpu {
+                                cw.redraw(&self.balloon_skin, &mut self.text_renderer, gpu);
                             }
                         }
                     }
@@ -3511,11 +4541,23 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                     MouseScrollDelta::PixelDelta(p) => p.y,
                 };
                 if let Some(sb) = target_bal {
+                    let sp_name = self.speaker_name(sb);
+                    let mut need_repo = false;
                     if let Some(b) = if sb == Scope::Sakura { self.sakura_balloon.as_mut() } else { self.kero_balloon.as_mut() } {
                         b.scroll_px = (b.scroll_px - dy as f32).clamp(0.0, b.max_scroll_px);
+                        b.user_scrolled_up = b.max_scroll_px > 1.0 && (b.scroll_px + 4.0) < b.max_scroll_px;
                         if let Some(ref gpu) = self.gpu {
-                            b.redraw_content(&self.balloon_skin, &mut self.text_renderer, gpu);
+                            need_repo = b.redraw_content(
+                                &self.balloon_skin,
+                                &sp_name,
+                                false,
+                                &mut self.text_renderer,
+                                gpu,
+                            );
                         }
+                    }
+                    if need_repo {
+                        self.reposition_balloon(sb);
                     }
                 } else if is_menu {
                     if let Some(ref mut m) = self.menu {
@@ -3668,6 +4710,51 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                             }
                         }
                     }
+                } else if is_comm && button == MouseButton::Left && state == ElementState::Pressed {
+                    let mut submit_text: Option<String> = None;
+                    let mut closed_now = false;
+                    if let Some(ref mut cw) = self.communicate {
+                        let in_rect = |r: (f64, f64, f64, f64), p: (f64, f64)| -> bool {
+                            r.2 > r.0 && p.0 >= r.0 && p.0 <= r.2 && p.1 >= r.1 && p.1 <= r.3
+                        };
+                        if let Some(pos) = cw.last_local_cursor {
+                            if in_rect(cw.close_rect, pos) {
+                                cw.visible = false;
+                                cw.focused = false;
+                                cw.hovered_close = false;
+                                cw.hovered_send = false;
+                                cw.ime_preedit.clear();
+                                cw.ws.window.set_visible(false);
+                                closed_now = true;
+                            } else if in_rect(cw.send_rect, pos) {
+                                let combined = format!("{}{}", cw.text, cw.ime_preedit);
+                                let trimmed = combined.trim().to_string();
+                                if !trimmed.is_empty() {
+                                    submit_text = Some(trimmed);
+                                    cw.text.clear();
+                                    cw.ime_preedit.clear();
+                                    cw.visible = false;
+                                    cw.focused = false;
+                                    cw.hovered_close = false;
+                                    cw.hovered_send = false;
+                                    cw.ws.window.set_visible(false);
+                                    closed_now = true;
+                                }
+                            }
+                        }
+                        if !closed_now {
+                            cw.focused = true;
+                            cw.cursor_on = true;
+                            cw.last_blink = Instant::now();
+                            cw.ws.window.focus_window();
+                            if let Some(ref gpu) = self.gpu {
+                                cw.redraw(&self.balloon_skin, &mut self.text_renderer, gpu);
+                            }
+                        }
+                    }
+                    if let Some(msg) = submit_text {
+                        self.spawn_user_chat(msg);
+                    }
                 } else if is_menu && button == MouseButton::Left && state == ElementState::Released {
                     let chosen = self.menu.as_ref().and_then(|m| {
                         m.hovered_idx.and_then(|i| m.rows.get(i).map(|r| r.cmd.clone()))
@@ -3680,6 +4767,9 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
             }
             WindowEvent::Ime(ime_ev) if is_comm => {
                 if let Some(ref mut cw) = self.communicate {
+                    cw.focused = true;
+                    cw.cursor_on = true;
+                    cw.last_blink = Instant::now();
                     match ime_ev {
                         Ime::Enabled => {}
                         Ime::Preedit(s, _) => {
@@ -3710,10 +4800,16 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
             } if is_comm => {
                 let mut submit_text: Option<String> = None;
                 if let Some(ref mut cw) = self.communicate {
+                    cw.focused = true;
+                    cw.cursor_on = true;
+                    cw.last_blink = Instant::now();
                     let cmd_or_ctrl = self.modifiers.super_key() || self.modifiers.control_key();
                     match &logical_key {
                         Key::Named(NamedKey::Escape) => {
                             cw.visible = false;
+                            cw.focused = false;
+                            cw.hovered_close = false;
+                            cw.hovered_send = false;
                             cw.ime_preedit.clear();
                             cw.ws.window.set_visible(false);
                         }
@@ -3722,6 +4818,9 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                                 submit_text = Some(cw.text.clone());
                                 cw.text.clear();
                                 cw.visible = false;
+                                cw.focused = false;
+                                cw.hovered_close = false;
+                                cw.hovered_send = false;
                                 cw.ws.window.set_visible(false);
                             }
                         }
@@ -3770,7 +4869,8 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let live2d_on = self.config_store.get().live2d_motion;
-        let poll_ms = if live2d_on { 33 } else { POLL_INTERVAL_MS };
+        let comm_visible = self.communicate.as_ref().is_some_and(|c| c.visible);
+        let poll_ms = if live2d_on || comm_visible { 20 } else { POLL_INTERVAL_MS };
         let next_wakeup = Instant::now() + Duration::from_millis(poll_ms);
         event_loop.set_control_flow(ControlFlow::WaitUntil(next_wakeup));
 
@@ -3789,13 +4889,37 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
             self.execute_menu_command(event_loop, cmd);
         }
 
-        // Caret blink inside Communicate window
+        // Caret blink & Siri aura pulse inside Communicate window
+        thread_local! {
+            static LAST_COMM_AURA: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+        }
         if let Some(ref mut cw) = self.communicate {
-            if cw.visible && cw.last_blink.elapsed() >= Duration::from_millis(500) {
-                cw.cursor_on = !cw.cursor_on;
-                cw.last_blink = Instant::now();
-                if let Some(ref gpu) = self.gpu {
-                    cw.redraw(&self.balloon_skin, &mut self.text_renderer, gpu);
+            if cw.visible {
+                let mut need_redraw = false;
+                if cw.last_blink.elapsed() >= Duration::from_millis(500) {
+                    cw.cursor_on = !cw.cursor_on;
+                    cw.last_blink = Instant::now();
+                    need_redraw = true;
+                }
+                if cw.focused {
+                    let aura_due = LAST_COMM_AURA.with(|cell| {
+                        let now = Instant::now();
+                        match cell.get() {
+                            Some(prev) if now.duration_since(prev) < Duration::from_millis(33) => false,
+                            _ => {
+                                cell.set(Some(now));
+                                true
+                            }
+                        }
+                    });
+                    if aura_due {
+                        need_redraw = true;
+                    }
+                }
+                if need_redraw {
+                    if let Some(ref gpu) = self.gpu {
+                        cw.redraw(&self.balloon_skin, &mut self.text_renderer, gpu);
+                    }
                 }
             }
         }
@@ -3950,4 +5074,30 @@ pub fn run(smoke_test: bool) -> Result<(), String> {
         return Err("스모크 테스트가 통과되지 않았습니다.".to_string());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Live2dRigState, ShaderParams, Spring1D};
+
+    #[test]
+    fn shader_params_uniform_layout_is_96_bytes() {
+        assert_eq!(std::mem::size_of::<ShaderParams>(), 96);
+    }
+
+    #[test]
+    fn spring_1d_and_live2d_rig_converge_smoothly() {
+        let mut s = Spring1D::default();
+        for _ in 0..80 {
+            s.step(1.0, 12.0, 0.72, 0.033);
+        }
+        assert!((s.pos - 1.0).abs() < 0.05, "spring pos={}", s.pos);
+
+        let mut rig = Live2dRigState::new();
+        rig.hair_x.pos = 0.45;
+        rig.angle_x = 0.8;
+        rig.reset();
+        assert_eq!(rig.hair_x.pos, 0.0);
+        assert_eq!(rig.angle_x, 0.0);
+    }
 }
