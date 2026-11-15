@@ -1,0 +1,27 @@
+charset,UTF-8
+type,balloon
+name,Clean Glass (CC0 Default)
+display.scale,2
+origin.x,28
+origin.y,20
+wordwrappoint.x,-28
+validrect.bottom,-20
+font.height,14
+font.color.r,28
+font.color.g,36
+font.color.b,56
+anchor.font.color.r,28
+anchor.font.color.g,106
+anchor.font.color.b,224
+cursor.font.color.r,44
+cursor.font.color.g,132
+cursor.font.color.b,242
+sstpmessage.font.color.r,100
+sstpmessage.font.color.g,116
+sstpmessage.font.color.b,146
+sstpmessage.x,28
+sstpmessage.y,-18
+communicatebox.x,16
+communicatebox.y,14
+communicatebox.width,328
+communicatebox.height,24

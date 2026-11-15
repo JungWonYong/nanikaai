@@ -1,0 +1,6 @@
+CC0 1.0 Universal (Public Domain Dedication)
+
+All artwork, surface graphics, balloon frames, and desktop mascot definitions
+in this directory were originally created for the AI Ukagaka project and
+are dedicated cleanly to the public domain under CC0-1.0:
+https://creativecommons.org/publicdomain/zero/1.0/

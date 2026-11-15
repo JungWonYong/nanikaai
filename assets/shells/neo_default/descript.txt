@@ -1,0 +1,10 @@
+charset,UTF-8
+type,shell
+name,Neo Sakura & Unyu (CC0 Default)
+sakura.name,사쿠라
+kero.name,우뉴
+display.scale,2
+sakura.balloon.offsetx,24
+sakura.balloon.offsety,44
+kero.balloon.offsetx,20
+kero.balloon.offsety,32
