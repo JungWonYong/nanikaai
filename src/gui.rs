@@ -8,6 +8,7 @@ use cosmic_text::{
     Attrs, Buffer, Color as TextColor, Family, FontSystem, Metrics, Shaping, SwashCache, Wrap,
 };
 use mouse_position::mouse_position::Mouse;
+use rand::seq::SliceRandom;
 use serde_json::{json, Value};
 use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon as TrayIconImage, TrayIcon, TrayIconBuilder};
@@ -251,7 +252,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
             // Blend full deformation cleanly inside foot_lock envelope
             su = mix(in.uv.x, su, max(foot_lock, head_mask));
             sv = mix(in.uv.y, sv, max(foot_lock, head_mask));
-        } else {
+        } else if (u_params.rig_kind == 1u) {
             // === Mochi Companion Live2D Rig (\1 Unyu) ===
             let sole_lock = smoothstep(0.94, 0.80, yn);
             let face_mask = smoothstep(0.76, 0.26, yn);
@@ -285,6 +286,25 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
             su = mix(in.uv.x, su, sole_lock);
             sv = mix(in.uv.y, sv, sole_lock);
+        } else {
+            // === Gentle Classic Shell Rig (bust-cut / tall-cap / humanoid \1 safe) ===
+            let base_lock = smoothstep(0.95, 0.78, yn);
+            let upper_mask = smoothstep(0.65, 0.20, yn);
+            let pivot_v = mix(tv, av, 0.55);
+            let rot_ang = u_params.angle_z * 0.38 * upper_mask;
+            let ca = cos(rot_ang);
+            let sa = sin(rot_ang);
+            let dy_p = (sv - pivot_v) * aspect;
+            su = (dx_raw * ca + dy_p * sa) + cx;
+            sv = (-dx_raw * sa + dy_p * ca) / aspect + pivot_v;
+
+            sv = sv + u_params.breath * 0.0032 * upper_mask
+                - u_params.squish * 0.008 * smoothstep(0.88, 0.22, yn)
+                + u_params.talk_bob * 0.0035 * upper_mask;
+            su = su - (u_params.body_sway * 0.0045 + u_params.angle_x * 0.0045) * upper_mask;
+
+            su = mix(in.uv.x, su, base_lock);
+            sv = mix(in.uv.y, sv, base_lock);
         }
     }
     if (su < 0.0 || su > 1.0 || sv < 0.0 || sv > 1.0) {
@@ -868,8 +888,19 @@ impl Live2dRigState {
 }
 
 #[derive(Clone, Debug)]
+struct SerikoStep {
+    aid: i32,
+    method: String,
+    surface_id: i32,
+    offset_x: i32,
+    offset_y: i32,
+    delay_ms: u64,
+    alt_ids: Vec<i32>,
+}
+
+#[derive(Clone, Debug)]
 struct ActiveSerikoRun {
-    steps: Vec<(i32, String, i32, i32, i32, u64)>,
+    steps: Vec<SerikoStep>,
     idx: usize,
     next_step_at: Instant,
 }
@@ -878,9 +909,10 @@ struct CharacterWindowState {
     scope: Scope,
     ws: WindowSurface,
     surface_id: i32,
+    is_neo_default: bool,
     display_scale: f64,
     base_bmp: Option<RgbaBitmap>,
-    overlays: HashMap<i32, (i32, i32, RgbaBitmap)>,
+    overlays: HashMap<i32, (i32, i32, bool, RgbaBitmap)>,
     composited: RgbaBitmap,
     win_size: (u32, u32),
     logical_pos: (f64, f64),
@@ -959,6 +991,7 @@ impl CharacterWindowState {
         requested_id: i32,
         reset_pos: bool,
     ) {
+        self.is_neo_default = manifest.shell_id == "neo_default";
         self.display_scale = manifest.descript.display_scale.clamp(0.5, 4.0);
         let resolved = manifest.resolve_surface_id(self.scope, requested_id);
         let base = manifest
@@ -1029,14 +1062,18 @@ impl CharacterWindowState {
                             .and_then(|a| {
                                 a.patterns.iter().find(|p| {
                                     p.surface_id >= 0
-                                        && matches!(p.method.as_str(), "overlay" | "overlayfast")
+                                        && matches!(
+                                            p.method.as_str(),
+                                            "overlay" | "overlayfast" | "overlayf" | "replace"
+                                        )
                                 })
                             })
-                            .map(|p| (p.surface_id, p.offset_x, p.offset_y))
+                            .map(|p| (p.method.clone(), p.surface_id, p.offset_x, p.offset_y))
                     });
-                    if let Some((sid, ox, oy)) = talk_pat {
+                    if let Some((method, sid, ox, oy)) = talk_pat {
                         if let Some(ov_bmp) = manifest.compose_base_rgba(sid) {
-                            self.overlays.insert(LIP_OVERLAY_PID, (ox, oy, ov_bmp));
+                            let replace = method == "replace";
+                            self.overlays.insert(LIP_OVERLAY_PID, (ox, oy, replace, ov_bmp));
                             dirty = true;
                         }
                     }
@@ -1055,28 +1092,64 @@ impl CharacterWindowState {
         if let Some(mut run) = self.active_run.take() {
             if now >= run.next_step_at {
                 if run.idx < run.steps.len() {
-                    let (pid, ref method, sid, ox, oy, delay_ms) = run.steps[run.idx].clone();
-                    match method.as_str() {
-                        "overlay" | "overlayfast" => {
-                            if sid < 0 {
-                                self.overlays.remove(&pid);
-                            } else if let Some(ov_bmp) = manifest.compose_base_rgba(sid) {
-                                self.overlays.insert(pid, (ox, oy, ov_bmp));
+                    let step = run.steps[run.idx].clone();
+                    match step.method.as_str() {
+                        "overlay" | "overlayfast" | "overlayf" | "replace" => {
+                            if step.surface_id < 0 {
+                                self.overlays.remove(&step.aid);
+                            } else if let Some(ov_bmp) = manifest.compose_base_rgba(step.surface_id) {
+                                let replace = step.method == "replace";
+                                self.overlays.insert(
+                                    step.aid,
+                                    (step.offset_x, step.offset_y, replace, ov_bmp),
+                                );
                             }
                             dirty = true;
                         }
                         "base" => {
-                            let target_sid = if sid >= 0 { sid } else { self.surface_id };
+                            let target_sid = if step.surface_id >= 0 {
+                                step.surface_id
+                            } else {
+                                self.surface_id
+                            };
                             if let Some(new_base) = manifest.compose_base_rgba(target_sid) {
                                 self.base_bmp = Some(new_base);
                                 dirty = true;
+                            }
+                        }
+                        "alternativestart" => {
+                            if run.steps.len() < 32 {
+                                let mut rng = rand::thread_rng();
+                                if let Some(&target_aid) = step.alt_ids.choose(&mut rng) {
+                                    if let Some(sdef) = manifest.surfaces.get(&self.surface_id) {
+                                        if let Some(sub_anim) =
+                                            sdef.animations.iter().find(|a| a.aid == target_aid)
+                                        {
+                                            let extra: Vec<SerikoStep> = sub_anim
+                                                .patterns
+                                                .iter()
+                                                .map(|p| SerikoStep {
+                                                    aid: target_aid,
+                                                    method: p.method.clone(),
+                                                    surface_id: p.surface_id,
+                                                    offset_x: p.offset_x,
+                                                    offset_y: p.offset_y,
+                                                    delay_ms: p.delay_ms.max(40),
+                                                    alt_ids: p.alt_ids.clone(),
+                                                })
+                                                .collect();
+                                            let insert_at = run.idx + 1;
+                                            run.steps.splice(insert_at..insert_at, extra);
+                                        }
+                                    }
+                                }
                             }
                         }
                         _ => {}
                     }
                     run.idx += 1;
                     if run.idx < run.steps.len() {
-                        run.next_step_at = now + Duration::from_millis(delay_ms.max(40));
+                        run.next_step_at = now + Duration::from_millis(step.delay_ms.max(40));
                         self.active_run = Some(run);
                     }
                 }
@@ -1112,19 +1185,18 @@ impl CharacterWindowState {
                 }
                 if let Some(aid) = fire_aid {
                     if let Some(anim) = sdef.animations.iter().find(|a| a.aid == aid) {
-                        let steps: Vec<_> = anim
+                        let steps: Vec<SerikoStep> = anim
                             .patterns
                             .iter()
-                            .map(|p| {
+                            .map(|p| SerikoStep {
                                 // Key all patterns of an animation by aid so pattern -1 cleanly clears the slot.
-                                (
-                                    aid,
-                                    p.method.clone(),
-                                    p.surface_id,
-                                    p.offset_x,
-                                    p.offset_y,
-                                    p.delay_ms.max(40),
-                                )
+                                aid,
+                                method: p.method.clone(),
+                                surface_id: p.surface_id,
+                                offset_x: p.offset_x,
+                                offset_y: p.offset_y,
+                                delay_ms: p.delay_ms.max(40),
+                                alt_ids: p.alt_ids.clone(),
                             })
                             .collect();
                         if !steps.is_empty() {
@@ -1152,8 +1224,12 @@ impl CharacterWindowState {
         let mut keys: Vec<i32> = self.overlays.keys().copied().collect();
         keys.sort_unstable();
         for k in keys {
-            if let Some((ox, oy, ref ov)) = self.overlays.get(&k) {
-                comp.alpha_composite(ov, *ox, *oy);
+            if let Some((ox, oy, replace, ref ov)) = self.overlays.get(&k) {
+                if *replace {
+                    comp.replace_rect(ov, *ox, *oy);
+                } else {
+                    comp.alpha_composite(ov, *ox, *oy);
+                }
             }
         }
         let ds = self.display_scale.clamp(0.5, 4.0);
@@ -1313,7 +1389,13 @@ impl CharacterWindowState {
         self.rig.ahoge.step(ahoge_target, 15.0, 0.24, dt);
         self.rig.cloth.step(cloth_target, 6.8, 0.44, dt);
 
-        let rig_kind = if self.scope == Scope::Kero { 1 } else { 0 };
+        let rig_kind = if !self.is_neo_default {
+            2
+        } else if self.scope == Scope::Kero {
+            1
+        } else {
+            0
+        };
         let params = ShaderParams {
             premul: gpu.premul,
             live2d: 1,
@@ -2136,6 +2218,7 @@ impl CommunicateWindowState {
 #[derive(Clone, Debug)]
 enum MenuCommand {
     OpenCommunicate,
+    ResetDefaultSkin,
     SwitchShell(String),
     SwitchBalloon(String),
     SwitchProvider(String, String),
@@ -2161,17 +2244,152 @@ struct MenuWindowState {
     rows: Vec<MenuRow>,
     hovered_idx: Option<usize>,
     scroll_row: usize,
+    scroll_accum: f64,
     win_size: (u32, u32),
     row_h: f64,
     max_visible_rows: usize,
+    last_render_bmp: RgbaBitmap,
 }
 
 impl MenuWindowState {
-    fn redraw(&mut self, text_renderer: &mut TextRenderer, gpu: &GpuContext) {
+    fn render_bitmap(&self, text_renderer: &mut TextRenderer, scale: f32) -> ((u32, u32), RgbaBitmap) {
         let total = self.rows.len();
         let vis_count = total.min(self.max_visible_rows).max(1);
-        let logical_w = 270u32;
-        let logical_h = ((vis_count as f64) * self.row_h + 12.0).ceil() as u32;
+        let logical_w = 304u32;
+        let logical_h = ((vis_count as f64) * self.row_h + 14.0).ceil() as u32;
+        let pw = ((logical_w as f32) * scale).round().max(1.0) as u32;
+        let ph = ((logical_h as f32) * scale).round().max(1.0) as u32;
+
+        let mut canvas = RgbaBitmap::new_transparent(pw, ph);
+        let pad = 2.0 * scale;
+        canvas.draw_aa_rounded_box(
+            (pad, pad, pw as f32 - pad, ph as f32 - pad),
+            12.0 * scale,
+            [24, 30, 44, 246],
+            [16, 20, 32, 248],
+            1.4 * scale,
+            [96, 146, 235, 195],
+            [59, 130, 246, 195],
+            3.0 * scale,
+            1.0 * scale,
+            [8, 12, 24, 80],
+            55,
+        );
+
+        let has_scroll = total > vis_count;
+        let right_reserve = if has_scroll { 16.0 * scale } else { 8.0 * scale };
+        let font_px = 12.2 * scale;
+        let row_px = (self.row_h as f32) * scale;
+        let max_scroll = total.saturating_sub(vis_count);
+        let start = self.scroll_row.min(max_scroll);
+        let end = (start + vis_count).min(total);
+
+        for (v_idx, r_idx) in (start..end).enumerate() {
+            let y = (7.0 * scale) + (v_idx as f32) * row_px;
+            let row = &self.rows[r_idx];
+            if matches!(row.cmd, MenuCommand::Separator) {
+                if row.label.is_empty() {
+                    canvas.fill_rect_alpha(
+                        (12.0 * scale) as i32,
+                        (y + row_px * 0.5) as i32,
+                        (pw as f32 - 12.0 * scale - right_reserve).max(20.0) as i32,
+                        (1.0 * scale).round().max(1.0) as i32,
+                        100,
+                        120,
+                        160,
+                        140,
+                    );
+                } else {
+                    text_renderer.draw_inline_text(
+                        &mut canvas,
+                        &row.label,
+                        (12.0 * scale) as i32,
+                        (y + 4.5 * scale) as i32,
+                        (10.0 * scale) as i32,
+                        (pw as f32 - right_reserve) as i32,
+                        font_px * 0.90,
+                        font_px * 1.15,
+                        (125, 178, 255),
+                    );
+                }
+                continue;
+            }
+            if self.hovered_idx == Some(r_idx) {
+                canvas.draw_aa_rounded_box(
+                    (7.0 * scale, y + 1.0 * scale, pw as f32 - right_reserve - 1.0 * scale, y + row_px - 1.0 * scale),
+                    6.0 * scale,
+                    [62, 110, 218, 225],
+                    [37, 86, 200, 225],
+                    0.8 * scale,
+                    [147, 197, 253, 180],
+                    [96, 165, 250, 180],
+                    0.0,
+                    0.0,
+                    [0, 0, 0, 0],
+                    45,
+                );
+            }
+            let rgb = if matches!(row.cmd, MenuCommand::ResetDefaultSkin) {
+                (147, 210, 255)
+            } else {
+                (240, 244, 252)
+            };
+            text_renderer.draw_inline_text(
+                &mut canvas,
+                &row.label,
+                (13.0 * scale) as i32,
+                (y + 4.0 * scale) as i32,
+                (11.0 * scale) as i32,
+                (pw as f32 - right_reserve - 4.0 * scale) as i32,
+                font_px,
+                font_px * 1.25,
+                rgb,
+            );
+        }
+
+        if has_scroll && max_scroll > 0 {
+            let track_x0 = pw as f32 - 11.0 * scale;
+            let track_w = 4.0 * scale;
+            let track_y0 = 10.0 * scale;
+            let track_h = (ph as f32 - 20.0 * scale).max(20.0 * scale);
+            canvas.draw_aa_rounded_box(
+                (track_x0, track_y0, track_x0 + track_w, track_y0 + track_h),
+                track_w * 0.5,
+                [148, 163, 184, 55],
+                [148, 163, 184, 55],
+                0.0,
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                0.0,
+                0.0,
+                [0, 0, 0, 0],
+                0,
+            );
+            let frac_vis = (vis_count as f32) / (total as f32);
+            let thumb_h = (track_h * frac_vis).max(22.0 * scale);
+            let frac_pos = ((start as f32) / (max_scroll as f32)).clamp(0.0, 1.0);
+            let thumb_y0 = track_y0 + frac_pos * (track_h - thumb_h);
+            canvas.draw_aa_rounded_box(
+                (track_x0, thumb_y0, track_x0 + track_w, thumb_y0 + thumb_h),
+                track_w * 0.5,
+                [125, 185, 255, 225],
+                [59, 130, 246, 225],
+                0.0,
+                [0, 0, 0, 0],
+                [0, 0, 0, 0],
+                0.0,
+                0.0,
+                [0, 0, 0, 0],
+                0,
+            );
+        }
+
+        ((logical_w, logical_h), canvas)
+    }
+
+    fn redraw(&mut self, text_renderer: &mut TextRenderer, gpu: &GpuContext) {
+        let scale = self.ws.window.scale_factor().clamp(1.0, 3.0) as f32;
+        let ((logical_w, logical_h), canvas) = self.render_bitmap(text_renderer, scale);
         if self.win_size != (logical_w, logical_h) {
             let _ = self
                 .ws
@@ -2179,72 +2397,10 @@ impl MenuWindowState {
                 .request_inner_size(LogicalSize::new(logical_w, logical_h));
             self.win_size = (logical_w, logical_h);
         }
-
-        let scale = self.ws.window.scale_factor().clamp(1.0, 3.0) as f32;
-        let pw = ((logical_w as f32) * scale).round() as u32;
-        let ph = ((logical_h as f32) * scale).round() as u32;
-        let mut canvas = RgbaBitmap::from_solid(pw, ph, 28, 31, 40, 245);
-        // Subtle 1px slate border
-        let pwi = pw as i32;
-        let phi = ph as i32;
-        canvas.fill_rect_alpha(0, 0, pwi, 2, 95, 110, 145, 220);
-        canvas.fill_rect_alpha(0, phi - 2, pwi, 2, 95, 110, 145, 220);
-        canvas.fill_rect_alpha(0, 0, 2, phi, 95, 110, 145, 220);
-        canvas.fill_rect_alpha(pwi - 2, 0, 2, phi, 95, 110, 145, 220);
-
-        let font_px = 12.5 * scale;
-        let row_px = (self.row_h as f32) * scale;
-        let end = (self.scroll_row + vis_count).min(self.rows.len());
-        for (v_idx, r_idx) in (self.scroll_row..end).enumerate() {
-            let y = (6.0 * scale) + (v_idx as f32) * row_px;
-            let row = &self.rows[r_idx];
-            if matches!(row.cmd, MenuCommand::Separator) {
-                canvas.fill_rect_alpha(
-                    (10.0 * scale) as i32,
-                    (y + row_px * 0.5) as i32,
-                    pwi - (20.0 * scale) as i32,
-                    2,
-                    90,
-                    96,
-                    118,
-                    180,
-                );
-                continue;
-            }
-            if self.hovered_idx == Some(r_idx) {
-                canvas.fill_rect_alpha(
-                    (6.0 * scale) as i32,
-                    y as i32,
-                    pwi - (12.0 * scale) as i32,
-                    row_px.round() as i32,
-                    78,
-                    112,
-                    205,
-                    210,
-                );
-            }
-            let rgb = if row.label.starts_with('[') {
-                (155, 185, 250)
-            } else {
-                (240, 243, 250)
-            };
-            text_renderer.draw_text(
-                &mut canvas,
-                &row.label,
-                (14.0 * scale) as i32,
-                (y + 4.0 * scale) as i32,
-                pw as f32 - 28.0 * scale,
-                Some(row_px),
-                font_px,
-                font_px * 1.25,
-                rgb,
-                0.0,
-            );
-        }
-
-        let phys = self.ws.window.inner_size();
+        let phys = PhysicalSize::new(canvas.width.max(1), canvas.height.max(1));
         self.ws.resize(gpu, phys);
         self.ws.upload_rgba(gpu, &canvas);
+        self.last_render_bmp = canvas;
         self.ws.window.request_redraw();
     }
 }
@@ -2729,7 +2885,7 @@ impl AppRuntime {
     }
 
     fn reset_character_positions(&mut self) {
-        let (mx, my, mw, mh) = self.screen_work_bounds();
+        let (_mx, my, _mw, mh) = self.screen_work_bounds();
         let (sx_safe, sy_safe, sw_safe, sh_safe) = self.desktop_safe_work_area();
         let safe_right = sx_safe + sw_safe;
         let safe_bottom = sy_safe + sh_safe;
@@ -2760,16 +2916,9 @@ impl AppRuntime {
             })
             .unwrap_or((200.0, 250.0, true, 8.0));
 
-        let dock_center_margin = if self.os_insets.dock_centered_bottom {
-            mw * 0.62
-        } else {
-            f64::MAX
-        };
         let sak_x = (safe_right - sak_w - 28.0).max(sx_safe);
         let sak_floor_y = if sak_full_feet {
             safe_bottom - 6.0
-        } else if sak_x > mx + dock_center_margin {
-            my + mh
         } else {
             safe_bottom
         };
@@ -2783,8 +2932,6 @@ impl AppRuntime {
         let kero_x = (sak_x - kero_w - 24.0).max(sx_safe);
         let kero_floor_y = if kero_full_feet {
             safe_bottom - 6.0
-        } else if kero_x > mx + dock_center_margin {
-            my + mh
         } else {
             safe_bottom
         };
@@ -2947,14 +3094,14 @@ impl AppRuntime {
                 let first_balloon = res.balloons.first().cloned();
                 let _ = self.apply_skin_switch(first_shell.clone(), first_balloon.clone());
                 let msg = format!(
-                    "\\0\\s[5]스킨 설치 완료! (셸 {}개, 말풍선 {}개)\\e",
+                    "\\0\\s[5]スキンを導入しました！（シェル {}個、バルーン {}個）\\e",
                     res.shells.len(),
                     res.balloons.len()
                 );
                 let _ = self.proxy.send_event(UserEvent::PlayActions(parse_dialogue(&msg)));
             }
             Err(e) => {
-                let msg = format!("\\0\\s[3]스킨 설치에 실패했어요: {e}\\e");
+                let msg = format!("\\0\\s[3]スキンの導入に失敗しました: {e}\\e");
                 let _ = self.proxy.send_event(UserEvent::PlayActions(parse_dialogue(&msg)));
             }
         }
@@ -2968,6 +3115,10 @@ impl AppRuntime {
             MenuRow {
                 label: "💬 話しかける · Chat (Double-Click)".to_string(),
                 cmd: MenuCommand::OpenCommunicate,
+            },
+            MenuRow {
+                label: "🎨 デフォルトスキンに戻す · Default Skin".to_string(),
+                cmd: MenuCommand::ResetDefaultSkin,
             },
             MenuRow {
                 label: "📁 スキン追加 (.nar / .zip)...".to_string(),
@@ -3005,24 +3156,11 @@ impl AppRuntime {
                 cmd: MenuCommand::Separator,
             },
             MenuRow {
-                label: "[AI プロバイダー · Providers]".to_string(),
+                label: "[キャラクターシェル · Shells]".to_string(),
                 cmd: MenuCommand::Separator,
             },
         ];
 
-        for p in provider_catalog() {
-            let active = cfg.provider == p.id;
-            let mark = if active { "✓" } else { " " };
-            rows.push(MenuRow {
-                label: format!("{mark} {}", p.label),
-                cmd: MenuCommand::SwitchProvider(p.id, p.default_model),
-            });
-        }
-
-        rows.push(MenuRow {
-            label: "[キャラクターシェル · Shells]".to_string(),
-            cmd: MenuCommand::Separator,
-        });
         for s in shells {
             let mark = if cfg.active_shell_id == s.id { "✓" } else { " " };
             rows.push(MenuRow {
@@ -3040,6 +3178,19 @@ impl AppRuntime {
             rows.push(MenuRow {
                 label: format!("{mark} {}", b.name),
                 cmd: MenuCommand::SwitchBalloon(b.id),
+            });
+        }
+
+        rows.push(MenuRow {
+            label: "[AI プロバイダー · Providers]".to_string(),
+            cmd: MenuCommand::Separator,
+        });
+        for p in provider_catalog() {
+            let active = cfg.provider == p.id;
+            let mark = if active { "✓" } else { " " };
+            rows.push(MenuRow {
+                label: format!("{mark} {}", p.label),
+                cmd: MenuCommand::SwitchProvider(p.id, p.default_model),
             });
         }
 
@@ -3077,6 +3228,10 @@ impl AppRuntime {
         let chat_item = MenuItem::new("💬 話しかける · Chat", true, None);
         map.insert(chat_item.id().clone(), MenuCommand::OpenCommunicate);
         let _ = menu.append(&chat_item);
+
+        let reset_skin_item = MenuItem::new("🎨 デフォルトスキンに戻す · Default Skin", true, None);
+        map.insert(reset_skin_item.id().clone(), MenuCommand::ResetDefaultSkin);
+        let _ = menu.append(&reset_skin_item);
 
         let nar_item = MenuItem::new("📁 スキン追加 (.nar / .zip)...", true, None);
         map.insert(nar_item.id().clone(), MenuCommand::InstallNarDialog);
@@ -3166,6 +3321,12 @@ impl AppRuntime {
             MenuCommand::OpenCommunicate => {
                 self.open_communicate_near_sakura();
             }
+            MenuCommand::ResetDefaultSkin => {
+                let _ = self.apply_skin_switch(
+                    Some("neo_default".to_string()),
+                    Some("clean_default".to_string()),
+                );
+            }
             MenuCommand::SwitchShell(sid) => {
                 let _ = self.apply_skin_switch(Some(sid), None);
             }
@@ -3250,7 +3411,7 @@ impl AppRuntime {
             MenuCommand::ClearHistory => {
                 self.engine.clear_history();
                 let _ = self.proxy.send_event(UserEvent::PlayActions(parse_dialogue(
-                    "\\0\\s[1]대화 기억을 깨끗하게 비웠어요!\\e",
+                    "\\0\\s[1]会話履歴をクリアしたよ！\\e",
                 )));
             }
             MenuCommand::Quit => {
@@ -3269,7 +3430,7 @@ impl AppRuntime {
     ) -> Result<Value, String> {
         let valid = provider_catalog().into_iter().find(|p| p.id == provider);
         let Some(p) = valid else {
-            return Err(format!("알 수 없는 프로바이더: {provider}"));
+            return Err(format!("不明なプロバイダー: {provider}"));
         };
         let next_model = model.filter(|m| !m.trim().is_empty()).unwrap_or(p.default_model);
         crate::agent_engine::assert_allowed_model(&next_model)?;
@@ -3279,7 +3440,10 @@ impl AppRuntime {
             ..Default::default()
         });
         self.rebuild_tray_menu();
-        let msg = format!("\\0\\s[5]AI 엔진을 {} ({}) 모드로 전환했어요!\\e", p.label, next_model);
+        let msg = format!(
+            "\\0\\s[5]AI エンジンを {} ({}) に切り替えたよ！\\e",
+            p.label, next_model
+        );
         let _ = self.proxy.send_event(UserEvent::PlayActions(parse_dialogue(&msg)));
         Ok(json!({ "provider": cfg.provider, "model": cfg.model }))
     }
@@ -3327,7 +3491,9 @@ impl AppRuntime {
         let Some(ref mut menu) = self.menu else { return };
         menu.rows = rows;
         menu.scroll_row = 0;
+        menu.scroll_accum = 0.0;
         menu.hovered_idx = None;
+        menu.max_visible_rows = (((mh - 36.0) / menu.row_h).floor() as usize).clamp(16, 38);
         if let Some(ref gpu) = self.gpu {
             menu.redraw(&mut self.text_renderer, gpu);
         }
@@ -3709,6 +3875,19 @@ impl AppRuntime {
             if summaries.is_empty() {
                 return Err("발견된 셸이 없습니다.".to_string());
             }
+            if summaries.first().map(|s| s.id.as_str()) != Some("neo_default") {
+                return Err(format!(
+                    "기본 셸 정렬 오류: neo_default가 첫 번째여야 합니다 (actual={:?})",
+                    summaries.first().map(|s| s.id.as_str())
+                ));
+            }
+            let bal_summaries = self.balloon_manager.list_balloons();
+            if bal_summaries.first().map(|b| b.id.as_str()) != Some("clean_default") {
+                return Err(format!(
+                    "기본 벌룬 정렬 오류: clean_default가 첫 번째여야 합니다 (actual={:?})",
+                    bal_summaries.first().map(|b| b.id.as_str())
+                ));
+            }
 
             let proof_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("artifacts");
             let _ = std::fs::create_dir_all(&proof_dir);
@@ -3762,6 +3941,28 @@ impl AppRuntime {
                 return Err("neo_default 셸을 찾을 수 없습니다.".to_string());
             }
 
+            // Optional local classic-shell visual proof export (.pna / seriko compatibility)
+            let user_shells_dir = crate::config_store::default_user_data_dir().join("shells");
+            if user_shells_dir.is_dir() {
+                let user_mgr = crate::shell_parser::ShellManager::new(vec![user_shells_dir]);
+                for classic_id in ["mayura", "dokuko"] {
+                    if let Ok(mut cm) = user_mgr.load_shell(classic_id) {
+                        sak_win.display_scale = cm.descript.display_scale.clamp(0.5, 4.0);
+                        ker_win.display_scale = sak_win.display_scale;
+                        sak_win.set_surface(&mut cm, gpu, 0, true);
+                        ker_win.set_surface(&mut cm, gpu, 10, true);
+                        let _ = sak_win
+                            .composited
+                            .save_png(&proof_dir.join(format!("{classic_id}-0.png")));
+                        if classic_id == "mayura" {
+                            let _ = ker_win
+                                .composited
+                                .save_png(&proof_dir.join("mayura-10.png"));
+                        }
+                    }
+                }
+            }
+
             // Re-activate default active shell & render dual balloons + export balloon PNG proof
             let active_id = self.config_store.get().active_shell_id;
             let mut active_manifest = self.shell_manager.load_shell(&active_id)?;
@@ -3780,7 +3981,7 @@ impl AppRuntime {
                 sb.utterance_min_w = 0;
                 sb.large = false;
             }
-            let short_script = "\\0\\s[0]안녕! 何か藍(NanikaAi) v1.3.1!\\e";
+            let short_script = "\\0\\s[0]안녕! 何か藍(NanikaAi) v0.1.3!\\e";
             self.playback.enqueue(parse_dialogue(short_script));
             let _ = self.playback.fast_forward();
             self.sync_balloons_to_playback();
@@ -3806,7 +4007,7 @@ impl AppRuntime {
                 sb.utterance_min_w = 0;
                 sb.large = false;
             }
-            let demo_script = "\\0\\s[0]안녕! 100% Safe Rust 何か藍(NanikaAi) v1.3.1 テスト完了だよ！\\n\\n長い文章では吹き出しが内容に合わせて滑らかに広がり、最大サイズに達すると自動的にスクロールバーとトラックが表示されて、マウスホイールで快適に読み進められます。\\n\\n1行目: Live2D骨格・胸部呼吸・髪/アホ毛/スカートの物理揺れを有効化。\\n2行目: うにゅうの体型専用メッシュと自然な色味を保持。\\n3行目: Gemma/SentencePieceのバイトフォールバック文字も完全復元。\\w3\\1\\s[10]サングラスの上からもバッチリ見えてるぜ。\\e";
+            let demo_script = "\\0\\s[0]안녕! 100% Safe Rust 何か藍(NanikaAi) v0.1.3 テスト完了だよ！\\n\\n長い文章では吹き出しが内容に合わせて滑らかに広がり、最大サイズに達すると自動的にスクロールバーとトラックが表示されて、マウスホイールで快適に読み進められます。\\n\\n1行目: Live2D骨格・胸部呼吸・髪/アホ毛/スカートの物理揺れを有効化。\\n2行目: うにゅうの体型専用メッシュと自然な色味を保持。\\n3行目: Gemma/SentencePieceのバイトフォールバック文字も完全復元。\\w3\\1\\s[10]サングラスの上からもバッチリ見えてるぜ。\\e";
             self.playback.enqueue(parse_dialogue(demo_script));
             let _ = self.playback.fast_forward();
             self.sync_balloons_to_playback();
@@ -3841,6 +4042,24 @@ impl AppRuntime {
                     .save_png(&proof_dir.join("proof-comm-ime.png"))?;
                 cw.text.clear();
                 cw.ime_preedit.clear();
+            }
+
+            // Phase D: Right-click Menu visual & 1-click default skin restore proof
+            let menu_rows = self.build_menu_rows();
+            if !menu_rows
+                .iter()
+                .any(|r| matches!(r.cmd, MenuCommand::ResetDefaultSkin))
+            {
+                return Err("우클릭 메뉴에 기본 스킨 복구 항목(ResetDefaultSkin)이 없습니다.".to_string());
+            }
+            if let Some(ref mut m) = self.menu {
+                m.rows = menu_rows;
+                m.scroll_row = 0;
+                m.scroll_accum = 0.0;
+                m.hovered_idx = Some(1);
+                m.max_visible_rows = 24;
+                let (_, menu_bmp) = m.render_bitmap(&mut self.text_renderer, 2.0);
+                menu_bmp.save_png(&proof_dir.join("proof-menu.png"))?;
             }
 
             // Exercise HTTP GET /api/health, POST /api/speak, and raw TCP SSTP/1.4
@@ -3998,7 +4217,7 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
         let sak_bal_ws = make_ws("NanikaAi Balloon Sakura", 260, 108, cfg.always_on_top, false, false);
         let kero_bal_ws = make_ws("NanikaAi Balloon Kero", 240, 96, cfg.always_on_top, false, false);
         let comm_ws = make_ws("NanikaAi Communicate", 452, 92, true, true, false);
-        let menu_ws = make_ws("NanikaAi Menu", 270, 320, true, true, false);
+        let menu_ws = make_ws("NanikaAi Menu", 304, 420, true, true, false);
 
         self.sakura = Some(CharacterWindowState {
             scope: Scope::Sakura,
@@ -4034,6 +4253,7 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
             center_u: 0.50,
             aspect_hw: 1.5,
             rig: Live2dRigState::new(),
+            is_neo_default: cfg.active_shell_id == "neo_default",
         });
 
         if let Some(kws) = kero_ws {
@@ -4071,6 +4291,7 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                 center_u: 0.50,
                 aspect_hw: 1.5,
                 rig: Live2dRigState::new(),
+                is_neo_default: cfg.active_shell_id == "neo_default",
             });
         }
 
@@ -4138,9 +4359,11 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                 rows: Vec::new(),
                 hovered_idx: None,
                 scroll_row: 0,
-                win_size: (270, 320),
-                row_h: 26.0,
-                max_visible_rows: 18,
+                scroll_accum: 0.0,
+                win_size: (304, 420),
+                row_h: 24.0,
+                max_visible_rows: 32,
+                last_render_bmp: RgbaBitmap::new_transparent(16, 16),
             });
         }
 
@@ -4515,7 +4738,7 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                 } else if is_menu {
                     if let Some(ref mut m) = self.menu {
                         let local = position.to_logical::<f64>(m.ws.window.scale_factor().max(1.0));
-                        let rel_row = ((local.y - 6.0) / m.row_h).floor() as isize;
+                        let rel_row = ((local.y - 7.0) / m.row_h).floor() as isize;
                         let new_hover = if rel_row >= 0 {
                             let idx = m.scroll_row + rel_row as usize;
                             if idx < m.rows.len() && !matches!(m.rows[idx].cmd, MenuCommand::Separator) {
@@ -4562,13 +4785,41 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                 } else if is_menu {
                     if let Some(ref mut m) = self.menu {
                         let max_scroll = m.rows.len().saturating_sub(m.max_visible_rows);
-                        if dy < 0.0 {
-                            m.scroll_row = (m.scroll_row + 1).min(max_scroll);
-                        } else if dy > 0.0 {
-                            m.scroll_row = m.scroll_row.saturating_sub(1);
-                        }
-                        if let Some(ref gpu) = self.gpu {
-                            m.redraw(&mut self.text_renderer, gpu);
+                        if max_scroll == 0 {
+                            m.scroll_row = 0;
+                            m.scroll_accum = 0.0;
+                        } else {
+                            m.scroll_accum += dy;
+                            let step = 18.0;
+                            let prev_row = m.scroll_row;
+                            while m.scroll_accum <= -step {
+                                m.scroll_accum += step;
+                                if m.scroll_row < max_scroll {
+                                    m.scroll_row += 1;
+                                } else {
+                                    m.scroll_accum = 0.0;
+                                    break;
+                                }
+                            }
+                            while m.scroll_accum >= step {
+                                m.scroll_accum -= step;
+                                if m.scroll_row > 0 {
+                                    m.scroll_row -= 1;
+                                } else {
+                                    m.scroll_accum = 0.0;
+                                    break;
+                                }
+                            }
+                            if m.scroll_row == 0 && m.scroll_accum > 0.0 {
+                                m.scroll_accum = 0.0;
+                            } else if m.scroll_row == max_scroll && m.scroll_accum < 0.0 {
+                                m.scroll_accum = 0.0;
+                            }
+                            if prev_row != m.scroll_row {
+                                if let Some(ref gpu) = self.gpu {
+                                    m.redraw(&mut self.text_renderer, gpu);
+                                }
+                            }
                         }
                     }
                 }

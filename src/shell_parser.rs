@@ -13,6 +13,8 @@ use zip::ZipArchive;
 use crate::dialogue_parser::Scope;
 
 pub const CURATED_SHELL_ORDER: &[&str] = &[
+    "neo_default",
+    "akari_default",
     "master",
     "mayura",
     "mayura_santa",
@@ -23,18 +25,16 @@ pub const CURATED_SHELL_ORDER: &[&str] = &[
     "dokuko",
     "yohko",
     "kikka_master",
-    "neo_default",
-    "akari_default",
 ];
 
 pub const CURATED_BALLOON_ORDER: &[&str] = &[
+    "clean_default",
+    "default",
+    "default_dot",
     "twin tail",
     "wiz",
     "emily4",
     "switch_L",
-    "default",
-    "default_dot",
-    "clean_default",
 ];
 
 #[derive(Debug, Clone)]
@@ -175,6 +175,30 @@ impl RgbaBitmap {
                     self.data[didx + 2] = (b_num / out_a).min(255) as u8;
                     self.data[didx + 3] = out_a.min(255) as u8;
                 }
+            }
+        }
+    }
+
+    /// Overwrites destination pixels directly with `src` RGBA (Ukagaka SERIKO `replace` mode).
+    pub fn replace_rect(&mut self, src: &RgbaBitmap, dst_x: i32, dst_y: i32) {
+        let sw = src.width as i32;
+        let sh = src.height as i32;
+        let dw = self.width as i32;
+        let dh = self.height as i32;
+
+        for sy in 0..sh {
+            let dy = dst_y + sy;
+            if dy < 0 || dy >= dh {
+                continue;
+            }
+            for sx in 0..sw {
+                let dx = dst_x + sx;
+                if dx < 0 || dx >= dw {
+                    continue;
+                }
+                let sidx = ((sy as u32 * src.width + sx as u32) * 4) as usize;
+                let didx = ((dy as u32 * self.width + dx as u32) * 4) as usize;
+                self.data[didx..didx + 4].copy_from_slice(&src.data[sidx..sidx + 4]);
             }
         }
     }
@@ -576,27 +600,77 @@ pub fn decode_ukagaka_bytes(buf: &[u8]) -> String {
     decoded.into_owned()
 }
 
-pub fn load_ukagaka_rgba(png_path: &Path, pna_path: Option<&Path>) -> Option<RgbaBitmap> {
-    let raw_im = image::open(png_path).ok()?;
-    let has_native_alpha = raw_im.color().has_alpha();
-    let (w, h) = raw_im.dimensions();
-    let mut data = raw_im.to_rgba8().into_raw();
+fn open_image_guessed(path: &Path) -> Option<image::DynamicImage> {
+    let reader = image::ImageReader::open(path).ok()?.with_guessed_format().ok()?;
+    reader.decode().ok()
+}
 
-    if let Some(pna) = pna_path {
-        if pna.is_file() {
-            if let Ok(pna_im) = image::open(pna) {
-                if pna_im.dimensions() == (w, h) {
-                    let gray = pna_im.to_luma8();
-                    for (i, alpha_px) in gray.as_raw().iter().enumerate() {
-                        data[i * 4 + 3] = *alpha_px;
-                    }
-                    return Some(RgbaBitmap { width: w, height: h, data });
+pub fn find_companion_pna(png_path: &Path, explicit_pna: Option<&Path>) -> Option<PathBuf> {
+    if let Some(p) = explicit_pna {
+        if p.is_file() {
+            return Some(p.to_path_buf());
+        }
+    }
+    let lower = png_path.with_extension("pna");
+    if lower.is_file() {
+        return Some(lower);
+    }
+    let upper = png_path.with_extension("PNA");
+    if upper.is_file() {
+        return Some(upper);
+    }
+    let stem = png_path.file_stem()?.to_str()?;
+    let target_name = format!("{stem}.pna");
+    let parent = png_path.parent()?;
+    if let Ok(rd) = fs::read_dir(parent) {
+        for ent in rd.filter_map(|e| e.ok()) {
+            let fname = ent.file_name();
+            if fname.to_string_lossy().eq_ignore_ascii_case(&target_name) {
+                let p = ent.path();
+                if p.is_file() {
+                    return Some(p);
                 }
             }
         }
     }
+    None
+}
 
-    if has_native_alpha {
+pub fn load_ukagaka_rgba(png_path: &Path, pna_path: Option<&Path>) -> Option<RgbaBitmap> {
+    load_ukagaka_rgba_opts(png_path, pna_path, None, false)
+}
+
+pub fn load_ukagaka_rgba_opts(
+    png_path: &Path,
+    pna_path: Option<&Path>,
+    use_self_alpha: Option<bool>,
+    raw_asis: bool,
+) -> Option<RgbaBitmap> {
+    let raw_im = open_image_guessed(png_path)?;
+    let has_native_alpha = raw_im.color().has_alpha();
+    let (w, h) = raw_im.dimensions();
+    let mut data = raw_im.to_rgba8().into_raw();
+
+    if raw_asis {
+        return Some(RgbaBitmap { width: w, height: h, data });
+    }
+
+    if let Some(pna) = find_companion_pna(png_path, pna_path) {
+        if let Some(pna_im) = open_image_guessed(&pna) {
+            if pna_im.dimensions() == (w, h) {
+                let gray = pna_im.to_luma8();
+                for (i, alpha_px) in gray.as_raw().iter().enumerate() {
+                    data[i * 4 + 3] = *alpha_px;
+                }
+                return Some(RgbaBitmap { width: w, height: h, data });
+            }
+        }
+    }
+
+    let has_effective_alpha = use_self_alpha != Some(false)
+        && has_native_alpha
+        && data.chunks_exact(4).any(|px| px[3] < 255);
+    if has_effective_alpha {
         return Some(RgbaBitmap { width: w, height: h, data });
     }
 
@@ -629,6 +703,7 @@ pub struct ShellDescript {
     pub sakura_balloon_alignment: String,
     pub kero_balloon_alignment: String,
     pub display_scale: f64,
+    pub use_self_alpha: Option<bool>,
 }
 
 impl Default for ShellDescript {
@@ -644,6 +719,7 @@ impl Default for ShellDescript {
             sakura_balloon_alignment: "none".to_string(),
             kero_balloon_alignment: "none".to_string(),
             display_scale: 1.0,
+            use_self_alpha: None,
         }
     }
 }
@@ -980,16 +1056,26 @@ impl ShellManifest {
                 if !epath.is_file() {
                     continue;
                 }
-                let pna = epath.with_extension("pna");
-                let layer = load_ukagaka_rgba(&epath, if pna.is_file() { Some(&pna) } else { None })?;
+                let raw_asis = elem.method == "asis";
+                let layer = load_ukagaka_rgba_opts(
+                    &epath,
+                    None,
+                    self.descript.use_self_alpha,
+                    raw_asis,
+                )?;
                 let ox = elem.x.max(0) as u32;
                 let oy = elem.y.max(0) as u32;
                 let need_w = (ox + layer.width).max(1);
                 let need_h = (oy + layer.height).max(1);
+                let is_replace = elem.method == "replace";
                 match canvas.as_mut() {
                     None => {
                         let mut c = RgbaBitmap::new_transparent(need_w, need_h);
-                        c.alpha_composite(&layer, ox as i32, oy as i32);
+                        if is_replace {
+                            c.replace_rect(&layer, ox as i32, oy as i32);
+                        } else {
+                            c.alpha_composite(&layer, ox as i32, oy as i32);
+                        }
                         canvas = Some(c);
                     }
                     Some(c) => {
@@ -1001,7 +1087,11 @@ impl ShellManifest {
                             expanded.alpha_composite(c, 0, 0);
                             *c = expanded;
                         }
-                        c.alpha_composite(&layer, ox as i32, oy as i32);
+                        if is_replace {
+                            c.replace_rect(&layer, ox as i32, oy as i32);
+                        } else {
+                            c.alpha_composite(&layer, ox as i32, oy as i32);
+                        }
                     }
                 }
             }
@@ -1010,7 +1100,12 @@ impl ShellManifest {
         if canvas.is_none() {
             if let Some(ref img_path) = sdef.image_path {
                 if img_path.is_file() {
-                    canvas = load_ukagaka_rgba(img_path, sdef.pna_path.as_deref());
+                    canvas = load_ukagaka_rgba_opts(
+                        img_path,
+                        sdef.pna_path.as_deref(),
+                        self.descript.use_self_alpha,
+                        false,
+                    );
                 }
             }
         }
@@ -1213,6 +1308,14 @@ pub fn parse_descript_txt(text: &str) -> ShellDescript {
                     if sc.is_finite() && (0.5..=4.0).contains(&sc) {
                         d.display_scale = sc;
                     }
+                }
+            }
+            "seriko.use_self_alpha" => {
+                let low = val.to_ascii_lowercase();
+                if matches!(low.as_str(), "1" | "true" | "yes") {
+                    d.use_self_alpha = Some(true);
+                } else if matches!(low.as_str(), "0" | "false" | "no") {
+                    d.use_self_alpha = Some(false);
                 }
             }
             _ => {}
@@ -1689,9 +1792,9 @@ impl ShellManager {
                     None
                 }
             })
-            .or_else(|| list.iter().find(|s| s.id == "master"))
             .or_else(|| list.iter().find(|s| s.id == "neo_default"))
             .or_else(|| list.iter().find(|s| s.id == "akari_default"))
+            .or_else(|| list.iter().find(|s| s.id == "master"))
             .unwrap_or(&list[0]);
 
         let sdir = chosen.path.clone();
@@ -1931,8 +2034,8 @@ impl BalloonManager {
         let chosen = list
             .iter()
             .find(|b| b.id == balloon_id)
-            .or_else(|| list.iter().find(|b| b.id == "twin tail"))
             .or_else(|| list.iter().find(|b| b.id == "clean_default"))
+            .or_else(|| list.iter().find(|b| b.id == "twin tail"))
             .unwrap_or(&list[0]);
 
         let bdir = chosen.path.clone();
@@ -2493,5 +2596,86 @@ mod tests {
         let stretched = bmp.resized_three_slice_v(120, 160, 0.25);
         assert_eq!((stretched.width, stretched.height), (120, 160));
         assert!(stretched.count_opaque_pixels() > 8000);
+    }
+
+    #[test]
+    fn pna_alpha_mask_and_classic_shells_preserve_black_outfits() {
+        let tmp_dir = std::env::temp_dir().join(format!("nanikaai_pna_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp_dir);
+        fs::create_dir_all(&tmp_dir).expect("create tmp dir");
+
+        // 1) RGB PNG with (0,0,0) bg AND (0,0,0) black outfit + companion PNG-encoded .pna mask
+        let png_path = tmp_dir.join("surface0.png");
+        let pna_tmp = tmp_dir.join("surface0_mask_tmp.png");
+        let pna_path = tmp_dir.join("surface0.pna");
+        let mut rgb = image::RgbImage::new(16, 16);
+        let mut mask = image::RgbImage::new(16, 16);
+        for y in 4..12 {
+            for x in 4..12 {
+                // Opaque black pixels inside the dress ((0,0,0) RGB, mask=255)
+                rgb.put_pixel(x, y, image::Rgb([0, 0, 0]));
+                mask.put_pixel(x, y, image::Rgb([255, 255, 255]));
+            }
+        }
+        rgb.save(&png_path).expect("save png");
+        mask.save(&pna_tmp).expect("save mask");
+        fs::rename(&pna_tmp, &pna_path).expect("rename .pna");
+
+        let bmp = load_ukagaka_rgba(&png_path, None).expect("decode png+pna");
+        assert!(!bmp.is_opaque_at(0, 0), "(0,0) corner must be transparent via .pna");
+        assert!(bmp.is_opaque_at(8, 8), "black outfit interior matching bg RGB must stay opaque via .pna");
+        assert_eq!(bmp.count_opaque_pixels(), 64);
+
+        // 2) Native RGBA PNG where corner (0,0,0,0) and black lineart (0,0,0,255) share RGB=(0,0,0)
+        let rgba_path = tmp_dir.join("native_rgba.png");
+        let mut rgba = image::RgbaImage::new(12, 12);
+        for y in 3..9 {
+            for x in 3..9 {
+                rgba.put_pixel(x, y, image::Rgba([0, 0, 0, 255]));
+            }
+        }
+        rgba.save(&rgba_path).expect("save rgba");
+        let rgba_bmp = load_ukagaka_rgba(&rgba_path, None).expect("decode rgba");
+        assert!(!rgba_bmp.is_opaque_at(0, 0));
+        assert!(rgba_bmp.is_opaque_at(6, 6), "native RGBA black lineart must stay opaque");
+        let _ = fs::remove_dir_all(&tmp_dir);
+
+        // 3) Curated ordering check: default skins must come first
+        assert_eq!(CURATED_SHELL_ORDER.first().copied(), Some("neo_default"));
+        assert_eq!(CURATED_BALLOON_ORDER.first().copied(), Some("clean_default"));
+
+        // 4) Local classic shell & balloon verification when user shells are present
+        let user_dir = crate::config_store::default_user_data_dir();
+        let user_shells = user_dir.join("shells");
+        if user_shells.join("mayura").is_dir() {
+            let smgr = ShellManager::new(vec![user_shells.clone()]);
+            let list = smgr.list_shells();
+            for s in &list {
+                let mut mf = smgr.load_shell(&s.id).unwrap_or_else(|e| panic!("load {}: {e}", s.id));
+                let s0_id = mf.resolve_surface_id(Scope::Sakura, 0);
+                let s10_id = mf.resolve_surface_id(Scope::Kero, 10);
+                let s0 = mf.compose_base_rgba(s0_id).unwrap_or_else(|| panic!("{} surface0 ({s0_id}) missing", s.id));
+                let s10 = mf.compose_base_rgba(s10_id).unwrap_or_else(|| panic!("{} surface10 ({s10_id}) missing", s.id));
+                assert!(s0.count_opaque_pixels() > 3000, "{} s0 too sparse", s.id);
+                assert!(s10.count_opaque_pixels() > 1000, "{} s10 too sparse", s.id);
+            }
+            let mayura = smgr.load_shell("mayura").expect("load mayura");
+            let m0 = mayura.compose_base_rgba(0).expect("mayura s0");
+            let m10 = mayura.compose_base_rgba(10).expect("mayura s10");
+            assert!(!m0.is_opaque_at(0, 0), "mayura s0 corner must be transparent");
+            assert!(!m10.is_opaque_at(0, 0), "mayura s10 corner must be transparent");
+            // mayura s10 is black Unyu: center (74, 64) has RGB=(0,0,0) and must remain opaque via .pna
+            assert!(m10.is_opaque_at(74, 64), "mayura s10 black body must not be color-keyed away");
+            assert!(m10.count_opaque_pixels() > 6000, "mayura s10 opaque px={}", m10.count_opaque_pixels());
+            assert!(m0.count_opaque_pixels() > 50_000, "mayura s0 opaque px={}", m0.count_opaque_pixels());
+        }
+        let user_balloons = user_dir.join("balloons");
+        if user_balloons.join("emily4").is_dir() {
+            let bmgr = BalloonManager::new(vec![user_balloons]);
+            let emily = bmgr.load_balloon("emily4").expect("load emily4");
+            let (fr, _) = emily.load_frame_rgba(Scope::Sakura, "left", false);
+            assert!(!fr.is_opaque_at(0, 0), "emily4 corner must be transparent via .pna");
+            assert!(fr.is_opaque_at((fr.width / 2) as i32, (fr.height / 2) as i32));
+        }
     }
 }
