@@ -1,4 +1,4 @@
-# 何か藍 — NanikaAi (`nanikaai` `v1.3.0`)
+# 何か藍 — NanikaAi (`nanikaai` `v1.3.1`)
 
 > 🌐 **Language**: **[日本語 (Default)](#日本語)** | **[English (Default)](#english)** | **[한국어 (Optional)](README.ko.md)**
 

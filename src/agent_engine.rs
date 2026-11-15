@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 
 use crate::builtin_tools::{tools_schema, BuiltinToolRunner};
 use crate::config_store::{user_home_dir, AgentConfig, ConfigStore, DEFAULT_PERSONA};
-use crate::dialogue_parser::{parse_dialogue, DialogueAction, Scope};
+use crate::dialogue_parser::{
+    normalize_sakura_script, parse_dialogue, strip_reasoning_blocks, DialogueAction, Scope,
+};
 use crate::shell_parser::ShellManifest;
 
 pub const PREFERRED_MODELS: &[&str] = &["gemma4:31b", "llama3.1:8b"];
@@ -451,7 +453,7 @@ impl AgentEngine {
             ),
             format!("動作OS: {}", std::env::consts::OS),
             "・言語規則: 日本語入力には日本語、韓国語入力には必ず100%自然な韓国語（日本語を混ぜないこと）、英語入力には英語で返答すること（マウス反応や起動挨拶などシステムイベント時は自然な日本語または直前の会話言語でよい）。".to_string(),
-            "・出力形式規則: 必ず Sakura Script タグ（`\\0\\s[0]...\\1\\s[10]...\\e`）のみを行頭キャラ名ラベル無しで出力し、検索結果や数値を含む本文はすべて `\\e` より前のセリフ内に書き、`\\e` の後ろには1文字も出力しないこと。".to_string(),
+            "・出力形式規則: 必ず Sakura Script タグ（\\0\\s[0]...\\1\\s[10]...\\e）のみを行頭キャラ名ラベル・HTML/XMLタグ(<br>, <think>, <|...|>)・<0x..>バイト列・コードブロック記号無しで生出力し、検索結果や数値を含む本文はすべて \\e より前のセリフ内に書き、\\e の後ろには1文字も出力しないこと。".to_string(),
         ];
 
         if cfg.enable_tools {
@@ -634,11 +636,12 @@ impl AgentEngine {
     pub fn sanitize_reply_for_history(&self, raw_reply: &str) -> String {
         static CROSS_SCOPE_RE: OnceLock<Regex> = OnceLock::new();
         let re = CROSS_SCOPE_RE.get_or_init(|| {
-            Regex::new(r"(\\(?:1|2|u|p\[1\]))((?:\\n|\\w[1-9]|\\_w\[\d+\]|\\b\[-?\d+\])*)\\s\[([0-9])\]")
+            Regex::new(r"(\\(?:1|2|u|p\[1\]))((?:\\n|\\w[0-9]|\\_?w\[\d+\]|\\b\[-?\d+\])*)\\s\[([0-9])\]")
                 .unwrap()
         });
+        let cleaned = normalize_sakura_script(&strip_reasoning_blocks(raw_reply));
         let mut manifest = self.manifest.lock().expect("manifest mutex poisoned");
-        re.replace_all(raw_reply, |caps: &regex::Captures| {
+        re.replace_all(&cleaned, |caps: &regex::Captures| {
             let sid: i32 = caps[3].parse().unwrap_or(0);
             let mapped = manifest.resolve_surface_id(Scope::Kero, sid);
             format!("{}{}\\s[{}]", &caps[1], &caps[2], mapped)
@@ -1706,9 +1709,15 @@ mod tests {
             .load_shell("neo_default")
             .expect("load neo_default");
         let eng = AgentEngine::new(cfg_store, runner, Arc::new(Mutex::new(manifest)), None);
-        let cleaned = eng.sanitize_reply_for_history("\\0\\s[5]Hello\\1\\s[5]Yo!\\e");
+        let cleaned = eng.sanitize_reply_for_history(
+            "<|thought|>inner<|/thought|>\\0\\s[5]Hello\\1\\s[5]Yo!<0xE3><0x80><0x80><end_of_turn>\\e",
+        );
         assert!(cleaned.contains("\\1\\s[12]"));
         assert!(!cleaned.contains("\\1\\s[5]"));
+        assert!(!cleaned.contains("<|thought|>"));
+        assert!(!cleaned.contains("<0x"));
+        assert!(!cleaned.contains("<end_of_turn>"));
+        assert!(cleaned.contains('\u{3000}'));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
