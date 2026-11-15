@@ -1,4 +1,4 @@
-# 何か藍 — NanikaAi (`nanikaai` `v1.2.1`)
+# 何か藍 — NanikaAi (`nanikaai` `v1.2.2`)
 
 > 🌐 **Language**: **[日本語 (Default)](README.md#日本語)** | **[English (Default)](README.md#english)** | **한국어 (Optional)**
 
@@ -17,9 +17,9 @@ macOS, Windows, Linux 환경에서 외부 런타임 설치나 OS 네이티브 �
 
 | 영역 | 핵심 구현 내용 |
 | :--- | :--- |
-| **Zero `unsafe` 네이티브 GUI 및 정밀 접지** | `winit 0.30` + `wgpu 24` 투명 알파 컴포지팅과 `cosmic-text 0.12` CJK 문자 렌더링을 결합했다. `display.scale` 기반 HiDPI(`@2x`) 고해상도 표시, `Window::set_cursor_hittest` 투명 영역 클릭 투과, OS별 작업 영역(macOS 메뉴바/Dock, Windows 작업 표시줄, X11/Wayland `_NET_WORKAREA`) 자동 인식과 발끝 접지, 50ms 커서 폴링 머리 쓰다듬기(Wobble-tolerant Head Stroking), SERIKO 애니메이션, 한·일·영 IME 지원 대화창(`Communicate`) 및 시스템 트레이(`tray-icon`)를 제공한다. |
+| **Zero `unsafe` 네이티브 GUI · Live2D 2.5D 모션** | `winit 0.30` + `wgpu 24` 투명 알파 컴포지팅(원본 RGB 색상을 바꾸지 않는 WGSL 2.5D 변형 셰이더 기반 호흡·흔들림·커서 시선 추적·쓰다듬기/클릭 탄성 바운스·발화 바운스＋SERIKO `talk` 립싱크, 메뉴 ON/OFF 지원)과 `cosmic-text 0.12` CJK 문자 렌더링을 결합했다. HiDPI(`@2x`), 투명 영역 클릭 투과, OS별 작업 영역(macOS 메뉴바/Dock, Windows 작업 표시줄, X11/Wayland `_NET_WORKAREA`) 자동 인식 발끝 접지, 33ms 커서 폴링 머리 쓰다듬기, 한·일·영 IME 대화창(`Communicate`) 및 시스템 트레이(`tray-icon`)를 제공한다. |
 | **엄격한 캐릭터 스코프 분리 (`\0` / `\1`)** | Sakura Script `\0`(주 캐릭터)과 `\1`(파트너 캐릭터)의 서피스 해결 및 대화 히스토리를 완전 분리해 스킨 혼선을 방지한다. 기존 우카가카 `.nar` / `.zip` 아카이브 드래그 앤 드롭 및 메뉴 설치를 지원한다(`.png` / `.pna` / Shift-JIS `descript.txt` · `surfaces.txt` 호환). |
-| **클린 오픈소스 자산 분리 (`MIT` + `CC0-1.0`)** | 저장소 기본 탑재 스킨(`neo_default`, `clean_default`)은 본 프로젝트에서 직접 제작한 **CC0-1.0** 퍼블릭 도메인 자산만 포함한다. 사쿠라(`\0`) 블루·화이트 전신 부츠(`@2x`), 우뉴(`\1`) 코 아래쪽에 작은 둥근 선글라스를 걸쳐 위로 두 눈이 모두 보이는 파트너＋하이톱 운동화(`@2x`), 반투명 펄 글래스모피즘 말풍선(`@2x`)으로 구성된다. 개인 소장 클래식 셸·말풍선은 각 OS 사용자 데이터 디렉터리에서 자동 로드한다. |
+| **클린 오픈소스 자산 분리 (`MIT` + `CC0-1.0`)** | 저장소 기본 탑재 스킨(`neo_default`, `clean_default`)은 본 프로젝트에서 직접 제작한 **CC0-1.0** 퍼블릭 도메인 자산만 포함한다. 사쿠라(`\0`) 정통파 모에 감성의 네이비·화이트 리본 원피스＋전신 부츠(`@2x`), 우뉴(`\1`) 선명한 페리윙클 블루(`#94A3FF`) 바탕에 2.5D 입체 음영을 더한 말랑한 떡형 바디와 코끝에 걸친 작은 둥근 선글라스 위로 두 눈이 또렷이 보이는 디자인(`@2x`), 반투명 펄 글래스모피즘 말풍선(`@2x`)으로 구성된다. 개인 소장 클래식 셸·말풍선은 각 OS 사용자 데이터 디렉터리에서 자동 로드한다. |
 | **멀티 AI 백엔드 & SSTP/HTTP 듀얼 서버** | 로컬·원격 Ollama(`gemma4` 등), Gemini CLI/API, Claude CLI/API, ChatGPT Codex, OpenAI 호환 엔드포인트를 지원하며 중국산 LLM 차단 가드를 내장했다. HTTP JSON(`127.0.0.1:9821`)과 클래식 `SSTP/1.4` TCP(`127.0.0.1:9801`)를 동시에 제공한다. |
 
 ## 4. 사용자 스킨(`.nar`) 저장 경로

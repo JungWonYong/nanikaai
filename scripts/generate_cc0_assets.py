@@ -3,8 +3,10 @@
 
 Uses Pillow exclusively (no numpy required) to:
 1. Extract crisp, halo-free RGBA sprites for ``neo_default`` from optional
-   ``--raw-dir`` magenta-keyed renders via flood-fill + 3px chroma despill +
-   feathered face grafting onto pixel-locked full-body bases (with full feet).
+   ``--raw-dir`` chroma-keyed renders (#00FF00 green or #FF00FF magenta) via
+   connected flood-fill + 3px chroma despill + feathered face grafting onto
+   pixel-locked full-body bases (with uncut feet/base), plus true classic
+   periwinkle (#94A3FF) palette calibration for Unyu (\1) preserving 2.5D depth.
 2. Procedurally render modern frosted-glass HiDPI (@2x) balloons
    (``clean_default``) with soft Gaussian shadows and seamless side tails.
 3. Composite the twin-mascot rounded emblem ``assets/icon.png``.
@@ -15,6 +17,7 @@ from __future__ import annotations
 import argparse
 from collections import deque
 from pathlib import Path
+import statistics
 from typing import Iterable
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
@@ -33,48 +36,65 @@ are dedicated cleanly to the public domain under CC0-1.0:
 https://creativecommons.org/publicdomain/zero/1.0/
 """
 
-# Sakura canvas: 400 x 960 px (@2x -> 200 x 480 pt logical)
-SAKURA_CANVAS = (400, 960)
-# Unyu canvas: 400 x 500 px (@2x -> 200 x 250 pt logical)
-UNYU_CANVAS = (400, 500)
+# Sakura canvas: 440 x 900 px (@2x -> 220 x 450 pt logical)
+SAKURA_CANVAS = (440, 900)
+# Unyu canvas: 380 x 420 px (@2x -> 190 x 210 pt logical)
+UNYU_CANVAS = (380, 420)
 
 
 def _find_raw_file(raw_dir: Path, prefix: str) -> Path:
-    matches = sorted(raw_dir.glob(f"{prefix}*.jpg")) + sorted(raw_dir.glob(f"{prefix}*.png"))
+    matches = (
+        sorted(raw_dir.glob(f"{prefix}*.jpg"))
+        + sorted(raw_dir.glob(f"{prefix}*.jpeg"))
+        + sorted(raw_dir.glob(f"{prefix}*.png"))
+    )
     if not matches:
         raise FileNotFoundError(f"Missing raw asset '{prefix}*' in {raw_dir}")
     return matches[-1]
 
 
-def _extract_magenta_rgba(im: Image.Image) -> Image.Image:
-    """Remove #FF00FF backdrop cleanly via connected flood-fill, spill unmix, and dust prune."""
-    rgb = im.convert("RGB")
+def _detect_chroma_mode(rgb: Image.Image) -> str:
+    """Detect #00FF00 green screen vs #FF00FF magenta screen from corner pixels."""
     w, h = rgb.size
-    r, g, b = rgb.split()
-    min_rb = ImageChops.darker(r, b)
-    mag_ex = ImageChops.subtract(min_rb, g)
+    corners = [rgb.getpixel((4, 4)), rgb.getpixel((w - 5, 4)), rgb.getpixel((4, h - 5)), rgb.getpixel((w - 5, h - 5))]
+    green_score = sum(max(0, g - max(r, b)) for r, g, b in corners)
+    magenta_score = sum(max(0, min(r, b) - g) for r, g, b in corners)
+    return "green" if green_score >= magenta_score else "magenta"
 
-    # High-confidence magenta seeds catch exterior and closed inner gaps safely (skin blush has B <= G).
-    seed = ImageChops.darker(
-        ImageChops.darker(
-            r.point(lambda v: 255 if v >= 180 else 0),
-            b.point(lambda v: 255 if v >= 180 else 0),
-        ),
-        mag_ex.point(lambda v: 255 if v >= 105 else 0),
-    )
-    cand = ImageChops.darker(
-        ImageChops.darker(
-            r.point(lambda v: 255 if v >= 135 else 0),
-            b.point(lambda v: 255 if v >= 135 else 0),
-        ),
-        mag_ex.point(lambda v: 255 if v >= 45 else 0),
-    )
 
+def _prune_small_alpha_components(alpha: Image.Image, w: int, h: int, min_px: int = 80) -> Image.Image:
+    a_bytes = bytearray(alpha.tobytes())
+    visited = bytearray(w * h)
+    for i in range(w * h):
+        if a_bytes[i] > 24 and not visited[i]:
+            comp = [i]
+            visited[i] = 1
+            head = 0
+            while head < len(comp):
+                cur = comp[head]
+                head += 1
+                cx = cur % w
+                cy = cur // w
+                for nb in (
+                    cur - 1 if cx > 0 else -1,
+                    cur + 1 if cx + 1 < w else -1,
+                    cur - w if cy > 0 else -1,
+                    cur + w if cy + 1 < h else -1,
+                ):
+                    if nb >= 0 and not visited[nb] and a_bytes[nb] > 24:
+                        visited[nb] = 1
+                        comp.append(nb)
+            if len(comp) < min_px:
+                for px in comp:
+                    a_bytes[px] = 0
+    return Image.frombytes("L", (w, h), bytes(a_bytes))
+
+
+def _flood_fill_exterior(seed: Image.Image, cand: Image.Image, w: int, h: int) -> Image.Image:
     seed_bytes = seed.tobytes()
     cand_bytes = cand.tobytes()
     ext = bytearray(seed_bytes)
 
-    # Seed BFS only from outer border candidates or seed boundary pixels touching candidates.
     q: deque[int] = deque()
     for x in range(w):
         for y in (0, h - 1):
@@ -118,48 +138,122 @@ def _extract_magenta_rgba(im: Image.Image) -> Image.Image:
             ext[idx + w] = 255
             q.append(idx + w)
 
-    ext_img = Image.frombytes("L", (w, h), bytes(ext))
+    return Image.frombytes("L", (w, h), bytes(ext))
+
+
+def _extract_chroma_rgba(im: Image.Image) -> Image.Image:
+    """Remove #00FF00 green or #FF00FF magenta backdrop via flood-fill, 3px despill, and dust prune."""
+    rgb = im.convert("RGB")
+    w, h = rgb.size
+    r, g, b = rgb.split()
+    mode = _detect_chroma_mode(rgb)
+
+    if mode == "green":
+        max_rb = ImageChops.lighter(r, b)
+        chroma_ex = ImageChops.subtract(g, max_rb)
+        seed = ImageChops.darker(
+            g.point(lambda v: 255 if v >= 135 else 0),
+            chroma_ex.point(lambda v: 255 if v >= 48 else 0),
+        )
+        cand = ImageChops.darker(
+            g.point(lambda v: 255 if v >= 90 else 0),
+            chroma_ex.point(lambda v: 255 if v >= 24 else 0),
+        )
+    else:
+        min_rb = ImageChops.darker(r, b)
+        chroma_ex = ImageChops.subtract(min_rb, g)
+        seed = ImageChops.darker(
+            ImageChops.darker(
+                r.point(lambda v: 255 if v >= 180 else 0),
+                b.point(lambda v: 255 if v >= 180 else 0),
+            ),
+            chroma_ex.point(lambda v: 255 if v >= 105 else 0),
+        )
+        cand = ImageChops.darker(
+            ImageChops.darker(
+                r.point(lambda v: 255 if v >= 135 else 0),
+                b.point(lambda v: 255 if v >= 135 else 0),
+            ),
+            chroma_ex.point(lambda v: 255 if v >= 45 else 0),
+        )
+
+    ext_img = _flood_fill_exterior(seed, cand, w, h)
     near_ext = ext_img.filter(ImageFilter.MaxFilter(7))  # 3px halo neighborhood
     ring = ImageChops.subtract(near_ext, ext_img)
 
-    # Spill ramp & channel despill only inside the narrow 3px boundary ring.
-    spill = ImageChops.darker(mag_ex.point(lambda v: max(0, v - 10)), near_ext)
-    ring_alpha = spill.point(lambda e: int(round(255.0 * max(0.0, min(1.0, 1.0 - e / 195.0)))))
-    despill_amt = spill.point(lambda e: min(255, int(round(0.85 * e))))
+    spill = ImageChops.darker(chroma_ex.point(lambda v: max(0, v - 8)), near_ext)
+    ring_alpha = spill.point(lambda e: int(round(255.0 * max(0.0, min(1.0, 1.0 - e / 180.0)))))
+    despill_amt = spill.point(lambda e: min(255, int(round(0.9 * e))))
 
     fg_interior = ImageChops.invert(near_ext)
     alpha = ImageChops.lighter(fg_interior, ImageChops.darker(ring, ring_alpha))
+    alpha = _prune_small_alpha_components(alpha, w, h, min_px=80)
 
-    # Remove faint residual dark/magenta dust speckles (< 80px connected components).
-    a_bytes = bytearray(alpha.tobytes())
-    visited = bytearray(w * h)
-    for i in range(w * h):
-        if a_bytes[i] > 24 and not visited[i]:
-            comp = [i]
-            visited[i] = 1
-            head = 0
-            while head < len(comp):
-                cur = comp[head]
-                head += 1
-                cx = cur % w
-                cy = cur // w
-                for nb in (
-                    cur - 1 if cx > 0 else -1,
-                    cur + 1 if cx + 1 < w else -1,
-                    cur - w if cy > 0 else -1,
-                    cur + w if cy + 1 < h else -1,
-                ):
-                    if nb >= 0 and not visited[nb] and a_bytes[nb] > 24:
-                        visited[nb] = 1
-                        comp.append(nb)
-            if len(comp) < 80:
-                for px in comp:
-                    a_bytes[px] = 0
-    alpha = Image.frombytes("L", (w, h), bytes(a_bytes))
-
+    if mode == "green":
+        g_clean = ImageChops.subtract(g, despill_amt)
+        return Image.merge("RGBA", (r, g_clean, b, alpha))
     r_clean = ImageChops.subtract(r, despill_amt)
     b_clean = ImageChops.subtract(b, despill_amt)
     return Image.merge("RGBA", (r_clean, g, b_clean, alpha))
+
+
+def _calibrate_unyu_periwinkle(rgba: Image.Image) -> Image.Image:
+    """Calibrate Unyu's periwinkle body color to classic #94A3FF (148, 163, 255) while preserving 2.5D shading."""
+    buf = bytearray(rgba.tobytes())
+    n = len(buf)
+    rs: list[int] = []
+    gs: list[int] = []
+    bs: list[int] = []
+
+    for i in range(0, n, 4):
+        r, g, b, a = buf[i], buf[i + 1], buf[i + 2], buf[i + 3]
+        if a > 220 and max(r, g, b) > 125 and b > g + 20 and b > r + 35:
+            rs.append(r)
+            gs.append(g)
+            bs.append(b)
+
+    if not rs:
+        return rgba
+
+    med_r = statistics.median(rs)
+    med_g = statistics.median(gs)
+    med_b = statistics.median(bs)
+
+    target_r, target_g, target_b = 148.0, 163.0, 255.0
+    if not (138 <= med_r <= 158 and 154 <= med_g <= 174 and 244 <= med_b <= 255):
+        dr = target_r - med_r
+        dg = target_g - med_g
+        db = target_b - med_b
+        for i in range(0, n, 4):
+            r, g, b, a = buf[i], buf[i + 1], buf[i + 2], buf[i + 3]
+            if a <= 40:
+                continue
+            # Smooth weight selecting ONLY periwinkle blue body pixels (excludes outlines, glasses, eyes, pink blush)
+            w_blue = max(0.0, min(1.0, (b - r - 20.0) / 45.0)) * max(0.0, min(1.0, (b - g - 12.0) / 30.0))
+            w_lum = max(0.0, min(1.0, (b - 135.0) / 45.0))
+            # Softly preserve specular bright highlight dome while keeping midtones/shadows true
+            w_hi = max(0.30, min(1.0, (240.0 - (r + g) * 0.5) / 55.0))
+            w = w_blue * w_lum * w_hi
+            if w > 0.01:
+                buf[i] = max(0, min(255, int(round(r + dr * w))))
+                buf[i + 1] = max(0, min(255, int(round(g + dg * w))))
+                buf[i + 2] = max(0, min(255, int(round(b + db * w))))
+
+    # Re-verify calibrated median
+    rs2, gs2, bs2 = [], [], []
+    for i in range(0, n, 4):
+        r, g, b, a = buf[i], buf[i + 1], buf[i + 2], buf[i + 3]
+        if a > 220 and max(r, g, b) > 125 and b > g + 20 and b > r + 35:
+            rs2.append(r)
+            gs2.append(g)
+            bs2.append(b)
+    if rs2:
+        m_r, m_g, m_b = statistics.median(rs2), statistics.median(gs2), statistics.median(bs2)
+        if not (138 <= m_r <= 158 and 154 <= m_g <= 174 and 244 <= m_b <= 255):
+            raise RuntimeError(
+                f"Unyu calibrated median RGB ({m_r:.1f}, {m_g:.1f}, {m_b:.1f}) out of periwinkle bounds"
+            )
+    return Image.frombytes("RGBA", rgba.size, bytes(buf))
 
 
 def _align_raw_rgb(base_rgb: Image.Image, expr_rgb: Image.Image, anchor_box: tuple[int, int, int, int]) -> Image.Image:
@@ -196,6 +290,20 @@ def _feathered_ellipse_mask(
     return mask
 
 
+def _feathered_ellipses_mask(
+    size: tuple[int, int],
+    boxes: list[tuple[int, int, int, int]],
+    blur_radius: float,
+) -> Image.Image:
+    mask = Image.new("L", size, 0)
+    draw = ImageDraw.Draw(mask)
+    for box in boxes:
+        draw.ellipse(box, fill=255)
+    if blur_radius > 0:
+        mask = mask.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+    return mask
+
+
 def _frame_to_canvas(
     rgba: Image.Image,
     bbox: tuple[int, int, int, int],
@@ -222,36 +330,39 @@ def _build_neo_shell_from_raw(raw_dir: Path) -> None:
     SHELL_DIR.mkdir(parents=True, exist_ok=True)
 
     # ---- Sakura (\0) pixel-locked base + feathered face expressions ----
-    sak_base_raw = Image.open(_find_raw_file(raw_dir, "sakura_base_")).convert("RGB")
-    sak_base_rgba = _extract_magenta_rgba(sak_base_raw)
+    sak_base_raw = Image.open(_find_raw_file(raw_dir, "sakura_base")).convert("RGB")
+    sak_base_rgba = _extract_chroma_rgba(sak_base_raw)
     sak_bbox = sak_base_rgba.getbbox()
     if sak_bbox is None:
         raise RuntimeError("Sakura base extraction produced empty alpha")
 
-    sak_face_mask_raw = _feathered_ellipse_mask(sak_base_raw.size, (306, 148, 436, 276), blur_radius=6.0)
-    sak_blink_mask_raw = _feathered_ellipse_mask(sak_base_raw.size, (320, 162, 422, 222), blur_radius=3.5)
+    # Face mask covers eyes + eyebrows + blush + mouth inside (768, 1376) raw frame
+    sak_face_mask_raw = _feathered_ellipse_mask(sak_base_raw.size, (278, 206, 480, 368), blur_radius=7.0)
+    # Blink mask covers eyes strictly above mouth (y <= 303)
+    sak_blink_mask_raw = _feathered_ellipse_mask(sak_base_raw.size, (294, 218, 462, 303), blur_radius=4.0)
+    # Lip-sync mouth mask covers cheerful speaking mouth strictly below eyes
+    sak_mouth_mask_raw = _feathered_ellipse_mask(sak_base_raw.size, (348, 302, 404, 354), blur_radius=4.5)
 
     def map_sakura_expr(prefix: str) -> Image.Image:
         expr_raw = Image.open(_find_raw_file(raw_dir, prefix)).convert("RGB")
-        aligned = _align_raw_rgb(sak_base_raw, expr_raw, (240, 80, 500, 170))
-        # Apply expression cleanly over base canvas (RGB preserved inside alpha of base, plus local RGBA crop)
-        r0, g0, b0, a0 = sak_base_rgba.split()
-        expr_rgba = _extract_magenta_rgba(aligned)
+        aligned = _align_raw_rgb(sak_base_raw, expr_raw, (240, 460, 520, 740))
+        a0 = sak_base_rgba.getchannel("A")
+        expr_rgba = _extract_chroma_rgba(aligned)
         comp_rgb = Image.composite(expr_rgba.convert("RGB"), sak_base_rgba.convert("RGB"), sak_face_mask_raw)
         comp_a = Image.composite(expr_rgba.getchannel("A"), a0, sak_face_mask_raw)
         merged = Image.merge("RGBA", (*comp_rgb.split(), comp_a))
-        framed, _, _ = _frame_to_canvas(merged, sak_bbox, SAKURA_CANVAS, target_h=916, bottom_pad=20)
+        framed, _, _ = _frame_to_canvas(merged, sak_bbox, SAKURA_CANVAS, target_h=840, bottom_pad=24)
         return framed
 
-    s0, _, _ = _frame_to_canvas(sak_base_rgba, sak_bbox, SAKURA_CANVAS, target_h=916, bottom_pad=20)
-    s_shy = map_sakura_expr("sakura_shy_")
-    s_surp = map_sakura_expr("sakura_surprise_")
-    s_troub = map_sakura_expr("sakura_troubled_")
-    s_joy = map_sakura_expr("sakura_joy_")
-    s_closed = map_sakura_expr("sakura_closed_")
-    s_wink = map_sakura_expr("sakura_wink_")
+    s0, _, _ = _frame_to_canvas(sak_base_rgba, sak_bbox, SAKURA_CANVAS, target_h=840, bottom_pad=24)
+    s_shy = map_sakura_expr("sakura_shy")
+    s_surp = map_sakura_expr("sakura_surprise")
+    s_troub = map_sakura_expr("sakura_troubled")
+    s_joy = map_sakura_expr("sakura_joy")
+    s_closed = map_sakura_expr("sakura_closed")
+    s_wink = map_sakura_expr("sakura_wink")
 
-    surfaces = {
+    for fname, img in {
         "surface0.png": s0,
         "surface1.png": s_shy,
         "surface2.png": s_surp,
@@ -261,50 +372,93 @@ def _build_neo_shell_from_raw(raw_dir: Path) -> None:
         "surface6.png": s_closed,
         "surface7.png": s_troub,
         "surface8.png": s_wink,
-    }
-    for fname, img in surfaces.items():
+    }.items():
         img.save(SHELL_DIR / fname)
 
     # SERIKO eye-blink overlays (100 = half blink, 101 = closed eyes only)
     closed_raw = _align_raw_rgb(
         sak_base_raw,
-        Image.open(_find_raw_file(raw_dir, "sakura_closed_")).convert("RGB"),
-        (240, 80, 500, 170),
+        Image.open(_find_raw_file(raw_dir, "sakura_closed")).convert("RGB"),
+        (240, 460, 520, 740),
     )
     closed_rgb_rgba = Image.merge("RGBA", (*closed_raw.split(), sak_blink_mask_raw))
     half_rgb = Image.blend(sak_base_raw, closed_raw, 0.5)
     half_rgb_rgba = Image.merge("RGBA", (*half_rgb.split(), sak_blink_mask_raw))
 
-    s101, _, _ = _frame_to_canvas(closed_rgb_rgba, sak_bbox, SAKURA_CANVAS, target_h=916, bottom_pad=20)
-    s100, _, _ = _frame_to_canvas(half_rgb_rgba, sak_bbox, SAKURA_CANVAS, target_h=916, bottom_pad=20)
+    s101, _, _ = _frame_to_canvas(closed_rgb_rgba, sak_bbox, SAKURA_CANVAS, target_h=840, bottom_pad=24)
+    s100, _, _ = _frame_to_canvas(half_rgb_rgba, sak_bbox, SAKURA_CANVAS, target_h=840, bottom_pad=24)
     s100.save(SHELL_DIR / "surface100.png")
     s101.save(SHELL_DIR / "surface101.png")
 
-    # ---- Unyu (\1) pixel-locked base + sunglasses-top eyes & mouth graft ----
-    unyu_base_raw = Image.open(_find_raw_file(raw_dir, "unyu_base_")).convert("RGB")
-    unyu_base_rgba = _extract_magenta_rgba(unyu_base_raw)
+    # Lip-sync speaking mouth overlay (102) from sakura_wink
+    wink_raw = _align_raw_rgb(
+        sak_base_raw,
+        Image.open(_find_raw_file(raw_dir, "sakura_wink")).convert("RGB"),
+        (240, 460, 520, 740),
+    )
+    mouth_rgba = Image.merge("RGBA", (*wink_raw.split(), sak_mouth_mask_raw))
+    s102, _, _ = _frame_to_canvas(mouth_rgba, sak_bbox, SAKURA_CANVAS, target_h=840, bottom_pad=24)
+    s102.save(SHELL_DIR / "surface102.png")
+
+    # ---- Unyu (\1) plump periwinkle base + eyes above low sunglasses & mouth graft ----
+    unyu_base_raw = Image.open(_find_raw_file(raw_dir, "unyu_base")).convert("RGB")
+    unyu_base_rgba = _calibrate_unyu_periwinkle(_extract_chroma_rgba(unyu_base_raw))
     unyu_bbox = unyu_base_rgba.getbbox()
     if unyu_bbox is None:
         raise RuntimeError("Unyu base extraction produced empty alpha")
 
-    # Covers both eyes clearly visible ABOVE low round sunglasses AND mouth expression zone
-    unyu_face_mask = _feathered_ellipse_mask(unyu_base_raw.size, (346, 474, 704, 706), blur_radius=7.0)
+    # Covers raised eyebrows/eyes above low round sunglasses AND mouth below bridge
+    unyu_face_mask = _feathered_ellipse_mask(unyu_base_raw.size, (365, 295, 792, 608), blur_radius=10.0)
+    # Tight blink masks covering left/right eyes strictly above the sunglasses rims
+    unyu_blink_mask = _feathered_ellipses_mask(
+        unyu_base_raw.size,
+        [(382, 392, 540, 466), (625, 392, 774, 466)],
+        blur_radius=4.5,
+    )
+    # Tight mouth mask strictly between/below sunglasses lenses
+    unyu_mouth_mask = _feathered_ellipse_mask(unyu_base_raw.size, (556, 514, 648, 596), blur_radius=5.0)
 
     def map_unyu_expr(prefix: str) -> Image.Image:
         expr_raw = Image.open(_find_raw_file(raw_dir, prefix)).convert("RGB")
-        aligned = _align_raw_rgb(unyu_base_raw, expr_raw, (200, 720, 680, 1080))
-        a0 = unyu_base_rgba.getchannel("A")
-        expr_rgba = _extract_magenta_rgba(aligned)
-        comp_rgb = Image.composite(expr_rgba.convert("RGB"), unyu_base_rgba.convert("RGB"), unyu_face_mask)
-        comp_a = Image.composite(expr_rgba.getchannel("A"), a0, unyu_face_mask)
+        aligned = _align_raw_rgb(unyu_base_raw, expr_raw, (320, 620, 760, 880))
+        expr_cal = _calibrate_unyu_periwinkle(_extract_chroma_rgba(aligned))
+        comp_rgb = Image.composite(expr_cal.convert("RGB"), unyu_base_rgba.convert("RGB"), unyu_face_mask)
+        comp_a = Image.composite(expr_cal.getchannel("A"), unyu_base_rgba.getchannel("A"), unyu_face_mask)
         merged = Image.merge("RGBA", (*comp_rgb.split(), comp_a))
-        framed, _, _ = _frame_to_canvas(merged, unyu_bbox, UNYU_CANVAS, target_h=440, bottom_pad=20)
+        framed, _, _ = _frame_to_canvas(merged, unyu_bbox, UNYU_CANVAS, target_h=364, bottom_pad=24)
         return framed
 
-    s10, _, _ = _frame_to_canvas(unyu_base_rgba, unyu_bbox, UNYU_CANVAS, target_h=440, bottom_pad=20)
+    s10, _, _ = _frame_to_canvas(unyu_base_rgba, unyu_bbox, UNYU_CANVAS, target_h=364, bottom_pad=24)
     s10.save(SHELL_DIR / "surface10.png")
-    map_unyu_expr("unyu_surprise_").save(SHELL_DIR / "surface11.png")
-    map_unyu_expr("unyu_smug_").save(SHELL_DIR / "surface12.png")
+    map_unyu_expr("unyu_surprise").save(SHELL_DIR / "surface11.png")
+    map_unyu_expr("unyu_smug").save(SHELL_DIR / "surface12.png")
+
+    # Unyu SERIKO eye-blink overlays (110 = half blink, 111 = closed eyes above sunglasses)
+    u_closed_raw = _align_raw_rgb(
+        unyu_base_raw,
+        Image.open(_find_raw_file(raw_dir, "unyu_closed")).convert("RGB"),
+        (320, 620, 760, 880),
+    )
+    u_closed_cal = _calibrate_unyu_periwinkle(_extract_chroma_rgba(u_closed_raw)).convert("RGB")
+    u_base_cal_rgb = unyu_base_rgba.convert("RGB")
+    u_closed_ov = Image.merge("RGBA", (*u_closed_cal.split(), unyu_blink_mask))
+    u_half_ov = Image.merge("RGBA", (*Image.blend(u_base_cal_rgb, u_closed_cal, 0.5).split(), unyu_blink_mask))
+
+    s110, _, _ = _frame_to_canvas(u_half_ov, unyu_bbox, UNYU_CANVAS, target_h=364, bottom_pad=24)
+    s111, _, _ = _frame_to_canvas(u_closed_ov, unyu_bbox, UNYU_CANVAS, target_h=364, bottom_pad=24)
+    s110.save(SHELL_DIR / "surface110.png")
+    s111.save(SHELL_DIR / "surface111.png")
+
+    # Unyu lip-sync speaking mouth overlay (112) from unyu_smug
+    u_smug_raw = _align_raw_rgb(
+        unyu_base_raw,
+        Image.open(_find_raw_file(raw_dir, "unyu_smug")).convert("RGB"),
+        (320, 620, 760, 880),
+    )
+    u_smug_cal = _calibrate_unyu_periwinkle(_extract_chroma_rgba(u_smug_raw)).convert("RGB")
+    u_mouth_ov = Image.merge("RGBA", (*u_smug_cal.split(), unyu_mouth_mask))
+    s112, _, _ = _frame_to_canvas(u_mouth_ov, unyu_bbox, UNYU_CANVAS, target_h=364, bottom_pad=24)
+    s112.save(SHELL_DIR / "surface112.png")
 
     (SHELL_DIR / "LICENSE-CC0.txt").write_text(CC0_NOTICE, encoding="utf-8")
     (SHELL_DIR / "descript.txt").write_text(
@@ -317,16 +471,16 @@ def _build_neo_shell_from_raw(raw_dir: Path) -> None:
         "sakura.balloon.offsetx,24\n"
         "sakura.balloon.offsety,44\n"
         "kero.balloon.offsetx,20\n"
-        "kero.balloon.offsety,32\n",
+        "kero.balloon.offsety,28\n",
         encoding="utf-8",
     )
     (SHELL_DIR / "surfaces.txt").write_text(
         "charset,UTF-8\n"
         "version,1\n\n"
         "surface0,1,2,3,4,5,6,7,8\n{\n"
-        "collision0,124,24,274,132,Head\n"
-        "collision1,142,133,246,204,Face\n"
-        "collision2,126,205,274,410,Bust\n"
+        "collision0,125,52,310,142,Head\n"
+        "collision1,158,143,280,248,Face\n"
+        "collision2,118,249,308,398,Bust\n"
         "}\n\n"
         "surface0,1,2,3,4\n{\n"
         "animation0.interval,sometimes\n"
@@ -336,8 +490,25 @@ def _build_neo_shell_from_raw(raw_dir: Path) -> None:
         "animation0.pattern3,overlay,-1,50,0,0\n"
         "}\n\n"
         "surface10,11,12\n{\n"
-        "collision0,88,44,316,264,Head\n"
-        "collision1,96,265,308,478,Body\n"
+        "collision0,48,32,340,188,Head\n"
+        "collision1,32,189,356,396,Body\n"
+        "}\n\n"
+        "surface10,11\n{\n"
+        "animation0.interval,sometimes\n"
+        "animation0.pattern0,overlay,110,60,0,0\n"
+        "animation0.pattern1,overlay,111,85,0,0\n"
+        "animation0.pattern2,overlay,110,60,0,0\n"
+        "animation0.pattern3,overlay,-1,50,0,0\n"
+        "}\n\n"
+        "surface0\n{\n"
+        "animation1.interval,talk\n"
+        "animation1.pattern0,overlay,102,160,0,0\n"
+        "animation1.pattern1,overlay,-1,160,0,0\n"
+        "}\n\n"
+        "surface10\n{\n"
+        "animation1.interval,talk\n"
+        "animation1.pattern0,overlay,112,160,0,0\n"
+        "animation1.pattern1,overlay,-1,160,0,0\n"
         "}\n",
         encoding="utf-8",
     )
@@ -384,9 +555,7 @@ def _draw_frosted_balloon(
     inner_hi = (255, 255, 255, 210)
     stroke_w = 2 * ss
 
-    # Outer bordered body
     d.rounded_rectangle([x0, y0, x1, y1], radius=radius, fill=bg, outline=border, width=stroke_w)
-    # Inner subtle bright rim
     d.rounded_rectangle(
         [x0 + stroke_w, y0 + stroke_w, x1 - stroke_w, y1 - stroke_w],
         radius=max(4, radius - stroke_w),
@@ -394,7 +563,6 @@ def _draw_frosted_balloon(
         width=max(1, ss),
     )
 
-    # Top accent pill with smooth RGB interpolation
     bar_x0 = x0 + 32 * ss
     bar_x1 = x1 - 32 * ss
     bar_y = y0 + 4 * ss
@@ -410,7 +578,6 @@ def _draw_frosted_balloon(
         sx1 = bar_x0 + int(span * (i + 1) / steps) + 1
         d.rectangle([sx0, bar_y, min(sx1, bar_x1), bar_y + bar_h], fill=(r_c, g_c, b_c, 225))
 
-    # Seamless pointer tail pointing directly toward character
     if not comm:
         ty = min(y1 - 44 * ss, y0 + 68 * ss)
         if side == "left":
@@ -433,7 +600,7 @@ def _draw_frosted_balloon(
 def _generate_balloons() -> None:
     BALLOON_DIR.mkdir(parents=True, exist_ok=True)
     sak_a0, sak_a1 = (44, 122, 245), (56, 208, 242)
-    unyu_a0, unyu_a1 = (72, 114, 212), (118, 168, 248)
+    unyu_a0, unyu_a1 = (118, 134, 245), (148, 163, 255)
 
     _draw_frosted_balloon(720, 336, "left", sak_a0, sak_a1, BALLOON_DIR / "balloons0.png")
     _draw_frosted_balloon(720, 336, "right", sak_a0, sak_a1, BALLOON_DIR / "balloons1.png")
@@ -483,9 +650,7 @@ def _generate_app_icon() -> None:
     ss = 2
     cw = size * ss
     badge = Image.new("RGBA", (cw, cw), (0, 0, 0, 0))
-    d = ImageDraw.Draw(badge)
 
-    # Diagonal sapphire-to-cyan squircle badge
     pad = 26 * ss
     radius = 108 * ss
     mask = Image.new("L", (cw, cw), 0)
@@ -493,7 +658,7 @@ def _generate_app_icon() -> None:
 
     grad = Image.new("RGBA", (cw, cw), (0, 0, 0, 255))
     gd = ImageDraw.Draw(grad)
-    c0, c1 = (22, 46, 108), (44, 152, 232)
+    c0, c1 = (24, 48, 120), (54, 150, 232)
     for y in range(cw):
         t = y / float(cw - 1)
         rc = int(round(c0[0] + (c1[0] - c0[0]) * t))
@@ -503,36 +668,31 @@ def _generate_app_icon() -> None:
 
     badge.paste(grad, (0, 0), mask)
 
-    # Soft cyan halo glow
     glow = Image.new("RGBA", (cw, cw), (0, 0, 0, 0))
-    ImageDraw.Draw(glow).ellipse([120 * ss, 80 * ss, 440 * ss, 400 * ss], fill=(120, 230, 255, 70))
+    ImageDraw.Draw(glow).ellipse([120 * ss, 80 * ss, 440 * ss, 400 * ss], fill=(140, 224, 255, 72))
     glow = glow.filter(ImageFilter.GaussianBlur(radius=38 * ss))
     badge = Image.alpha_composite(badge, glow)
 
-    # Clip duo bust portraits neatly inside rounded squircle
     content = Image.new("RGBA", (cw, cw), (0, 0, 0, 0))
     sak_path = SHELL_DIR / "surface0.png"
     unyu_path = SHELL_DIR / "surface10.png"
     if sak_path.exists() and unyu_path.exists():
         sak = Image.open(sak_path).convert("RGBA")
-        # Crop upper half bust + face from 400x960
-        sak_bust = sak.crop((48, 8, 352, 410)).resize((460 * ss // 2 * 2, 608 * ss // 2 * 2), Image.Resampling.LANCZOS)
-        # Scale nicely inside badge
-        sak_bust = sak.crop((54, 12, 346, 360)).resize((int(cw * 0.72), int(cw * 0.85)), Image.Resampling.LANCZOS)
-        content.paste(sak_bust, (int(cw * 0.25), int(cw * 0.14)), sak_bust)
+        # Crop upper half bust + cute head/ahoge from 440x900
+        sak_bust = sak.crop((68, 12, 376, 400)).resize((int(cw * 0.72), int(cw * 0.90)), Image.Resampling.LANCZOS)
+        content.paste(sak_bust, (int(cw * 0.27), int(cw * 0.08)), sak_bust)
 
         unyu = Image.open(unyu_path).convert("RGBA")
-        unyu_bust = unyu.crop((20, 12, 380, 340)).resize((int(cw * 0.56), int(cw * 0.51)), Image.Resampling.LANCZOS)
-        content.paste(unyu_bust, (int(cw * 0.05), int(cw * 0.45)), unyu_bust)
+        unyu_bust = unyu.crop((8, 16, 372, 396)).resize((int(cw * 0.56), int(cw * 0.58)), Image.Resampling.LANCZOS)
+        content.paste(unyu_bust, (int(cw * 0.04), int(cw * 0.42)), unyu_bust)
 
-    # Apply rounded mask clip and outer cyan rim
     clipped = Image.new("RGBA", (cw, cw), (0, 0, 0, 0))
     clipped.paste(content, (0, 0), mask)
     badge = Image.alpha_composite(badge, clipped)
     ImageDraw.Draw(badge).rounded_rectangle(
         [pad, pad, cw - pad, cw - pad],
         radius=radius,
-        outline=(140, 224, 255, 235),
+        outline=(152, 228, 255, 235),
         width=9 * ss,
     )
     badge.resize((size, size), Image.Resampling.LANCZOS).save(ICON_PATH)
@@ -544,7 +704,7 @@ def main(argv: Iterable[str] | None = None) -> None:
         "--raw-dir",
         type=Path,
         default=None,
-        help="Optional directory containing raw #FF00FF Sakura & Unyu base/expression renders.",
+        help="Optional directory containing raw chroma-keyed Sakura & Unyu base/expression renders.",
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
 

@@ -41,21 +41,76 @@ const TYPEWRITER_INTERVAL_MS: u64 = 24;
 #[derive(Copy, Clone)]
 struct ShaderParams {
     premul: u32,
-    _pad: [u32; 3],
+    live2d: u32,
+    pad0: u32,
+    pad1: u32,
+    breath: f32,
+    sway_x: f32,
+    tilt: f32,
+    squish: f32,
+    gaze_x: f32,
+    gaze_y: f32,
+    anchor_v: f32,
+    talk_bob: f32,
+    extra: [f32; 4],
 }
 
-fn as_bytes_shader_params(p: &ShaderParams) -> [u8; 16] {
-    let mut out = [0u8; 16];
+impl ShaderParams {
+    fn idle(premul: u32) -> Self {
+        Self {
+            premul,
+            live2d: 0,
+            pad0: 0,
+            pad1: 0,
+            breath: 0.0,
+            sway_x: 0.0,
+            tilt: 0.0,
+            squish: 0.0,
+            gaze_x: 0.0,
+            gaze_y: 0.0,
+            anchor_v: 0.96,
+            talk_bob: 0.0,
+            extra: [0.0; 4],
+        }
+    }
+}
+
+fn as_bytes_shader_params(p: &ShaderParams) -> [u8; 64] {
+    let mut out = [0u8; 64];
     out[0..4].copy_from_slice(&p.premul.to_ne_bytes());
+    out[4..8].copy_from_slice(&p.live2d.to_ne_bytes());
+    out[8..12].copy_from_slice(&p.pad0.to_ne_bytes());
+    out[12..16].copy_from_slice(&p.pad1.to_ne_bytes());
+    out[16..20].copy_from_slice(&p.breath.to_ne_bytes());
+    out[20..24].copy_from_slice(&p.sway_x.to_ne_bytes());
+    out[24..28].copy_from_slice(&p.tilt.to_ne_bytes());
+    out[28..32].copy_from_slice(&p.squish.to_ne_bytes());
+    out[32..36].copy_from_slice(&p.gaze_x.to_ne_bytes());
+    out[36..40].copy_from_slice(&p.gaze_y.to_ne_bytes());
+    out[40..44].copy_from_slice(&p.anchor_v.to_ne_bytes());
+    out[44..48].copy_from_slice(&p.talk_bob.to_ne_bytes());
+    out[48..52].copy_from_slice(&p.extra[0].to_ne_bytes());
+    out[52..56].copy_from_slice(&p.extra[1].to_ne_bytes());
+    out[56..60].copy_from_slice(&p.extra[2].to_ne_bytes());
+    out[60..64].copy_from_slice(&p.extra[3].to_ne_bytes());
     out
 }
 
 const QUAD_SHADER_WGSL: &str = r#"
 struct Params {
     premul: u32,
+    live2d: u32,
     pad0: u32,
     pad1: u32,
-    pad2: u32,
+    breath: f32,
+    sway_x: f32,
+    tilt: f32,
+    squish: f32,
+    gaze_x: f32,
+    gaze_y: f32,
+    anchor_v: f32,
+    talk_bob: f32,
+    extra: vec4<f32>,
 };
 
 struct VsOut {
@@ -87,7 +142,41 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let c = textureSample(u_tex, u_samp, in.uv);
+    var su = in.uv.x;
+    var sv = in.uv.y;
+    if (u_params.live2d != 0u) {
+        let av = max(u_params.anchor_v, 0.2);
+        let h = clamp((av - in.uv.y) / av, 0.0, 1.0);
+        let h2 = h * h;
+        let torso = sin(h * 3.14159265);
+        var p = vec2<f32>(in.uv.x - 0.5, in.uv.y - av);
+
+        let ang = u_params.tilt * (0.30 + 0.70 * h) + u_params.gaze_x * 0.42 * h;
+        let ca = cos(ang);
+        let sa = sin(ang);
+        p = vec2<f32>(p.x * ca + p.y * sa, -p.x * sa + p.y * ca);
+
+        let depth_center = exp(-p.x * p.x * 4.5);
+        let shift_x = u_params.sway_x * (h * (0.75 + 0.25 * h))
+            + u_params.gaze_x * (0.50 * h + 0.50 * h2)
+            + u_params.gaze_x * 0.30 * depth_center * h;
+        let scale_x = 1.0
+            + u_params.breath * (0.35 + 0.65 * torso)
+            + u_params.squish * (0.40 + 0.75 * torso);
+        let scale_y = 1.0
+            + u_params.breath * 0.50
+            - u_params.squish * 0.90
+            + u_params.talk_bob * 0.55
+            - u_params.gaze_y * 0.35 * h;
+        let shift_y = u_params.gaze_y * 0.30 * (1.0 - depth_center) * h;
+
+        su = (p.x - shift_x) / max(scale_x, 0.75) + 0.5;
+        sv = (p.y - shift_y) / max(scale_y, 0.75) + av;
+    }
+    if (su < 0.0 || su > 1.0 || sv < 0.0 || sv > 1.0) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+    let c = textureSampleLevel(u_tex, u_samp, vec2<f32>(su, sv), 0.0);
     if (u_params.premul != 0u) {
         return vec4<f32>(c.rgb * c.a, c.a);
     }
@@ -122,7 +211,7 @@ struct GpuContext {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    params_buffer: wgpu::Buffer,
+    premul: u32,
     surface_format: wgpu::TextureFormat,
     texture_format: wgpu::TextureFormat,
     alpha_mode: wgpu::CompositeAlphaMode,
@@ -182,15 +271,6 @@ impl GpuContext {
         } else {
             0
         };
-        let params = ShaderParams {
-            premul,
-            _pad: [0; 3],
-        };
-        let params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("shader-params"),
-            contents: &as_bytes_shader_params(&params),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("quad-sampler"),
@@ -276,7 +356,7 @@ impl GpuContext {
             pipeline,
             bind_group_layout,
             sampler,
-            params_buffer,
+            premul,
             surface_format,
             texture_format,
             alpha_mode,
@@ -304,6 +384,8 @@ struct WindowSurface {
     config: wgpu::SurfaceConfiguration,
     texture: Option<wgpu::Texture>,
     bind_group: Option<wgpu::BindGroup>,
+    params_buffer: wgpu::Buffer,
+    last_live2d_active: bool,
     tex_size: (u32, u32),
 }
 
@@ -316,14 +398,27 @@ impl WindowSurface {
         let size = window.inner_size();
         let config = gpu.make_surface_config(size.width, size.height);
         surface.configure(&gpu.device, &config);
+        let params_buffer = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("window-shader-params"),
+            contents: &as_bytes_shader_params(&ShaderParams::idle(gpu.premul)),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
         Self {
             surface,
             window,
             config,
             texture: None,
             bind_group: None,
+            params_buffer,
+            last_live2d_active: false,
             tex_size: (0, 0),
         }
+    }
+
+    fn update_params(&mut self, gpu: &GpuContext, params: &ShaderParams) {
+        gpu.queue
+            .write_buffer(&self.params_buffer, 0, &as_bytes_shader_params(params));
+        self.last_live2d_active = params.live2d != 0;
     }
 
     fn resize(&mut self, gpu: &GpuContext, phys: PhysicalSize<u32>) {
@@ -369,7 +464,7 @@ impl WindowSurface {
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: gpu.params_buffer.as_entire_binding(),
+                        resource: self.params_buffer.as_entire_binding(),
                     },
                 ],
             });
@@ -556,6 +651,13 @@ struct CharacterWindowState {
     drag_start_cursor_global: (f64, f64),
     drag_start_win_pos: (f64, f64),
     last_click_at: Option<Instant>,
+    anim_start: Instant,
+    phase_offset: f32,
+    smooth_gaze: (f32, f32),
+    bounce_at: Option<Instant>,
+    bounce_strength: f32,
+    anchor_v: f32,
+    was_speaking: bool,
     visible: bool,
 }
 
@@ -596,6 +698,11 @@ impl CharacterWindowState {
         pad_px / self.display_scale.max(0.5)
     }
 
+    fn trigger_bounce(&mut self, strength: f32) {
+        self.bounce_at = Some(Instant::now());
+        self.bounce_strength = strength.clamp(0.0, 0.045);
+    }
+
     fn set_surface(
         &mut self,
         manifest: &mut ShellManifest,
@@ -612,8 +719,12 @@ impl CharacterWindowState {
         self.base_bmp = Some(base);
         self.overlays.clear();
         self.active_run = None;
+        self.lip_on = false;
         self.rebuild_composited(gpu, reset_pos);
         self.schedule_seriko_timers(manifest);
+        if !reset_pos {
+            self.trigger_bounce(0.014);
+        }
     }
 
     fn schedule_seriko_timers(&mut self, manifest: &ShellManifest) {
@@ -655,10 +766,39 @@ impl CharacterWindowState {
         let now = Instant::now();
         let mut dirty = false;
 
-        // Subtle lip-sync overlay if classic shell has talk animation or surface+1 exists? No, keep pure SERIKO!
-        if is_speaking_here && now >= self.next_lip_at {
-            self.lip_on = !self.lip_on;
-            self.next_lip_at = now + Duration::from_millis(160);
+        const LIP_OVERLAY_PID: i32 = 9001;
+        if is_speaking_here {
+            if now >= self.next_lip_at {
+                self.lip_on = !self.lip_on;
+                self.next_lip_at = now + Duration::from_millis(160);
+                if self.lip_on {
+                    let talk_pat = manifest.surfaces.get(&self.surface_id).and_then(|sdef| {
+                        sdef.animations
+                            .iter()
+                            .find(|a| a.interval.starts_with("talk"))
+                            .and_then(|a| {
+                                a.patterns.iter().find(|p| {
+                                    p.surface_id >= 0
+                                        && matches!(p.method.as_str(), "overlay" | "overlayfast")
+                                })
+                            })
+                            .map(|p| (p.surface_id, p.offset_x, p.offset_y))
+                    });
+                    if let Some((sid, ox, oy)) = talk_pat {
+                        if let Some(ov_bmp) = manifest.compose_base_rgba(sid) {
+                            self.overlays.insert(LIP_OVERLAY_PID, (ox, oy, ov_bmp));
+                            dirty = true;
+                        }
+                    }
+                } else if self.overlays.remove(&LIP_OVERLAY_PID).is_some() {
+                    dirty = true;
+                }
+            }
+        } else {
+            self.lip_on = false;
+            if self.overlays.remove(&LIP_OVERLAY_PID).is_some() {
+                dirty = true;
+            }
         }
 
         if let Some(mut run) = self.active_run.take() {
@@ -788,10 +928,110 @@ impl CharacterWindowState {
             }
             self.win_size = (new_w, new_h);
         }
+        self.anchor_v = if let Some((_x0, _y0, _x1, y1)) = comp.opaque_bbox() {
+            ((y1 as f32 + 1.0) / (comp.height.max(1) as f32)).clamp(0.5, 0.995)
+        } else {
+            0.96
+        };
         let phys = self.ws.window.inner_size();
         self.ws.resize(gpu, phys);
         self.ws.upload_rgba(gpu, &comp);
         self.composited = comp;
+        self.ws.window.request_redraw();
+    }
+
+    fn tick_live2d(
+        &mut self,
+        gpu: &GpuContext,
+        enabled: bool,
+        global_cursor: Option<(f64, f64)>,
+        is_speaking: bool,
+    ) {
+        if !self.was_speaking && is_speaking && enabled {
+            self.trigger_bounce(0.016);
+        }
+        self.was_speaking = is_speaking;
+
+        if !enabled {
+            self.smooth_gaze = (0.0, 0.0);
+            self.bounce_at = None;
+            if self.ws.last_live2d_active {
+                self.ws.update_params(gpu, &ShaderParams::idle(gpu.premul));
+                self.ws.window.request_redraw();
+            }
+            return;
+        }
+
+        let t = self.anim_start.elapsed().as_secs_f32() + self.phase_offset;
+        let breath = (t * 1.85).sin() * 0.0085;
+        let sway_x = (t * 1.12).sin() * 0.0075 + (t * 0.53).cos() * 0.0035;
+        let tilt = (t * 0.95 + 0.6).sin() * 0.012;
+
+        let squish = if let Some(bt) = self.bounce_at {
+            let dt = bt.elapsed().as_secs_f32();
+            if dt < 0.65 {
+                self.bounce_strength * (-dt * 6.2).exp() * (dt * 21.0).sin()
+            } else {
+                self.bounce_at = None;
+                0.0
+            }
+        } else {
+            0.0
+        };
+
+        let target_gaze = if self.dragging {
+            (0.0_f32, 0.0_f32)
+        } else if let Some((gx, gy)) = global_cursor {
+            if let Ok(outer) = self.ws.window.outer_position() {
+                let scale = self.ws.window.scale_factor().max(1.0);
+                #[cfg(target_os = "macos")]
+                let (wx, wy) = {
+                    let wl = outer.to_logical::<f64>(scale);
+                    (wl.x, wl.y)
+                };
+                #[cfg(not(target_os = "macos"))]
+                let (wx, wy) = (outer.x as f64 / scale, outer.y as f64 / scale);
+                let head_cx = wx + (self.win_size.0 as f64) * 0.5;
+                let head_cy = wy + (self.win_size.1 as f64) * 0.30;
+                #[cfg(target_os = "macos")]
+                let (cgx, cgy) = (gx, gy);
+                #[cfg(not(target_os = "macos"))]
+                let (cgx, cgy) = (gx / scale, gy / scale);
+                let nx = (((cgx - head_cx) / 420.0).clamp(-1.0, 1.0) as f32) * 0.015;
+                let ny = (((cgy - head_cy) / 360.0).clamp(-1.0, 1.0) as f32) * 0.012;
+                (nx, ny)
+            } else {
+                (0.0, 0.0)
+            }
+        } else {
+            (0.0, 0.0)
+        };
+
+        self.smooth_gaze.0 += (target_gaze.0 - self.smooth_gaze.0) * 0.14;
+        self.smooth_gaze.1 += (target_gaze.1 - self.smooth_gaze.1) * 0.14;
+
+        let talk_bob = if is_speaking {
+            (t * 13.5).sin().abs() * 0.009
+        } else {
+            0.0
+        };
+
+        let params = ShaderParams {
+            premul: gpu.premul,
+            live2d: 1,
+            pad0: 0,
+            pad1: 0,
+            breath,
+            sway_x,
+            tilt,
+            squish,
+            gaze_x: self.smooth_gaze.0,
+            gaze_y: self.smooth_gaze.1,
+            anchor_v: self.anchor_v,
+            talk_bob,
+            extra: [0.0; 4],
+        };
+        self.ws.update_params(gpu, &params);
         self.ws.window.request_redraw();
     }
 }
@@ -1080,6 +1320,7 @@ enum MenuCommand {
     SwitchProvider(String, String),
     ToggleKero,
     ToggleAlwaysOnTop,
+    ToggleLive2dMotion,
     InstallNarDialog,
     ResetPositions,
     ClearHistory,
@@ -1903,6 +2144,15 @@ impl AppRuntime {
                 cmd: MenuCommand::ToggleAlwaysOnTop,
             },
             MenuRow {
+                label: if cfg.live2d_motion {
+                    "✓ ✨ Live2D 모션 효과"
+                } else {
+                    "   ✨ Live2D 모션 효과"
+                }
+                .to_string(),
+                cmd: MenuCommand::ToggleLive2dMotion,
+            },
+            MenuRow {
                 label: String::new(),
                 cmd: MenuCommand::Separator,
             },
@@ -1999,6 +2249,18 @@ impl AppRuntime {
         );
         map.insert(aot_item.id().clone(), MenuCommand::ToggleAlwaysOnTop);
         let _ = menu.append(&aot_item);
+
+        let live2d_item = MenuItem::new(
+            if cfg.live2d_motion {
+                "✓ ✨ Live2D 모션 효과"
+            } else {
+                "✨ Live2D 모션 효과"
+            },
+            true,
+            None,
+        );
+        map.insert(live2d_item.id().clone(), MenuCommand::ToggleLive2dMotion);
+        let _ = menu.append(&live2d_item);
 
         let _ = menu.append(&PredefinedMenuItem::separator());
 
@@ -2105,6 +2367,24 @@ impl AppRuntime {
                 }
                 if let Some(ref kb) = self.kero_balloon {
                     kb.ws.window.set_window_level(lvl);
+                }
+                self.rebuild_tray_menu();
+            }
+            MenuCommand::ToggleLive2dMotion => {
+                let cur = self.config_store.get().live2d_motion;
+                let updated = self.config_store.update(ConfigPatch {
+                    live2d_motion: Some(!cur),
+                    ..Default::default()
+                });
+                if !updated.live2d_motion {
+                    if let Some(ref gpu) = self.gpu {
+                        if let Some(ref mut s) = self.sakura {
+                            s.tick_live2d(gpu, false, None, false);
+                        }
+                        if let Some(ref mut k) = self.kero {
+                            k.tick_live2d(gpu, false, None, false);
+                        }
+                    }
                 }
                 self.rebuild_tray_menu();
             }
@@ -2505,6 +2785,18 @@ impl AppRuntime {
         drop(m_guard);
 
         if let Some((scope, region)) = stroke_hit {
+            match scope {
+                Scope::Sakura => {
+                    if let Some(ref mut s) = self.sakura {
+                        s.trigger_bounce(0.026);
+                    }
+                }
+                Scope::Kero => {
+                    if let Some(ref mut k) = self.kero {
+                        k.trigger_bounce(0.026);
+                    }
+                }
+            }
             self.spawn_touch(scope, "stroke", region);
         }
     }
@@ -2584,7 +2876,7 @@ impl AppRuntime {
             *self.manifest.lock().expect("manifest mutex poisoned") = active_manifest;
             self.reset_character_positions();
 
-            let demo_script = "\\0\\s[0]안녕! 100% Safe Rust 何か藍(NanikaAi) v1.2 스모크 테스트 완료예요!\\w3\\1\\s[10]선글라스 아래로 내 눈 잘 보이지?\\e";
+            let demo_script = "\\0\\s[0]안녕! 100% Safe Rust 何か藍(NanikaAi) v1.2.2 스모크 테스트 완료예요!\\w3\\1\\s[10]선글라스 위로 내 눈 잘 보이지?\\e";
             self.playback.enqueue(parse_dialogue(demo_script));
             let _ = self.playback.fast_forward();
             self.sync_balloons_to_playback();
@@ -2774,6 +3066,13 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
             drag_start_cursor_global: (0.0, 0.0),
             drag_start_win_pos: (0.0, 0.0),
             last_click_at: None,
+            anim_start: Instant::now(),
+            phase_offset: 0.0,
+            smooth_gaze: (0.0, 0.0),
+            bounce_at: None,
+            bounce_strength: 0.0,
+            anchor_v: 0.96,
+            was_speaking: false,
             visible: true,
         });
 
@@ -2800,6 +3099,13 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                 drag_start_cursor_global: (0.0, 0.0),
                 drag_start_win_pos: (0.0, 0.0),
                 last_click_at: None,
+                anim_start: Instant::now(),
+                phase_offset: 1.85,
+                smooth_gaze: (0.0, 0.0),
+                bounce_at: None,
+                bounce_strength: 0.0,
+                anchor_v: 0.96,
+                was_speaking: false,
                 visible: cfg.show_kero,
             });
         }
@@ -3281,6 +3587,18 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                             if open_chat {
                                 self.open_communicate_near_sakura();
                             } else if let Some(reg) = touch_region {
+                                match sc {
+                                    Scope::Sakura => {
+                                        if let Some(ref mut s) = self.sakura {
+                                            s.trigger_bounce(0.022);
+                                        }
+                                    }
+                                    Scope::Kero => {
+                                        if let Some(ref mut k) = self.kero {
+                                            k.trigger_bounce(0.022);
+                                        }
+                                    }
+                                }
                                 self.spawn_touch(sc, "double_click", reg);
                             }
                         }
@@ -3434,7 +3752,9 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let next_wakeup = Instant::now() + Duration::from_millis(POLL_INTERVAL_MS);
+        let live2d_on = self.config_store.get().live2d_motion;
+        let poll_ms = if live2d_on { 33 } else { POLL_INTERVAL_MS };
+        let next_wakeup = Instant::now() + Duration::from_millis(poll_ms);
         event_loop.set_control_flow(ControlFlow::WaitUntil(next_wakeup));
 
         if !self.initialized || self.smoke_mode {
@@ -3466,17 +3786,23 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
         self.poll_cursor_and_strokes();
         self.tick_playback();
 
-        // SERIKO animation tick
+        // SERIKO animation & GPU Live2D 2.5D motion tick
         let speaking_sakura = !self.playback.steps.is_empty() && self.playback.active_speaker == Scope::Sakura;
         let speaking_kero = !self.playback.steps.is_empty() && self.playback.active_speaker == Scope::Kero;
+        let global_cursor = match Mouse::get_mouse_position() {
+            Mouse::Position { x, y } => Some((x as f64, y as f64)),
+            Mouse::Error => None,
+        };
         if let Some(ref gpu) = self.gpu {
             let m = self.manifest.lock().expect("manifest mutex poisoned");
             if let Some(ref mut s) = self.sakura {
                 s.tick_seriko(&m, gpu, speaking_sakura);
+                s.tick_live2d(gpu, live2d_on, global_cursor, speaking_sakura);
             }
             if let Some(ref mut k) = self.kero {
                 if k.visible {
                     k.tick_seriko(&m, gpu, speaking_kero);
+                    k.tick_live2d(gpu, live2d_on, global_cursor, speaking_kero);
                 }
             }
         }

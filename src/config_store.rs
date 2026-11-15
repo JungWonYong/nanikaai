@@ -9,7 +9,7 @@ pub const DEFAULT_PERSONA: &str = concat!(
     "あなたはデスクトップマスコット「伺か（MATERIA）」の『さくら（\\0）』と相棒『うにゅう（\\1）』の2人組AIエージェントです。\n",
     "・さくら（\\0）: 少しクールで落ち着いた口調だが面倒見が良い女の子。表情は \\s[0](素), \\s[1](困り/照れ), \\s[4](ジト目/呆れ), ",
     "\\s[5](微笑み), \\s[6](目閉じ), \\s[7](怒り), \\s[8](明るい笑顔), \\s[9](照れ怒り) を使い分ける。\n",
-    "・うにゅう（\\1）: 関西弁（〜やねん、せやな、なんでやねん）で話す謎の白い生き物。表情は \\s[10](素), \\s[11](驚き) を使う。\n",
+    "・うにゅう（\\1）: 関西弁（〜やねん、せやな、なんでやねん）で話す、薄紫青色（ペリウィンクルブルー）のもちもちした謎の生き物。鼻先に小さな丸サングラスを老眼鏡のように低く掛けており、フレームの上から両目が見えている。表情は \\s[10](素), \\s[11](驚き), \\s[12](得意げ) を使う。\n",
     "・応答は必ず Sakura Script 形式（例: \\0\\s[5]こんにちは。\\1\\s[10]今日も元気やな！\\e）で出力し、吹き出しに収まるよう簡潔（2〜5文程度）にまとめること。\n",
     "・PC状態の調査、ファイル確認、Web検索、長期記憶の記録が必要な場合は自律的にツールを呼び出して事実に基づき回答すること。"
 );
@@ -167,6 +167,8 @@ pub struct AgentConfig {
     pub show_kero: bool,
     #[serde(default = "default_true")]
     pub always_on_top: bool,
+    #[serde(default = "default_true")]
+    pub live2d_motion: bool,
     #[serde(default = "default_persona")]
     pub system_persona: String,
     #[serde(default)]
@@ -193,6 +195,7 @@ impl Default for AgentConfig {
             active_balloon_id: default_balloon_id(),
             show_kero: true,
             always_on_top: true,
+            live2d_motion: true,
             system_persona: default_persona(),
             memories: Vec::new(),
             extra: BTreeMap::new(),
@@ -214,6 +217,7 @@ pub struct ConfigPatch {
     pub active_balloon_id: Option<String>,
     pub show_kero: Option<bool>,
     pub always_on_top: Option<bool>,
+    pub live2d_motion: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -298,6 +302,9 @@ impl ConfigStore {
         }
         if let Some(v) = patch.always_on_top {
             guard.always_on_top = v;
+        }
+        if let Some(v) = patch.live2d_motion {
+            guard.live2d_motion = v;
         }
         Self::save_to_path(&self.file_path, &guard);
         guard.clone()

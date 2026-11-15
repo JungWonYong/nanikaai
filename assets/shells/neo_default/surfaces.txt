@@ -3,9 +3,9 @@ version,1
 
 surface0,1,2,3,4,5,6,7,8
 {
-collision0,124,24,274,132,Head
-collision1,142,133,246,204,Face
-collision2,126,205,274,410,Bust
+collision0,125,52,310,142,Head
+collision1,158,143,280,248,Face
+collision2,118,249,308,398,Bust
 }
 
 surface0,1,2,3,4
@@ -19,6 +19,29 @@ animation0.pattern3,overlay,-1,50,0,0
 
 surface10,11,12
 {
-collision0,88,44,316,264,Head
-collision1,96,265,308,478,Body
+collision0,48,32,340,188,Head
+collision1,32,189,356,396,Body
+}
+
+surface10,11
+{
+animation0.interval,sometimes
+animation0.pattern0,overlay,110,60,0,0
+animation0.pattern1,overlay,111,85,0,0
+animation0.pattern2,overlay,110,60,0,0
+animation0.pattern3,overlay,-1,50,0,0
+}
+
+surface0
+{
+animation1.interval,talk
+animation1.pattern0,overlay,102,160,0,0
+animation1.pattern1,overlay,-1,160,0,0
+}
+
+surface10
+{
+animation1.interval,talk
+animation1.pattern0,overlay,112,160,0,0
+animation1.pattern1,overlay,-1,160,0,0
 }

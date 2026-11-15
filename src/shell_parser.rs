@@ -1961,10 +1961,38 @@ mod tests {
             assert_eq!(bottom_opaque, 0, "bottom transparent padding must remain free of cropped soles");
         }
 
-        // Strict scope isolation check: kero must NEVER resolve to 0..=9 or blink overlay 100
+        // Unyu periwinkle body color guard: vivid blue channel dominant over red (never bleached white)
+        let mut blue_cnt: u64 = 0;
+        let mut sum_r: u64 = 0;
+        let mut sum_b: u64 = 0;
+        for px in s10.data.chunks_exact(4) {
+            if px[3] > 220 && (px[2] as i32) > (px[0] as i32) + 40 {
+                blue_cnt += 1;
+                sum_r += px[0] as u64;
+                sum_b += px[2] as u64;
+            }
+        }
+        assert!(blue_cnt > 15_000, "unyu interior periwinkle pixels too few: {blue_cnt}");
+        let mean_r = (sum_r as f64) / (blue_cnt as f64);
+        let mean_b = (sum_b as f64) / (blue_cnt as f64);
+        assert!(mean_b >= 225.0, "unyu blue channel faded: mean_b={mean_b:.1}");
+        assert!(mean_b - mean_r >= 70.0, "unyu washed out toward white: mean_r={mean_r:.1}, mean_b={mean_b:.1}");
+        assert!(mean_r <= 175.0, "unyu red channel too bright/white: mean_r={mean_r:.1}");
+
+        // Lip-sync mouth overlays 102/112 exist & stay excluded from pose lists
+        let s102 = manifest.compose_base_rgba(102).expect("surface 102");
+        let s112 = manifest.compose_base_rgba(112).expect("surface 112");
+        assert!(s102.count_opaque_pixels() > 50, "surface 102 mouth overlay empty");
+        assert!(s112.count_opaque_pixels() > 50, "surface 112 mouth overlay empty");
+
+        // Strict scope isolation check: kero must NEVER resolve to 0..=9 or blink/talk overlays
         let k_ids = manifest.valid_surface_ids(Scope::Kero, 40);
         assert!(k_ids.contains(&10));
         assert!(k_ids.iter().all(|&id| id >= 10 && id < 100));
+        let s_ids = manifest.valid_surface_ids(Scope::Sakura, 120);
+        assert!(!s_ids.contains(&102) && !s_ids.contains(&112), "mouth overlays leaked into Sakura poses: {s_ids:?}");
+        let k_ids_wide = manifest.valid_surface_ids(Scope::Kero, 120);
+        assert!(!k_ids_wide.contains(&102) && !k_ids_wide.contains(&112), "mouth overlays leaked into Kero poses: {k_ids_wide:?}");
         assert_eq!(manifest.resolve_surface_id(Scope::Kero, 0), 10);
         assert_eq!(manifest.resolve_surface_id(Scope::Kero, 5), 12);
         assert_eq!(manifest.resolve_surface_id(Scope::Kero, 1), 11);
