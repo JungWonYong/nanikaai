@@ -35,7 +35,7 @@ use crate::shell_parser::{
 use crate::sstp_server::{start_dual_server, ServerBackend, ServerHandle};
 
 const POLL_INTERVAL_MS: u64 = 50;
-const TYPEWRITER_INTERVAL_MS: u64 = 24;
+const TYPEWRITER_INTERVAL_MS: u64 = 38;
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -720,6 +720,7 @@ impl CharacterWindowState {
         self.overlays.clear();
         self.active_run = None;
         self.lip_on = false;
+        self.next_lip_at = Instant::now();
         self.rebuild_composited(gpu, reset_pos);
         self.schedule_seriko_timers(manifest);
         if !reset_pos {
@@ -748,7 +749,7 @@ impl CharacterWindowState {
                     } else if iv.starts_with("rarely") {
                         11_000
                     } else if iv.starts_with("sometimes") {
-                        5_500
+                        2_200 + (rand::random::<u64>() % 1_800)
                     } else if let Some((_, n_str)) = iv.split_once(',') {
                         let secs = n_str.trim().parse::<u64>().unwrap_or(5).max(1);
                         secs * 1000
@@ -770,7 +771,7 @@ impl CharacterWindowState {
         if is_speaking_here {
             if now >= self.next_lip_at {
                 self.lip_on = !self.lip_on;
-                self.next_lip_at = now + Duration::from_millis(160);
+                self.next_lip_at = now + Duration::from_millis(115);
                 if self.lip_on {
                     let talk_pat = manifest.surfaces.get(&self.surface_id).and_then(|sdef| {
                         sdef.animations
@@ -796,6 +797,7 @@ impl CharacterWindowState {
             }
         } else {
             self.lip_on = false;
+            self.next_lip_at = now;
             if self.overlays.remove(&LIP_OVERLAY_PID).is_some() {
                 dirty = true;
             }
@@ -815,11 +817,10 @@ impl CharacterWindowState {
                             dirty = true;
                         }
                         "base" => {
-                            if sid >= 0 {
-                                if let Some(new_base) = manifest.compose_base_rgba(sid) {
-                                    self.base_bmp = Some(new_base);
-                                    dirty = true;
-                                }
+                            let target_sid = if sid >= 0 { sid } else { self.surface_id };
+                            if let Some(new_base) = manifest.compose_base_rgba(target_sid) {
+                                self.base_bmp = Some(new_base);
+                                dirty = true;
                             }
                         }
                         _ => {}
@@ -848,7 +849,7 @@ impl CharacterWindowState {
                             } else if anim.interval.starts_with("rarely") {
                                 12_000 + (rand::random::<u64>() % 8_000)
                             } else if anim.interval.starts_with("sometimes") {
-                                4_500 + (rand::random::<u64>() % 5_000)
+                                3_000 + (rand::random::<u64>() % 3_200)
                             } else if let Some((_, n_str)) = anim.interval.split_once(',') {
                                 n_str.trim().parse::<u64>().unwrap_or(5).max(1) * 1000
                             } else {
@@ -865,15 +866,15 @@ impl CharacterWindowState {
                         let steps: Vec<_> = anim
                             .patterns
                             .iter()
-                            .enumerate()
-                            .map(|(i, p)| {
+                            .map(|p| {
+                                // Key all patterns of an animation by aid so pattern -1 cleanly clears the slot.
                                 (
-                                    aid * 100 + (i as i32).min(99),
+                                    aid,
                                     p.method.clone(),
                                     p.surface_id,
                                     p.offset_x,
                                     p.offset_y,
-                                    p.delay_ms.max(60),
+                                    p.delay_ms.max(40),
                                 )
                             })
                             .collect();
@@ -992,7 +993,8 @@ impl CharacterWindowState {
                 #[cfg(not(target_os = "macos"))]
                 let (wx, wy) = (outer.x as f64 / scale, outer.y as f64 / scale);
                 let head_cx = wx + (self.win_size.0 as f64) * 0.5;
-                let head_cy = wy + (self.win_size.1 as f64) * 0.30;
+                let head_ratio = if self.scope == Scope::Sakura { 0.22 } else { 0.38 };
+                let head_cy = wy + (self.win_size.1 as f64) * head_ratio;
                 #[cfg(target_os = "macos")]
                 let (cgx, cgy) = (gx, gy);
                 #[cfg(not(target_os = "macos"))]
@@ -1439,6 +1441,7 @@ struct PlaybackQueue {
     paused_until: Option<Instant>,
     next_char_at: Instant,
     active_speaker: Scope,
+    last_char_spoken: Option<(Scope, Instant)>,
     auto_hide_at: Option<Instant>,
     sakura_buf: String,
     kero_buf: String,
@@ -1457,6 +1460,7 @@ impl PlaybackQueue {
             paused_until: None,
             next_char_at: Instant::now(),
             active_speaker: Scope::Sakura,
+            last_char_spoken: None,
             auto_hide_at: None,
             sakura_buf: String::new(),
             kero_buf: String::new(),
@@ -1469,11 +1473,17 @@ impl PlaybackQueue {
         }
     }
 
+    fn is_speaking(&self, scope: Scope) -> bool {
+        self.last_char_spoken
+            .map_or(false, |(sc, t)| sc == scope && t.elapsed() < Duration::from_millis(240))
+    }
+
     fn enqueue(&mut self, actions: Vec<DialogueAction>) {
         self.steps.clear();
         self.paused_until = None;
         self.auto_hide_at = None;
         self.active_speaker = Scope::Sakura;
+        self.last_char_spoken = None;
         self.sakura_buf.clear();
         self.kero_buf.clear();
         self.sakura_choices.clear();
@@ -1546,6 +1556,7 @@ impl PlaybackQueue {
             }
         }
         self.paused_until = None;
+        self.last_char_spoken = None;
         if self.sakura_choices.is_empty() && self.kero_choices.is_empty() {
             self.auto_hide_at = Some(Instant::now() + Duration::from_secs(18));
         }
@@ -2558,6 +2569,7 @@ impl AppRuntime {
                         break;
                     }
                     self.playback.steps.pop_front();
+                    self.playback.last_char_spoken = Some((self.playback.active_speaker, now));
                     if self.playback.active_speaker == Scope::Kero {
                         self.playback.kero_buf.push(ch);
                         self.playback.kero_show = true;
@@ -2578,7 +2590,12 @@ impl AppRuntime {
                 PlaybackStep::Action(act) => {
                     self.playback.steps.pop_front();
                     match act.kind {
-                        ActionKind::Speaker => self.playback.active_speaker = act.scope,
+                        ActionKind::Speaker => {
+                            if self.playback.active_speaker != act.scope {
+                                self.playback.last_char_spoken = None;
+                            }
+                            self.playback.active_speaker = act.scope;
+                        }
                         ActionKind::Surface => {
                             if act.scope == Scope::Kero {
                                 kero_surface_req = Some(act.surface_id);
@@ -2876,7 +2893,7 @@ impl AppRuntime {
             *self.manifest.lock().expect("manifest mutex poisoned") = active_manifest;
             self.reset_character_positions();
 
-            let demo_script = "\\0\\s[0]안녕! 100% Safe Rust 何か藍(NanikaAi) v1.2.2 스모크 테스트 완료예요!\\w3\\1\\s[10]선글라스 위로 내 눈 잘 보이지?\\e";
+            let demo_script = "\\0\\s[0]안녕! 100% Safe Rust 何か藍(NanikaAi) v1.2.3 스모크 테스트 완료예요!\\w3\\1\\s[10]선글라스 위로 내 눈 잘 보이지?\\e";
             self.playback.enqueue(parse_dialogue(demo_script));
             let _ = self.playback.fast_forward();
             self.sync_balloons_to_playback();
@@ -3787,8 +3804,8 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
         self.tick_playback();
 
         // SERIKO animation & GPU Live2D 2.5D motion tick
-        let speaking_sakura = !self.playback.steps.is_empty() && self.playback.active_speaker == Scope::Sakura;
-        let speaking_kero = !self.playback.steps.is_empty() && self.playback.active_speaker == Scope::Kero;
+        let speaking_sakura = self.playback.is_speaking(Scope::Sakura);
+        let speaking_kero = self.playback.is_speaking(Scope::Kero);
         let global_cursor = match Mouse::get_mouse_position() {
             Mouse::Position { x, y } => Some((x as f64, y as f64)),
             Mouse::Error => None,

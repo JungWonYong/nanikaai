@@ -36,8 +36,10 @@ are dedicated cleanly to the public domain under CC0-1.0:
 https://creativecommons.org/publicdomain/zero/1.0/
 """
 
-# Sakura canvas: 440 x 900 px (@2x -> 220 x 450 pt logical)
-SAKURA_CANVAS = (440, 900)
+# Sakura canvas: 660 x 1350 px (@2x -> 330 x 675 pt logical, 1.5x balanced with Unyu)
+SAKURA_CANVAS = (660, 1350)
+SAKURA_TARGET_H = 1260
+SAKURA_BOTTOM_PAD = 36
 # Unyu canvas: 380 x 420 px (@2x -> 190 x 210 pt logical)
 UNYU_CANVAS = (380, 420)
 
@@ -304,6 +306,40 @@ def _feathered_ellipses_mask(
     return mask
 
 
+def _feathered_rounded_rects_mask(
+    size: tuple[int, int],
+    boxes: list[tuple[int, int, int, int]],
+    radius: int,
+    blur_radius: float,
+) -> Image.Image:
+    """Create a grayscale ('L') mask from rounded rectangles with Gaussian feathering."""
+    mask = Image.new("L", size, 0)
+    draw = ImageDraw.Draw(mask)
+    for box in boxes:
+        draw.rounded_rectangle(box, radius=radius, fill=255)
+    if blur_radius > 0:
+        mask = mask.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+    return mask
+
+
+def _compute_placement(
+    bbox: tuple[int, int, int, int],
+    canvas_size: tuple[int, int],
+    target_h: int,
+    bottom_pad: int,
+) -> tuple[tuple[int, int], tuple[int, int]]:
+    """Compute scaled size (tw, th) and canvas offset (px, py) from a source bbox."""
+    cw, ch = canvas_size
+    x0, y0, x1, y1 = bbox
+    bw, bh = x1 - x0, y1 - y0
+    scale = target_h / float(bh)
+    tw = max(1, int(round(bw * scale)))
+    th = max(1, int(round(bh * scale)))
+    px = (cw - tw) // 2
+    py = ch - bottom_pad - th
+    return (tw, th), (px, py)
+
+
 def _frame_to_canvas(
     rgba: Image.Image,
     bbox: tuple[int, int, int, int],
@@ -311,19 +347,80 @@ def _frame_to_canvas(
     target_h: int,
     bottom_pad: int,
 ) -> tuple[Image.Image, float, tuple[int, int]]:
-    cw, ch = canvas_size
     x0, y0, x1, y1 = bbox
     cropped = rgba.crop((x0, y0, x1, y1))
-    bw, bh = cropped.size
-    scale = target_h / float(bh)
-    tw = max(1, int(round(bw * scale)))
-    th = max(1, int(round(bh * scale)))
+    (tw, th), (px, py) = _compute_placement(bbox, canvas_size, target_h, bottom_pad)
+    scale = target_h / float(max(1, y1 - y0))
     scaled = cropped.resize((tw, th), Image.Resampling.LANCZOS)
-    out = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
-    px = (cw - tw) // 2
-    py = ch - bottom_pad - th
-    out.paste(scaled, (px, py), scaled)
+    out = Image.new("RGBA", canvas_size, (0, 0, 0, 0))
+    # Direct unmasked paste preserves straight-RGBA RGB at feathered edges (no black halo).
+    out.paste(scaled, (px, py))
     return out, scale, (px, py)
+
+
+def _frame_mask_to_canvas(
+    mask_l: Image.Image,
+    bbox: tuple[int, int, int, int],
+    canvas_size: tuple[int, int],
+    target_h: int,
+    bottom_pad: int,
+) -> Image.Image:
+    """Frame an 'L' mask using the exact placement geometry as _frame_to_canvas."""
+    cropped = mask_l.crop(bbox)
+    (tw, th), (px, py) = _compute_placement(bbox, canvas_size, target_h, bottom_pad)
+    scaled = cropped.resize((tw, th), Image.Resampling.BILINEAR)
+    out = Image.new("L", canvas_size, 0)
+    out.paste(scaled, (px, py))
+    return out
+
+
+def _make_canvas_overlay(full_canvas_rgba: Image.Image, canvas_mask_l: Image.Image) -> Image.Image:
+    """Build a straight-RGBA overlay directly in canvas space to eliminate alpha edge ringing."""
+    r, g, b, base_a = full_canvas_rgba.split()
+    eff_a = ImageChops.multiply(base_a, canvas_mask_l)
+    # Zero RGB strictly where alpha == 0 for clean compression; keep pure unpremultiplied RGB where a > 0.
+    zero = Image.new("L", full_canvas_rgba.size, 0)
+    nz = eff_a.point(lambda v: 255 if v > 0 else 0)
+    return Image.merge(
+        "RGBA",
+        (
+            Image.composite(r, zero, nz),
+            Image.composite(g, zero, nz),
+            Image.composite(b, zero, nz),
+            eff_a,
+        ),
+    )
+
+
+def _match_skin_patch(
+    src_rgb: Image.Image,
+    ref_rgb: Image.Image,
+    sample_box: tuple[int, int, int, int],
+) -> Image.Image:
+    """Shift light peach skin tone of src_rgb toward ref_rgb within sample_box."""
+    x0, y0, x1, y1 = sample_box
+    src_px = [src_rgb.getpixel((x, y)) for y in range(y0, y1) for x in range(x0, x1)]
+    ref_px = [ref_rgb.getpixel((x, y)) for y in range(y0, y1) for x in range(x0, x1)]
+    src_skin = [p for p in src_px if p[0] > 210 and p[0] >= p[2] + 5]
+    ref_skin = [p for p in ref_px if p[0] > 210 and p[0] >= p[2] + 5]
+    if not src_skin or not ref_skin:
+        return src_rgb
+    dr = round(statistics.median(p[0] for p in ref_skin) - statistics.median(p[0] for p in src_skin))
+    dg = round(statistics.median(p[1] for p in ref_skin) - statistics.median(p[1] for p in src_skin))
+    db = round(statistics.median(p[2] for p in ref_skin) - statistics.median(p[2] for p in src_skin))
+    out = src_rgb.copy()
+    px = out.load()
+    w, h = out.size
+    for y in range(h):
+        for x in range(w):
+            r, g, b = px[x, y]
+            if r > 205 and r >= b + 4:
+                px[x, y] = (
+                    max(0, min(255, r + dr)),
+                    max(0, min(255, g + dg)),
+                    max(0, min(255, b + db)),
+                )
+    return out
 
 
 def _build_neo_shell_from_raw(raw_dir: Path) -> None:
@@ -338,23 +435,36 @@ def _build_neo_shell_from_raw(raw_dir: Path) -> None:
 
     # Face mask covers eyes + eyebrows + blush + mouth inside (768, 1376) raw frame
     sak_face_mask_raw = _feathered_ellipse_mask(sak_base_raw.size, (278, 206, 480, 368), blur_radius=7.0)
-    # Blink mask covers eyes strictly above mouth (y <= 303)
-    sak_blink_mask_raw = _feathered_ellipse_mask(sak_base_raw.size, (294, 218, 462, 303), blur_radius=4.0)
-    # Lip-sync mouth mask covers cheerful speaking mouth strictly below eyes
-    sak_mouth_mask_raw = _feathered_ellipse_mask(sak_base_raw.size, (348, 302, 404, 354), blur_radius=4.5)
+    # Two-pocket blink mask covers both eyeballs/lashes strictly below bangs & eyebrows and above cheeks
+    sak_blink_mask_raw = _feathered_rounded_rects_mask(
+        sak_base_raw.size,
+        [(296, 248, 362, 302), (392, 246, 462, 300)],
+        radius=16,
+        blur_radius=4.0,
+    )
+    # Tight mouth mask sits strictly below nose (y=308) and cheek blush (y<=318) while covering 100% of joy/wink mouths
+    sak_mouth_mask_raw = _feathered_rounded_rects_mask(
+        sak_base_raw.size,
+        [(348, 318, 408, 355)],
+        radius=12,
+        blur_radius=2.5,
+    )
+
+    def graft_sakura_face(expr_rgb: Image.Image) -> Image.Image:
+        a0 = sak_base_rgba.getchannel("A")
+        expr_rgba = _extract_chroma_rgba(expr_rgb)
+        comp_rgb = Image.composite(expr_rgba.convert("RGB"), sak_base_rgba.convert("RGB"), sak_face_mask_raw)
+        comp_a = Image.composite(expr_rgba.getchannel("A"), a0, sak_face_mask_raw)
+        merged = Image.merge("RGBA", (*comp_rgb.split(), comp_a))
+        framed, _, _ = _frame_to_canvas(merged, sak_bbox, SAKURA_CANVAS, target_h=SAKURA_TARGET_H, bottom_pad=SAKURA_BOTTOM_PAD)
+        return framed
 
     def map_sakura_expr(prefix: str) -> Image.Image:
         expr_raw = Image.open(_find_raw_file(raw_dir, prefix)).convert("RGB")
         aligned = _align_raw_rgb(sak_base_raw, expr_raw, (240, 460, 520, 740))
-        a0 = sak_base_rgba.getchannel("A")
-        expr_rgba = _extract_chroma_rgba(aligned)
-        comp_rgb = Image.composite(expr_rgba.convert("RGB"), sak_base_rgba.convert("RGB"), sak_face_mask_raw)
-        comp_a = Image.composite(expr_rgba.getchannel("A"), a0, sak_face_mask_raw)
-        merged = Image.merge("RGBA", (*comp_rgb.split(), comp_a))
-        framed, _, _ = _frame_to_canvas(merged, sak_bbox, SAKURA_CANVAS, target_h=840, bottom_pad=24)
-        return framed
+        return graft_sakura_face(aligned)
 
-    s0, _, _ = _frame_to_canvas(sak_base_rgba, sak_bbox, SAKURA_CANVAS, target_h=840, bottom_pad=24)
+    s0, _, _ = _frame_to_canvas(sak_base_rgba, sak_bbox, SAKURA_CANVAS, target_h=SAKURA_TARGET_H, bottom_pad=SAKURA_BOTTOM_PAD)
     s_shy = map_sakura_expr("sakura_shy")
     s_surp = map_sakura_expr("sakura_surprise")
     s_troub = map_sakura_expr("sakura_troubled")
@@ -375,30 +485,35 @@ def _build_neo_shell_from_raw(raw_dir: Path) -> None:
     }.items():
         img.save(SHELL_DIR / fname)
 
-    # SERIKO eye-blink overlays (100 = half blink, 101 = closed eyes only)
+    # Build canvas-space Sakura blink & mouth overlays (zero 50%-blend ghosting, zero black halo)
+    sak_blink_canvas_mask = _frame_mask_to_canvas(
+        sak_blink_mask_raw, sak_bbox, SAKURA_CANVAS, target_h=SAKURA_TARGET_H, bottom_pad=SAKURA_BOTTOM_PAD
+    )
+    sak_mouth_canvas_mask = _frame_mask_to_canvas(
+        sak_mouth_mask_raw, sak_bbox, SAKURA_CANVAS, target_h=SAKURA_TARGET_H, bottom_pad=SAKURA_BOTTOM_PAD
+    )
+    s101 = _make_canvas_overlay(s_closed, sak_blink_canvas_mask)
+    s101.save(SHELL_DIR / "surface100.png")
+    s101.save(SHELL_DIR / "surface101.png")
+
+    # Blush-matched closed-eye overlay (104) for shy surface1
+    shy_raw = _align_raw_rgb(
+        sak_base_raw,
+        Image.open(_find_raw_file(raw_dir, "sakura_shy")).convert("RGB"),
+        (240, 460, 520, 740),
+    )
     closed_raw = _align_raw_rgb(
         sak_base_raw,
         Image.open(_find_raw_file(raw_dir, "sakura_closed")).convert("RGB"),
         (240, 460, 520, 740),
     )
-    closed_rgb_rgba = Image.merge("RGBA", (*closed_raw.split(), sak_blink_mask_raw))
-    half_rgb = Image.blend(sak_base_raw, closed_raw, 0.5)
-    half_rgb_rgba = Image.merge("RGBA", (*half_rgb.split(), sak_blink_mask_raw))
+    closed_shy_tone = _match_skin_patch(closed_raw, shy_raw, (320, 286, 440, 304))
+    s_shy_closed = graft_sakura_face(Image.composite(closed_shy_tone, shy_raw, sak_blink_mask_raw))
+    _make_canvas_overlay(s_shy_closed, sak_blink_canvas_mask).save(SHELL_DIR / "surface104.png")
 
-    s101, _, _ = _frame_to_canvas(closed_rgb_rgba, sak_bbox, SAKURA_CANVAS, target_h=840, bottom_pad=24)
-    s100, _, _ = _frame_to_canvas(half_rgb_rgba, sak_bbox, SAKURA_CANVAS, target_h=840, bottom_pad=24)
-    s100.save(SHELL_DIR / "surface100.png")
-    s101.save(SHELL_DIR / "surface101.png")
-
-    # Lip-sync speaking mouth overlay (102) from sakura_wink
-    wink_raw = _align_raw_rgb(
-        sak_base_raw,
-        Image.open(_find_raw_file(raw_dir, "sakura_wink")).convert("RGB"),
-        (240, 460, 520, 740),
-    )
-    mouth_rgba = Image.merge("RGBA", (*wink_raw.split(), sak_mouth_mask_raw))
-    s102, _, _ = _frame_to_canvas(mouth_rgba, sak_bbox, SAKURA_CANVAS, target_h=840, bottom_pad=24)
-    s102.save(SHELL_DIR / "surface102.png")
+    # Open speaking mouth (102) for closed-mouth poses & closed smile mouth (103) for open-mouth poses
+    _make_canvas_overlay(s_wink, sak_mouth_canvas_mask).save(SHELL_DIR / "surface102.png")
+    _make_canvas_overlay(s0, sak_mouth_canvas_mask).save(SHELL_DIR / "surface103.png")
 
     # ---- Unyu (\1) plump periwinkle base + eyes above low sunglasses & mouth graft ----
     unyu_base_raw = Image.open(_find_raw_file(raw_dir, "unyu_base")).convert("RGB")
@@ -409,14 +524,20 @@ def _build_neo_shell_from_raw(raw_dir: Path) -> None:
 
     # Covers raised eyebrows/eyes above low round sunglasses AND mouth below bridge
     unyu_face_mask = _feathered_ellipse_mask(unyu_base_raw.size, (365, 295, 792, 608), blur_radius=10.0)
-    # Tight blink masks covering left/right eyes strictly above the sunglasses rims
-    unyu_blink_mask = _feathered_ellipses_mask(
+    # Rounded-rect blink masks covering both eyes completely while staying strictly above sunglasses rims
+    unyu_blink_mask = _feathered_rounded_rects_mask(
         unyu_base_raw.size,
-        [(382, 392, 540, 466), (625, 392, 774, 466)],
+        [(378, 394, 546, 468), (622, 394, 778, 468)],
+        radius=16,
         blur_radius=4.5,
     )
-    # Tight mouth mask strictly between/below sunglasses lenses
-    unyu_mouth_mask = _feathered_ellipse_mask(unyu_base_raw.size, (556, 514, 648, 596), blur_radius=5.0)
+    # Two-zone mouth mask: narrow neck between lenses above y=544 + wider bell below rims to cover surprise 'O' 100%
+    unyu_mouth_mask = _feathered_rounded_rects_mask(
+        unyu_base_raw.size,
+        [(556, 494, 646, 544), (546, 534, 654, 606)],
+        radius=16,
+        blur_radius=2.8,
+    )
 
     def map_unyu_expr(prefix: str) -> Image.Image:
         expr_raw = Image.open(_find_raw_file(raw_dir, prefix)).convert("RGB")
@@ -429,36 +550,25 @@ def _build_neo_shell_from_raw(raw_dir: Path) -> None:
         return framed
 
     s10, _, _ = _frame_to_canvas(unyu_base_rgba, unyu_bbox, UNYU_CANVAS, target_h=364, bottom_pad=24)
+    s11 = map_unyu_expr("unyu_surprise")
+    s12 = map_unyu_expr("unyu_smug")
+    s_u_closed = map_unyu_expr("unyu_closed")
     s10.save(SHELL_DIR / "surface10.png")
-    map_unyu_expr("unyu_surprise").save(SHELL_DIR / "surface11.png")
-    map_unyu_expr("unyu_smug").save(SHELL_DIR / "surface12.png")
+    s11.save(SHELL_DIR / "surface11.png")
+    s12.save(SHELL_DIR / "surface12.png")
 
-    # Unyu SERIKO eye-blink overlays (110 = half blink, 111 = closed eyes above sunglasses)
-    u_closed_raw = _align_raw_rgb(
-        unyu_base_raw,
-        Image.open(_find_raw_file(raw_dir, "unyu_closed")).convert("RGB"),
-        (320, 620, 760, 880),
+    # Build canvas-space Unyu blink (110/111) and open/closed mouth (112/113) overlays
+    unyu_blink_canvas_mask = _frame_mask_to_canvas(
+        unyu_blink_mask, unyu_bbox, UNYU_CANVAS, target_h=364, bottom_pad=24
     )
-    u_closed_cal = _calibrate_unyu_periwinkle(_extract_chroma_rgba(u_closed_raw)).convert("RGB")
-    u_base_cal_rgb = unyu_base_rgba.convert("RGB")
-    u_closed_ov = Image.merge("RGBA", (*u_closed_cal.split(), unyu_blink_mask))
-    u_half_ov = Image.merge("RGBA", (*Image.blend(u_base_cal_rgb, u_closed_cal, 0.5).split(), unyu_blink_mask))
-
-    s110, _, _ = _frame_to_canvas(u_half_ov, unyu_bbox, UNYU_CANVAS, target_h=364, bottom_pad=24)
-    s111, _, _ = _frame_to_canvas(u_closed_ov, unyu_bbox, UNYU_CANVAS, target_h=364, bottom_pad=24)
-    s110.save(SHELL_DIR / "surface110.png")
+    unyu_mouth_canvas_mask = _frame_mask_to_canvas(
+        unyu_mouth_mask, unyu_bbox, UNYU_CANVAS, target_h=364, bottom_pad=24
+    )
+    s111 = _make_canvas_overlay(s_u_closed, unyu_blink_canvas_mask)
+    s111.save(SHELL_DIR / "surface110.png")
     s111.save(SHELL_DIR / "surface111.png")
-
-    # Unyu lip-sync speaking mouth overlay (112) from unyu_smug
-    u_smug_raw = _align_raw_rgb(
-        unyu_base_raw,
-        Image.open(_find_raw_file(raw_dir, "unyu_smug")).convert("RGB"),
-        (320, 620, 760, 880),
-    )
-    u_smug_cal = _calibrate_unyu_periwinkle(_extract_chroma_rgba(u_smug_raw)).convert("RGB")
-    u_mouth_ov = Image.merge("RGBA", (*u_smug_cal.split(), unyu_mouth_mask))
-    s112, _, _ = _frame_to_canvas(u_mouth_ov, unyu_bbox, UNYU_CANVAS, target_h=364, bottom_pad=24)
-    s112.save(SHELL_DIR / "surface112.png")
+    _make_canvas_overlay(s12, unyu_mouth_canvas_mask).save(SHELL_DIR / "surface112.png")
+    _make_canvas_overlay(s10, unyu_mouth_canvas_mask).save(SHELL_DIR / "surface113.png")
 
     (SHELL_DIR / "LICENSE-CC0.txt").write_text(CC0_NOTICE, encoding="utf-8")
     (SHELL_DIR / "descript.txt").write_text(
@@ -468,8 +578,8 @@ def _build_neo_shell_from_raw(raw_dir: Path) -> None:
         "sakura.name,사쿠라\n"
         "kero.name,우뉴\n"
         "display.scale,2\n"
-        "sakura.balloon.offsetx,24\n"
-        "sakura.balloon.offsety,44\n"
+        "sakura.balloon.offsetx,38\n"
+        "sakura.balloon.offsety,68\n"
         "kero.balloon.offsetx,20\n"
         "kero.balloon.offsety,28\n",
         encoding="utf-8",
@@ -478,37 +588,48 @@ def _build_neo_shell_from_raw(raw_dir: Path) -> None:
         "charset,UTF-8\n"
         "version,1\n\n"
         "surface0,1,2,3,4,5,6,7,8\n{\n"
-        "collision0,125,52,310,142,Head\n"
-        "collision1,158,143,280,248,Face\n"
-        "collision2,118,249,308,398,Bust\n"
+        "collision0,188,78,465,213,Head\n"
+        "collision1,237,215,420,372,Face\n"
+        "collision2,177,374,462,597,Bust\n"
         "}\n\n"
-        "surface0,1,2,3,4\n{\n"
+        "surface0,3,4,5,7\n{\n"
         "animation0.interval,sometimes\n"
-        "animation0.pattern0,overlay,100,60,0,0\n"
-        "animation0.pattern1,overlay,101,80,0,0\n"
-        "animation0.pattern2,overlay,100,60,0,0\n"
-        "animation0.pattern3,overlay,-1,50,0,0\n"
+        "animation0.pattern0,overlay,101,110,0,0\n"
+        "animation0.pattern1,overlay,-1,50,0,0\n"
+        "}\n\n"
+        "surface1\n{\n"
+        "animation0.interval,sometimes\n"
+        "animation0.pattern0,overlay,104,110,0,0\n"
+        "animation0.pattern1,overlay,-1,50,0,0\n"
         "}\n\n"
         "surface10,11,12\n{\n"
         "collision0,48,32,340,188,Head\n"
         "collision1,32,189,356,396,Body\n"
         "}\n\n"
-        "surface10,11\n{\n"
+        "surface10\n{\n"
         "animation0.interval,sometimes\n"
-        "animation0.pattern0,overlay,110,60,0,0\n"
-        "animation0.pattern1,overlay,111,85,0,0\n"
-        "animation0.pattern2,overlay,110,60,0,0\n"
-        "animation0.pattern3,overlay,-1,50,0,0\n"
+        "animation0.pattern0,overlay,111,110,0,0\n"
+        "animation0.pattern1,overlay,-1,50,0,0\n"
         "}\n\n"
-        "surface0\n{\n"
+        "surface0,1,3,4,6,7\n{\n"
         "animation1.interval,talk\n"
-        "animation1.pattern0,overlay,102,160,0,0\n"
-        "animation1.pattern1,overlay,-1,160,0,0\n"
+        "animation1.pattern0,overlay,102,115,0,0\n"
+        "animation1.pattern1,overlay,-1,115,0,0\n"
+        "}\n\n"
+        "surface2,5,8\n{\n"
+        "animation1.interval,talk\n"
+        "animation1.pattern0,overlay,103,115,0,0\n"
+        "animation1.pattern1,overlay,-1,115,0,0\n"
         "}\n\n"
         "surface10\n{\n"
         "animation1.interval,talk\n"
-        "animation1.pattern0,overlay,112,160,0,0\n"
-        "animation1.pattern1,overlay,-1,160,0,0\n"
+        "animation1.pattern0,overlay,112,115,0,0\n"
+        "animation1.pattern1,overlay,-1,115,0,0\n"
+        "}\n\n"
+        "surface11,12\n{\n"
+        "animation1.interval,talk\n"
+        "animation1.pattern0,overlay,113,115,0,0\n"
+        "animation1.pattern1,overlay,-1,115,0,0\n"
         "}\n",
         encoding="utf-8",
     )
@@ -678,8 +799,11 @@ def _generate_app_icon() -> None:
     unyu_path = SHELL_DIR / "surface10.png"
     if sak_path.exists() and unyu_path.exists():
         sak = Image.open(sak_path).convert("RGBA")
-        # Crop upper half bust + cute head/ahoge from 440x900
-        sak_bust = sak.crop((68, 12, 376, 400)).resize((int(cw * 0.72), int(cw * 0.90)), Image.Resampling.LANCZOS)
+        sw, sh = sak.size
+        # Crop upper half bust + cute head/ahoge proportionally for any canvas scale
+        sak_bust = sak.crop((int(sw * 0.155), int(sh * 0.013), int(sw * 0.855), int(sh * 0.444))).resize(
+            (int(cw * 0.72), int(cw * 0.90)), Image.Resampling.LANCZOS
+        )
         content.paste(sak_bust, (int(cw * 0.27), int(cw * 0.08)), sak_bust)
 
         unyu = Image.open(unyu_path).convert("RGBA")

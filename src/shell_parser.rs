@@ -390,10 +390,22 @@ pub struct ShellManifest {
     pub sakura_aliases: HashMap<i32, Vec<i32>>,
     pub kero_aliases: HashMap<i32, Vec<i32>>,
     size_cache: HashMap<i32, Option<(u32, u32)>>,
+    opaque_height_cache: HashMap<i32, Option<i32>>,
     overlay_ids_cache: Option<HashSet<i32>>,
 }
 
 impl ShellManifest {
+    fn opaque_bbox_height(&mut self, sid: i32) -> Option<i32> {
+        if let Some(cached) = self.opaque_height_cache.get(&sid) {
+            return *cached;
+        }
+        let h = self
+            .compose_base_rgba(sid)
+            .and_then(|bmp| bmp.opaque_bbox().map(|(_, y0, _, y1)| y1 - y0));
+        self.opaque_height_cache.insert(sid, h);
+        h
+    }
+
     pub fn surface_size(&mut self, sid: i32) -> Option<(u32, u32)> {
         if let Some(cached) = self.size_cache.get(&sid) {
             return *cached;
@@ -482,6 +494,13 @@ impl ShellManifest {
         if let Some(ref_sz) = self.surface_size(ref_sid) {
             if (sz.0 as f64) < (ref_sz.0 as f64) * 0.45 || (sz.1 as f64) < (ref_sz.1 as f64) * 0.45 {
                 return false;
+            }
+        }
+        // Reject canvas-padded partial overlays (eye/mouth patches >= 100) whose opaque height is small.
+        if !allow_explicit_alias && sid >= 100 {
+            match (self.opaque_bbox_height(sid), self.opaque_bbox_height(ref_sid)) {
+                (Some(oh), Some(ref_oh)) if (oh as f64) >= (ref_oh as f64) * 0.45 => {}
+                _ => return false,
             }
         }
         if (0..=9).contains(&sid) {
@@ -1421,6 +1440,7 @@ impl ShellManager {
             sakura_aliases,
             kero_aliases,
             size_cache: HashMap::new(),
+            opaque_height_cache: HashMap::new(),
             overlay_ids_cache: None,
         })
     }
@@ -1950,7 +1970,9 @@ mod tests {
         assert!((manifest.descript.display_scale - 2.0).abs() < 0.01);
         let s0 = manifest.compose_base_rgba(0).expect("surface 0");
         let s10 = manifest.compose_base_rgba(10).expect("surface 10");
-        assert!(s0.count_opaque_pixels() > 20000);
+        assert_eq!((s0.width, s0.height), (660, 1350));
+        assert_eq!((s10.width, s10.height), (380, 420));
+        assert!(s0.count_opaque_pixels() > 150_000);
         assert!(s10.count_opaque_pixels() > 8000);
 
         // Uncut-feet guard: bottom 2 transparent padding rows must be empty
@@ -1979,20 +2001,38 @@ mod tests {
         assert!(mean_b - mean_r >= 70.0, "unyu washed out toward white: mean_r={mean_r:.1}, mean_b={mean_b:.1}");
         assert!(mean_r <= 175.0, "unyu red channel too bright/white: mean_r={mean_r:.1}");
 
-        // Lip-sync mouth overlays 102/112 exist & stay excluded from pose lists
-        let s102 = manifest.compose_base_rgba(102).expect("surface 102");
-        let s112 = manifest.compose_base_rgba(112).expect("surface 112");
-        assert!(s102.count_opaque_pixels() > 50, "surface 102 mouth overlay empty");
-        assert!(s112.count_opaque_pixels() > 50, "surface 112 mouth overlay empty");
+        // Blink & lip-sync overlays 100..=113 exist, stay halo-free, and stay excluded from pose lists
+        for ov_id in [100, 101, 102, 103, 104, 110, 111, 112, 113] {
+            let ov = manifest
+                .compose_base_rgba(ov_id)
+                .unwrap_or_else(|| panic!("surface {ov_id} missing"));
+            assert!(ov.count_opaque_pixels() > 30, "surface {ov_id} overlay empty");
+        }
+        // Straight-RGBA feathering guard: semi-transparent Unyu overlay edges must never blacken
+        for ov_id in [111, 112] {
+            let ov = manifest.compose_base_rgba(ov_id).expect("unyu overlay");
+            let (mut f_cnt, mut f_b) = (0u64, 0u64);
+            for px in ov.data.chunks_exact(4) {
+                if (80..=180).contains(&px[3]) {
+                    f_cnt += 1;
+                    f_b += px[2] as u64;
+                }
+            }
+            assert!(f_cnt > 20, "surface {ov_id} feathered edge pixels missing: {f_cnt}");
+            let mean_f_b = (f_b as f64) / (f_cnt as f64);
+            assert!(mean_f_b >= 190.0, "surface {ov_id} feathered edges darkened (black halo): {mean_f_b:.1}");
+        }
 
         // Strict scope isolation check: kero must NEVER resolve to 0..=9 or blink/talk overlays
         let k_ids = manifest.valid_surface_ids(Scope::Kero, 40);
         assert!(k_ids.contains(&10));
         assert!(k_ids.iter().all(|&id| id >= 10 && id < 100));
         let s_ids = manifest.valid_surface_ids(Scope::Sakura, 120);
-        assert!(!s_ids.contains(&102) && !s_ids.contains(&112), "mouth overlays leaked into Sakura poses: {s_ids:?}");
         let k_ids_wide = manifest.valid_surface_ids(Scope::Kero, 120);
-        assert!(!k_ids_wide.contains(&102) && !k_ids_wide.contains(&112), "mouth overlays leaked into Kero poses: {k_ids_wide:?}");
+        for ov_id in 100..=113 {
+            assert!(!s_ids.contains(&ov_id), "overlay {ov_id} leaked into Sakura poses: {s_ids:?}");
+            assert!(!k_ids_wide.contains(&ov_id), "overlay {ov_id} leaked into Kero poses: {k_ids_wide:?}");
+        }
         assert_eq!(manifest.resolve_surface_id(Scope::Kero, 0), 10);
         assert_eq!(manifest.resolve_surface_id(Scope::Kero, 5), 12);
         assert_eq!(manifest.resolve_surface_id(Scope::Kero, 1), 11);
@@ -2057,5 +2097,29 @@ mod tests {
         let probe_x = if u_bmp.is_opaque_at(mid_x, top_y) { mid_x } else { bx0 + 30 };
         let hit = master.hit_collision(10, Scope::Kero, &u_bmp, probe_x, top_y);
         assert_eq!(hit.map(|c| c.name).as_deref(), Some("Head"));
+    }
+
+    #[test]
+    fn neo_default_seriko_animations_cover_talk_and_safe_blinks() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets");
+        let mgr = ShellManager::new(vec![root.join("shells")]);
+        let manifest = mgr.load_shell("neo_default").expect("load neo_default");
+        for sid in (0..=8).chain(10..=12) {
+            let sdef = manifest
+                .surfaces
+                .get(&sid)
+                .unwrap_or_else(|| panic!("surface {sid} missing"));
+            let has_talk = sdef.animations.iter().any(|a| a.interval.starts_with("talk"));
+            assert!(has_talk, "surface {sid} missing SERIKO talk lip-sync");
+            let has_blink = sdef
+                .animations
+                .iter()
+                .any(|a| a.interval.starts_with("sometimes"));
+            let expect_blink = matches!(sid, 0 | 1 | 3 | 4 | 5 | 7 | 10);
+            assert_eq!(
+                has_blink, expect_blink,
+                "surface {sid} blink presence mismatch (expected {expect_blink})"
+            );
+        }
     }
 }
