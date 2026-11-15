@@ -5,9 +5,9 @@ export PATH="$HOME/.cargo/bin:$PATH"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
-APP_NAME="AI Ukagaka"
+APP_NAME="NanikaAi"
 APP_BUNDLE="$ROOT_DIR/dist/$APP_NAME.app"
-BIN_PATH="$ROOT_DIR/target/release/ai-ukagaka"
+BIN_PATH="$ROOT_DIR/target/release/nanikaai"
 ICON_PNG="$ROOT_DIR/assets/icon.png"
 
 echo "[1/4] Building release binary (100% Safe Rust)..."
@@ -36,8 +36,8 @@ rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 
-cp "$BIN_PATH" "$APP_BUNDLE/Contents/MacOS/ai-ukagaka"
-chmod +x "$APP_BUNDLE/Contents/MacOS/ai-ukagaka"
+cp "$BIN_PATH" "$APP_BUNDLE/Contents/MacOS/nanikaai"
+chmod +x "$APP_BUNDLE/Contents/MacOS/nanikaai"
 cp -R "$ROOT_DIR/assets" "$APP_BUNDLE/Contents/Resources/assets"
 
 if [ -f "$ICNS_PATH" ]; then
@@ -52,23 +52,23 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleExecutable</key>
-    <string>ai-ukagaka</string>
+    <string>nanikaai</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
-    <string>io.github.ai-ukagaka.desktop</string>
+    <string>io.github.nanikaai.desktop</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>AI Ukagaka</string>
+    <string>NanikaAi</string>
     <key>CFBundleDisplayName</key>
-    <string>AI Ukagaka</string>
+    <string>何か藍 (NanikaAi)</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.1.1</string>
+    <string>1.2.0</string>
     <key>CFBundleVersion</key>
-    <string>1.1.1</string>
+    <string>1.2.0</string>
     <key>LSMinimumSystemVersion</key>
     <string>12.0</string>
     <key>LSUIElement</key>

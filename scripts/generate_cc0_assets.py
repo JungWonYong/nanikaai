@@ -28,7 +28,7 @@ CC0_NOTICE = """\
 CC0 1.0 Universal (Public Domain Dedication)
 
 All artwork, surface graphics, balloon frames, and desktop mascot definitions
-in this directory were originally created for the AI Ukagaka project and
+in this directory were originally created for the 何か藍 (NanikaAi) project and
 are dedicated cleanly to the public domain under CC0-1.0:
 https://creativecommons.org/publicdomain/zero/1.0/
 """
@@ -539,7 +539,7 @@ def _generate_app_icon() -> None:
 
 
 def main(argv: Iterable[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Generate CC0-1.0 Neo Ukagaka assets.")
+    parser = argparse.ArgumentParser(description="Generate CC0-1.0 何か藍 (NanikaAi) assets.")
     parser.add_argument(
         "--raw-dir",
         type=Path,

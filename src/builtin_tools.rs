@@ -14,7 +14,7 @@ use url::Url;
 
 use crate::config_store::{user_home_dir, ConfigStore};
 
-const USER_AGENT_APP: &str = "AI-Ukagaka-Desktop/1.0";
+const USER_AGENT_APP: &str = "NanikaAi-Desktop/1.2";
 const USER_AGENT_BROWSER: &str =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36";
 

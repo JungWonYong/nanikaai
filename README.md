@@ -1,4 +1,6 @@
-# AI Ukagaka (`v1.1.1`)
+# 何か藍 — NanikaAi (`nanikaai` `v1.2.0`)
+
+> **명칭의 유래**: 우카가카(`伺か`)의 전신 명칭인 **`何か(나니카)`**와 시그니처 블루 테마 **`藍(쪽빛 남 · 훈독 あい = AI)`** 및 원작에 대한 **`愛`**를 겹쳐 **`なにかあい (NanikaAi)`**로 명명했습니다.
 
 **100% Safe Rust (`#![forbid(unsafe_code)]`)** 기반 크로스플랫폼 AI 데스크톱 마스코트 베이스웨어(Baseware)입니다.
 macOS, Windows, Linux 환경에서 별도 런타임 설치나 OS 네이티브 핸들 `unsafe` 호출 없이 단일 네이티브 바이너리로 동작합니다.
@@ -30,9 +32,9 @@ macOS, Windows, Linux 환경에서 별도 런타임 설치나 OS 네이티브 �
 
 | 운영체제 | 사용자 데이터 디렉터리 |
 | :--- | :--- |
-| macOS | `~/Library/Application Support/AIUkagaka/` |
-| Windows | `%APPDATA%\AIUkagaka\` |
-| Linux | `$XDG_DATA_HOME/ai-ukagaka/` (기본 `~/.local/share/ai-ukagaka/`) |
+| macOS | `~/Library/Application Support/NanikaAi/` |
+| Windows | `%APPDATA%\NanikaAi\` |
+| Linux | `$XDG_CONFIG_HOME/nanikaai/` (기본 `~/.config/nanikaai/`) |
 
 ## 빌드 및 실행 방법
 
@@ -44,21 +46,21 @@ macOS, Windows, Linux 환경에서 별도 런타임 설치나 OS 네이티브 �
 
 ```bash
 bash scripts/build_macos.sh
-open "dist/AI Ukagaka.app"
+open "dist/NanikaAi.app"
 ```
 
 ### Linux
 
 ```bash
 bash scripts/build_linux.sh
-./dist/ai-ukagaka-linux/ai-ukagaka
+./dist/nanikaai-linux/nanikaai
 ```
 
 ### Windows
 
 ```bat
 scripts\build_windows.bat
-dist\AI-Ukagaka-win64\ai-ukagaka.exe
+dist\NanikaAi-win64\nanikaai.exe
 ```
 
 ### 스모크 테스트 실행

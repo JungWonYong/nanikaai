@@ -196,7 +196,7 @@ fn find_claude_bin() -> Option<PathBuf> {
 fn maybe_ensure_ssh_tunnel(cfg: &AgentConfig) {
     let target = if !cfg.ssh_tunnel_target.trim().is_empty() {
         cfg.ssh_tunnel_target.trim().to_string()
-    } else if let Ok(v) = std::env::var("AI_UKAGAKA_SSH_TARGET") {
+    } else if let Ok(v) = std::env::var("NANIKAAI_SSH_TARGET").or_else(|_| std::env::var("AI_UKAGAKA_SSH_TARGET")) {
         v.trim().to_string()
     } else {
         return;
@@ -1574,7 +1574,7 @@ impl AgentEngine {
 }
 
 fn invoke_agy_cli(agy_bin: &Path, full_prompt: &str, model: &str) -> Result<(String, String), String> {
-    let lean_dir = std::env::temp_dir().join("ai_ukagaka_lean");
+    let lean_dir = std::env::temp_dir().join("nanikaai_lean");
     let _ = std::fs::create_dir_all(&lean_dir);
     let out = Command::new(agy_bin)
         .current_dir(&lean_dir)
@@ -1619,7 +1619,7 @@ fn invoke_agy_cli(agy_bin: &Path, full_prompt: &str, model: &str) -> Result<(Str
 }
 
 fn invoke_codex_cli(codex_bin: &Path, full_prompt: &str, model: &str) -> Result<(String, String), String> {
-    let lean_dir = std::env::temp_dir().join("ai_ukagaka_lean");
+    let lean_dir = std::env::temp_dir().join("nanikaai_lean");
     let _ = std::fs::create_dir_all(&lean_dir);
     let out_file = lean_dir.join(format!("codex_out_{}.txt", std::process::id()));
     let _ = std::fs::remove_file(&out_file);
@@ -1660,7 +1660,7 @@ fn invoke_codex_cli(codex_bin: &Path, full_prompt: &str, model: &str) -> Result<
 }
 
 fn invoke_claude_cli(claude_bin: &Path, full_prompt: &str, model: &str) -> Result<(String, String), String> {
-    let lean_dir = std::env::temp_dir().join("ai_ukagaka_lean");
+    let lean_dir = std::env::temp_dir().join("nanikaai_lean");
     let _ = std::fs::create_dir_all(&lean_dir);
     let out = Command::new(claude_bin)
         .current_dir(&lean_dir)
@@ -1698,7 +1698,7 @@ mod tests {
         assert!(assert_allowed_model("glm-4").is_err());
         assert!(assert_allowed_model("gemma4:latest").is_ok());
 
-        let dir = std::env::temp_dir().join(format!("ukagaka_agent_test_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("nanikaai_agent_test_{}", std::process::id()));
         let cfg_store = ConfigStore::new(Some(dir.clone()));
         let runner = BuiltinToolRunner::new(cfg_store.clone(), None);
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets");

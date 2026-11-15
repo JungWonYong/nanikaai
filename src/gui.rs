@@ -26,7 +26,7 @@ use winit::platform::windows::WindowAttributesExtWindows;
 
 use crate::agent_engine::{provider_catalog, AgentEngine, AgentReply, StatusCallback};
 use crate::builtin_tools::BuiltinToolRunner;
-use crate::config_store::{default_user_data_dir, ConfigPatch, ConfigStore};
+use crate::config_store::{default_user_data_dir, legacy_user_data_dir, ConfigPatch, ConfigStore};
 use crate::dialogue_parser::{parse_dialogue, ActionKind, DialogueAction, Scope};
 use crate::shell_parser::{
     install_nar_archive, BalloonManager, BalloonSkin, BalloonSummary, CollisionRect, RgbaBitmap,
@@ -139,7 +139,7 @@ impl GpuContext {
 
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
-                label: Some("ai-ukagaka-device"),
+                label: Some("nanikaai-device"),
                 required_features: wgpu::Features::empty(),
                 required_limits: wgpu::Limits::downlevel_webgl2_defaults()
                     .using_resolution(adapter.limits()),
@@ -2584,7 +2584,7 @@ impl AppRuntime {
             *self.manifest.lock().expect("manifest mutex poisoned") = active_manifest;
             self.reset_character_positions();
 
-            let demo_script = "\\0\\s[0]안녕! 100% Safe Rust AI 우카가카 v1.1 스모크 테스트 완료예요!\\w3\\1\\s[10]선글라스 아래로 내 눈 잘 보이지?\\e";
+            let demo_script = "\\0\\s[0]안녕! 100% Safe Rust 何か藍(NanikaAi) v1.2 스모크 테스트 완료예요!\\w3\\1\\s[10]선글라스 아래로 내 눈 잘 보이지?\\e";
             self.playback.enqueue(parse_dialogue(demo_script));
             let _ = self.playback.fast_forward();
             self.sync_balloons_to_playback();
@@ -2700,7 +2700,7 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
         let instance = wgpu::Instance::default();
         let sak_win = match Self::create_borderless_window(
             event_loop,
-            "AI Ukagaka Sakura",
+            "NanikaAi Sakura",
             sak_lw,
             sak_lh,
             cfg.always_on_top,
@@ -2740,17 +2740,17 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
         };
 
         let kero_ws = make_ws(
-            "AI Ukagaka Kero",
+            "NanikaAi Kero",
             kero_lw,
             kero_lh,
             cfg.always_on_top,
             false,
             cfg.show_kero,
         );
-        let sak_bal_ws = make_ws("AI Ukagaka Balloon Sakura", 360, 168, cfg.always_on_top, false, false);
-        let kero_bal_ws = make_ws("AI Ukagaka Balloon Kero", 330, 152, cfg.always_on_top, false, false);
-        let comm_ws = make_ws("AI Ukagaka Communicate", 360, 108, true, true, false);
-        let menu_ws = make_ws("AI Ukagaka Menu", 270, 320, true, true, false);
+        let sak_bal_ws = make_ws("NanikaAi Balloon Sakura", 360, 168, cfg.always_on_top, false, false);
+        let kero_bal_ws = make_ws("NanikaAi Balloon Kero", 330, 152, cfg.always_on_top, false, false);
+        let comm_ws = make_ws("NanikaAi Communicate", 360, 108, true, true, false);
+        let menu_ws = make_ws("NanikaAi Menu", 270, 320, true, true, false);
 
         self.sakura = Some(CharacterWindowState {
             scope: Scope::Sakura,
@@ -2890,7 +2890,7 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
             self.tray_actions = map;
             if let Ok(t) = TrayIconBuilder::new()
                 .with_icon(icon_rgba)
-                .with_tooltip("AI Ukagaka (Rust)")
+                .with_tooltip("何か藍 · NanikaAi (Rust)")
                 .with_menu(Box::new(tray_menu))
                 .build()
             {
@@ -3526,8 +3526,13 @@ pub fn run(smoke_test: bool) -> Result<(), String> {
 
     let cfg = config_store.get();
     let user_data = default_user_data_dir();
-    let shell_roots = vec![user_data.join("shells"), bundled_shells];
-    let balloon_roots = vec![user_data.join("balloons"), bundled_balloons];
+    let legacy_data = legacy_user_data_dir();
+    let mut shell_roots = vec![user_data.join("shells"), bundled_shells];
+    let mut balloon_roots = vec![user_data.join("balloons"), bundled_balloons];
+    if legacy_data != user_data && legacy_data.is_dir() {
+        shell_roots.push(legacy_data.join("shells"));
+        balloon_roots.push(legacy_data.join("balloons"));
+    }
 
     let shell_manager = ShellManager::new(shell_roots);
     let balloon_manager = BalloonManager::new(balloon_roots);

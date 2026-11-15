@@ -282,7 +282,7 @@ pub fn start_dual_server(
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
 
     std::thread::Builder::new()
-        .name("ukagaka-server".to_string())
+        .name("nanikaai-server".to_string())
         .spawn(move || {
             let rt = match tokio::runtime::Builder::new_multi_thread()
                 .enable_all()

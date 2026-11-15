@@ -1,9 +1,9 @@
 [package]
-name = "ai-ukagaka"
-version = "1.1.1"
+name = "nanikaai"
+version = "1.2.0"
 edition = "2021"
 license = "MIT"
-description = "Cross-platform Pure Safe Rust AI Ukagaka desktop mascot baseware (macOS, Windows, Linux)"
+description = "何か藍 (NanikaAi) — Cross-platform Pure Safe Rust AI desktop mascot baseware (macOS, Windows, Linux)"
 
 [dependencies]
 winit = "0.30"

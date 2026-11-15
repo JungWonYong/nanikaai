@@ -47,32 +47,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ai-ukagaka"
-version = "1.1.1"
-dependencies = [
- "arboard",
- "axum",
- "chrono",
- "cosmic-text",
- "encoding_rs",
- "image",
- "mouse_position",
- "pollster",
- "rand 0.8.8",
- "regex",
- "reqwest",
- "rfd",
- "serde",
- "serde_json",
- "tokio",
- "tray-icon",
- "url",
- "wgpu",
- "winit",
- "zip",
-]
-
-[[package]]
 name = "android-activity"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2295,6 +2269,32 @@ dependencies = [
  "termcolor",
  "thiserror 2.0.21",
  "unicode-xid",
+]
+
+[[package]]
+name = "nanikaai"
+version = "1.2.0"
+dependencies = [
+ "arboard",
+ "axum",
+ "chrono",
+ "cosmic-text",
+ "encoding_rs",
+ "image",
+ "mouse_position",
+ "pollster",
+ "rand 0.8.8",
+ "regex",
+ "reqwest",
+ "rfd",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tray-icon",
+ "url",
+ "wgpu",
+ "winit",
+ "zip",
 ]
 
 [[package]]

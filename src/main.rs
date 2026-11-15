@@ -21,8 +21,8 @@ fn configure_platform_env() {
 fn main() {
     configure_platform_env();
     let smoke_test = std::env::args().any(|arg| arg == "--smoke-test");
-    if let Err(err) = ai_ukagaka::gui::run(smoke_test) {
-        eprintln!("[AI Ukagaka ERROR] {err}");
+    if let Err(err) = nanikaai::gui::run(smoke_test) {
+        eprintln!("[NanikaAi ERROR] {err}");
         std::process::exit(1);
     }
 }

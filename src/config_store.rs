@@ -37,6 +37,34 @@ pub fn default_user_data_dir() -> PathBuf {
         return user_home_dir()
             .join("Library")
             .join("Application Support")
+            .join("NanikaAi");
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let base = std::env::var("APPDATA")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| user_home_dir().join("AppData").join("Roaming"));
+        return base.join("NanikaAi");
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let xdg = std::env::var("XDG_CONFIG_HOME")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| user_home_dir().join(".config"));
+        xdg.join("nanikaai")
+    }
+}
+
+pub fn legacy_user_data_dir() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        return user_home_dir()
+            .join("Library")
+            .join("Application Support")
             .join("AIUkagaka");
     }
     #[cfg(target_os = "windows")]
@@ -324,7 +352,7 @@ mod tests {
 
     #[test]
     fn config_roundtrip_and_memory() {
-        let dir = std::env::temp_dir().join(format!("ukagaka_cfg_test_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("nanikaai_cfg_test_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let store = ConfigStore::new(Some(dir.clone()));
         store.update(ConfigPatch {
