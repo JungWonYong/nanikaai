@@ -334,13 +334,23 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let pm01 = vec4<f32>(t01.rgb * t01.a, t01.a);
     let pm11 = vec4<f32>(t11.rgb * t11.a, t11.a);
     let pm = mix(mix(pm00, pm10, f.x), mix(pm01, pm11, f.x), f.y);
-    if (u_params.premul != 0u) {
-        return pm;
-    }
     if (pm.a <= 0.0001) {
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
-    return vec4<f32>(pm.rgb / pm.a, pm.a);
+    var out_col: vec4<f32>;
+    if (u_params.premul != 0u) {
+        out_col = pm;
+    } else {
+        out_col = vec4<f32>(pm.rgb / pm.a, pm.a);
+    }
+    if (u_params.pad1 != 0u) {
+        let clamped_rgb = clamp(out_col.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+        let lin_lo = clamped_rgb / 12.92;
+        let lin_hi = pow((clamped_rgb + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+        let lin = select(lin_lo, lin_hi, clamped_rgb > vec3<f32>(0.04045));
+        return vec4<f32>(lin, out_col.a);
+    }
+    return out_col;
 }
 "#;
 
@@ -456,13 +466,23 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let dims_u = textureDimensions(u_tex, 0);
     let coord = clamp(vec2<i32>(floor(in.uv * vec2<f32>(dims_u))), vec2<i32>(0, 0), vec2<i32>(dims_u) - vec2<i32>(1, 1));
     let pm = textureLoad(u_tex, coord, 0);
-    if (u_present.premul != 0u) {
-        return pm;
-    }
     if (pm.a <= 0.0001) {
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
-    return vec4<f32>(pm.rgb / pm.a, pm.a);
+    var out_col: vec4<f32>;
+    if (u_present.premul != 0u) {
+        out_col = pm;
+    } else {
+        out_col = vec4<f32>(pm.rgb / pm.a, pm.a);
+    }
+    if (u_present.pad0 != 0u) {
+        let clamped_rgb = clamp(out_col.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+        let lin_lo = clamped_rgb / 12.92;
+        let lin_hi = pow((clamped_rgb + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4));
+        let lin = select(lin_lo, lin_hi, clamped_rgb > vec3<f32>(0.04045));
+        return vec4<f32>(lin, out_col.a);
+    }
+    return out_col;
 }
 "#;
 
@@ -547,6 +567,7 @@ struct GpuContext {
     present_params_buffer: wgpu::Buffer,
     sampler: wgpu::Sampler,
     premul: u32,
+    surface_is_srgb: u32,
     surface_format: wgpu::TextureFormat,
     texture_format: wgpu::TextureFormat,
     alpha_mode: wgpu::CompositeAlphaMode,
@@ -581,10 +602,12 @@ impl GpuContext {
             .find(|f| {
                 matches!(
                     f,
-                    wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Rgba8UnormSrgb
+                    wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Rgba8Unorm
                 )
             })
             .unwrap_or_else(|| caps.formats[0]);
+
+        let surface_is_srgb = u32::from(surface_format.is_srgb());
 
         let alpha_mode = [
             wgpu::CompositeAlphaMode::PreMultiplied,
@@ -595,11 +618,9 @@ impl GpuContext {
         .find(|m| caps.alpha_modes.contains(m))
         .unwrap_or(caps.alpha_modes[0]);
 
-        let texture_format = if surface_format.is_srgb() {
-            wgpu::TextureFormat::Rgba8UnormSrgb
-        } else {
-            wgpu::TextureFormat::Rgba8Unorm
-        };
+        // Keep sprite & multi-part offscreen textures linear-addressed UNORM so 2D alpha
+        // blending executes in standard 2D sRGB perceptual space (matching CPU composition).
+        let texture_format = wgpu::TextureFormat::Rgba8Unorm;
 
         let premul = if alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied {
             1
@@ -812,6 +833,7 @@ impl GpuContext {
 
         let mut present_bytes = [0u8; 16];
         present_bytes[0..4].copy_from_slice(&(premul as u32).to_ne_bytes());
+        present_bytes[4..8].copy_from_slice(&surface_is_srgb.to_ne_bytes());
         let present_params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("present-params"),
             contents: &present_bytes,
@@ -831,6 +853,7 @@ impl GpuContext {
             present_params_buffer,
             sampler,
             premul,
+            surface_is_srgb,
             surface_format,
             texture_format,
             alpha_mode,
@@ -889,9 +912,11 @@ impl WindowSurface {
         let size = window.inner_size();
         let config = gpu.make_surface_config(size.width, size.height);
         surface.configure(&gpu.device, &config);
+        let mut init_params = ShaderParams::idle(gpu.premul);
+        init_params.pad1 = gpu.surface_is_srgb;
         let params_buffer = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("window-shader-params"),
-            contents: &as_bytes_shader_params(&ShaderParams::idle(gpu.premul)),
+            contents: &as_bytes_shader_params(&init_params),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         Self {
@@ -910,8 +935,10 @@ impl WindowSurface {
     }
 
     fn update_params(&mut self, gpu: &GpuContext, params: &ShaderParams) {
+        let mut eff = *params;
+        eff.pad1 = gpu.surface_is_srgb;
         gpu.queue
-            .write_buffer(&self.params_buffer, 0, &as_bytes_shader_params(params));
+            .write_buffer(&self.params_buffer, 0, &as_bytes_shader_params(&eff));
         self.last_live2d_active = params.live2d != 0;
     }
 
@@ -6371,7 +6398,7 @@ impl AppRuntime {
                 sb.utterance_min_w = 0;
                 sb.large = false;
             }
-            let short_script = "\\0\\s[0]안녕! 何か藍(NanikaAi) v0.1.8!\\e";
+            let short_script = "\\0\\s[0]안녕! 何か藍(NanikaAi) v0.1.9!\\e";
             self.playback.enqueue(parse_dialogue(short_script));
             let _ = self.playback.fast_forward();
             self.sync_balloons_to_playback();
@@ -6397,7 +6424,7 @@ impl AppRuntime {
                 sb.utterance_min_w = 0;
                 sb.large = false;
             }
-            let demo_script = "\\0\\s[0]안녕! 100% Safe Rust 何か藍(NanikaAi) v0.1.8 テスト完了だよ！\\n\\n長い文章では吹き出しが内容に合わせて滑らかに広がり、最大サイズに達すると自動的にスクロールバーとトラックが表示されて、マウスホイールで快適に読み進められます。\\n\\n1行目: 外付けサイドカー Live2D 解剖学的関節・多層髪・衣装揺れ有効化。\\n2行目: うにゅうの40%半透明サングラスと無欠損表情レイヤーを保持。\\n3行目: Gemma/SentencePieceのバイトフォールバック文字も完全復元。\\w3\\1\\s[10]40%半透明サングラスの上からもバッチリ見えてるぜ。\\e";
+            let demo_script = "\\0\\s[0]안녕! 100% Safe Rust 何か藍(NanikaAi) v0.1.9 テスト完了だよ！\\n\\n長い文章では吹き出しが内容に合わせて滑らかに広がり、最大サイズに達すると自動的にスクロールバーとトラックが表示されて、マウスホイールで快適に読み進められます。\\n\\n1行目: 外付けサイドカー Live2D 解剖学的関節・多層髪・衣装揺れ有効化。\\n2行目: うにゅうの40%半透明サングラスと無欠損表情レイヤーを保持。\\n3行目: Gemma/SentencePieceのバイトフォールバック文字も完全復元。\\w3\\1\\s[10]40%半透明サングラスの上からもバッチリ見えてるぜ。\\e";
             self.playback.enqueue(parse_dialogue(demo_script));
             let _ = self.playback.fast_forward();
             self.sync_balloons_to_playback();

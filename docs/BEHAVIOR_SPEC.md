@@ -1,7 +1,7 @@
 # 何か藍 (`NanikaAi`) — 現行動作仕様および自動検証基準 (`BEHAVIOR_SPEC`)
 
-- **Document Version**: `v1.8.0`
-- **Target Software**: `nanikaai` `v0.1.8+`
+- **Document Version**: `v1.9.0`
+- **Target Software**: `nanikaai` `v0.1.9+`
 - **Purpose**: テスト実行前の機密・個人情報・AI指示配置境界検査（Phase 0）、改修後の自動動作確認テスト（`cargo test` / `--smoke-test` / 静的監査）における合否基準、変更内容に応じた検証ティアおよび結果報告様式を定義する。
 
 ---
@@ -36,7 +36,7 @@
 | `SPEC-AI-01` | モデル規制 | 制限対象 LLM（`FORBIDDEN_MODEL_PREFIXES`）の呼び出しを拒否する | 禁止プレフィックス全種で `assert_allowed_model` が `Err` を返し、`PREFERRED_MODELS` に禁止モデルが含まれないこと | `behavior_spec` / unit tests |
 | `SPEC-AI-02` | Ollama 適応 | 初心者向けローカルモデル候補を幅広に自動選択する | `PREFERRED_MODELS` に `gemma4:e4b`・`llama3.2:3b` 等が含まれ、`provider_catalog()` の `"ollama"` 既定モデルが `"auto"` であること | `behavior_spec` / unit tests |
 | `SPEC-AI-03` | 設定永続化 | `config.json` と記憶データをディスクへ保存・再読込できる | `ConfigStore::update(ConfigPatch)` 後の値が新規 `ConfigStore::new` インスタンスで一致すること | `behavior_spec` / unit tests |
-| `SPEC-UI-01` | GPU/Live2D 基盤 | シェーダ定数レイアウトと減衰バネ物理・足元固定表示が破綻しない | `ShaderParams` が `96 B`（WGSL 整合）であり、スモーク検証で `neo_default` の足元・短文吹き出し・スクロール長文・メニューを正常描画すること | unit tests / `--smoke-test` |
+| `SPEC-UI-01` | GPU/Live2D 基盤 | シェーダ定数レイアウトと 2D sRGB 前乗算合成・減衰バネ物理・足元固定表示が破綻しない | `ShaderParams` が `96 B`（WGSL 整合）であり、`Rgba8Unorm` 2D sRGB 空間で合成・前乗算出力し、スモーク検証で `neo_default` の足元・短文吹き出し・スクロール長文・メニューを正常描画すること | unit tests / `--smoke-test` |
 | `SPEC-UI-02` | クロス OS 構成 | macOS / Windows ではトレイ統合し、Linux は右クリックメニューで完結する | `tray_icon` 依存が `macos`/`windows` のみに限定され、Linux/Windows/macOS 全ターゲットでコンパイル可能であること | CI / `cargo test` |
 | `SPEC-UI-03` | リリース版数 | `Cargo.toml` と配布バンドル版数が一致し、文書過負荷更新を避ける | `Cargo.toml` の版数と `scripts/build_macos.sh` のバンドル版数が一致し、`scripts/build_macos.sh` が正常終了すること | `verify_behavior.py --mode full` |
 | `SPEC-UI-04` | GUI 対話操作性 | 右クリックメニュー展開/ホバー/スクロール/切替実行、キャラダブルクリック入力バー展開、IME入力/編集/送信(`↑`)/`×`/`Esc`、吹き出し早送り/選択肢ホバー/スクロール/クリック非表示が正常に動作する | `--smoke-test` Phase E において全ウィンドウ対話操作・ヒット判定・状態遷移が 1 件も欠落せず合格すること | `--smoke-test` Phase E (`SPEC-UI-04`) |
@@ -55,7 +55,7 @@
 | `SPEC-COMP-02` | ファイル D&D 反応 | `.nar`/`.zip` 以外の汎用ファイル（文章・コード・画像・URL ショートカット・フォルダ）のドロップ内容を受理し要約反応する | `.env`/秘密鍵/資格情報ファイルを読込前に即拒否し、安全ファイル内容のみ `<untrusted_data>` で囲んで抽出すること | `behavior_spec` / `companion_extras` |
 | `SPEC-COMP-03` | 音声読み上げ・更新確認 | 既定 OFF の AivisSpeech (`:10101`) / VOICEVOX (`:50021`)＋OS TTS フォールバックおよび GitHub Releases 更新確認を提供する | `\0`/`\1` バッチ発話抽出および SemVer 版数比較が正確に機能し、スモーク検証時は外部起動・音声ブロックを発生させないこと | `behavior_spec` / `companion_extras` |
 | `SPEC-COMP-04` | ヘッドレス音声・`\0`/`\1` 別声自動配役＆エンジン選択 | 導入済み `AivisSpeech Engine` / `VOICEVOX vv-engine` / OS 標準音声を切替・自動起動し、シェルの `\1` 属性（少年系・女性相棒・青年男性）に応じて `\0`/`\1` を別声優・別モデル（AivisHub `らせつん` 自動/手動導入含む）へ自動配役する | `/speakers` 解析、`infer_kero_voice_archetype` / `pick_speaker_pair_for_archetype` による `\0`/`\1` 別声選出、および `tts_engine`・`kero_voice_archetype`・`sakura_speaker_id`/`kero_speaker_id` の永続化が一致すること | `behavior_spec` / `companion_extras` |
-| `SPEC-L2D-01` | 外付けサイドカー Live2D マルチパーツ | 既存 `.nar` を無改変のまま外付け `live2d.json`＋パーツ PNG 階層を読み込み、ユーザー配置優先で解剖学的関節（首/C1 頭部/顔視差/多層髪/衣装裾・リボン/腕）・`surface_overrides` 無欠損表情・`AlphaMask` 合成・層別 `opacity`（40%半透明サングラス）・階層ボーン/減衰バネを CPU/GPU で駆動する | `neo_default` で `\0`(18層以上: 解剖学的首/C1/髪/衣装/フリル靴下＆メリージェーン靴・閉じ目領域 `[350..390, 260..300]` で `sakura_hair_curl_r.png` 透過保持)と `\1`(6層以上: 無欠損 `surface11` 目元・alpha 40%レンズ)が読込まれ、表情/着せ替え差分反映・物理変位描画および `<user_data>/live2d` 優先上書きが通過すること | `behavior_spec` / `--smoke-test` |
+| `SPEC-L2D-01` | 外付けサイドカー Live2D マルチパーツ | 既存 `.nar` を無改変のまま外付け `live2d.json`＋パーツ PNG 階層を読み込み、ユーザー配置優先で解剖学的関節（首/C1 頭部/顔視差/多層髪/衣装裾・閉輪郭リボン/腕）・`surface_overrides` 無欠損表情・`AlphaMask` 合成・層別 `opacity`（40%半透明サングラス）・階層ボーン/減衰バネを CPU/GPU で駆動する | `neo_default` で `\0`(18層以上: 解剖学的首/C1/髪/衣装/フリル靴下＆メリージェーン靴・閉じ目 `[350..390, 260..300]` で `sakura_hair_curl_r.png` 透過保持・胸リボン`(309,508)`/`ボタン(328,668)` `alpha=255`・静止衣装差分 `<250 px`)と `\1`(6層以上: 無欠損 `surface11` 目元・alpha 40%レンズ)が読込まれ、表情/着せ替え差分反映・物理変位描画および `<user_data>/live2d` 優先上書きが通過すること | `behavior_spec` / `--smoke-test` |
 | `SPEC-L2D-02` | サイドカー信頼境界＆オフラインスタジオ | `live2d.json` を純粋データとして検証し、パストラバーサル・機密参照・循環ボーンを遮断するとともにオフライン専用編集 UI を同梱する | `../`・`.env`・絶対パス・循環親参照が拒否され、`tools/live2d_studio.html` に外部 CDN URL が `0` 件であること | `behavior_spec` / `live2d_rig` |
 
 ---

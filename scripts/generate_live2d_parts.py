@@ -120,6 +120,12 @@ def soft_weight(mask: np.ndarray, feather: float = 1.0) -> np.ndarray:
     return np.clip(gaussian_filter(mask.astype(np.float32), sigma=feather), 0.0, 1.0)
 
 
+def crisp_mask_weight(mask: np.ndarray, outer_allow: np.ndarray, feather: float = 0.45) -> np.ndarray:
+    """Keep 100% opacity inside `mask` while feathering only the outer anti-aliased edge into `outer_allow`."""
+    w = gaussian_filter(mask.astype(np.float32), sigma=feather) if feather > 0.0 else mask.astype(np.float32)
+    return np.clip(np.maximum(mask.astype(np.float32), np.where(outer_allow, w, 0.0)), 0.0, 1.0)
+
+
 def extract_layer(src: np.ndarray, mask_f: np.ndarray) -> np.ndarray:
     out = src.copy()
     w = np.clip(mask_f, 0.0, 1.0)
@@ -234,23 +240,25 @@ def build_sakura_parts() -> list[dict]:
     save_rgba(extract_layer(s0, curl_l_w), PARTS_DIR / "sakura_hair_curl_l.png")
     save_rgba(extract_layer(s0, curl_r_w), PARTS_DIR / "sakura_hair_curl_r.png")
 
-    # 5) Back hair behind neck/ears (left & right split for natural stereo parallax, z=14, z=16)
-    hb_zone = poly_mask((h, w), [(208, 248), (468, 248), (470, 396), (416, 406), (238, 406), (206, 386)])
+    # 5) Back hair behind neck/ears (solid interior tuck inside opaque silhouette, zero sky alpha leaks!)
+    hb_zone = poly_mask((h, w), [(208, 248), (468, 248), (470, 396), (416, 402), (252, 402), (206, 386)])
+    inner_op = binary_erosion(opaque, iterations=1)
     hb_shape = hb_zone & (
-        binary_dilation(opaque & is_hair_like & (yg >= 256), iterations=2)
-        | poly_mask((h, w), [(244, 272), (410, 272), (414, 402), (242, 402)])
+        (opaque & is_hair_like & (yg >= 256))
+        | (inner_op & poly_mask((h, w), [(254, 272), (402, 272), (402, 398), (254, 398)]))
     )
     hb_known = hb_zone & is_pure_hair & ((xg <= 264) | (xg >= 388))
     hb_rgb = diffuse_from_known(s0[:, :, :3], hb_shape & (~hb_known), hb_known, iters=140)
     hb_full = np.zeros_like(s0)
     hb_full[:, :, :3] = hb_rgb
-    hb_alpha = soft_weight(hb_shape, 1.0)
-    split_l = np.clip((332.0 - xg.astype(np.float32) + 8.0) / 16.0, 0.0, 1.0)
-    split_r = 1.0 - split_l
+    hb_edge_a = np.where(hb_zone & opaque & is_hair_like & (yg >= 256), s0[:, :, 3].astype(np.float32), 255.0)
+    hb_w = crisp_mask_weight(hb_shape, hb_zone & opaque, 0.45)
+    split_l = np.clip((346.0 - xg.astype(np.float32)) / 8.0, 0.0, 1.0)
+    split_r = np.clip((xg.astype(np.float32) - 326.0) / 8.0, 0.0, 1.0)
     hb_l = hb_full.copy()
-    hb_l[:, :, 3] = np.clip(np.round(hb_alpha * split_l * 255.0), 0, 255).astype(np.uint8)
+    hb_l[:, :, 3] = np.clip(np.round(hb_edge_a * hb_w * split_l), 0, 255).astype(np.uint8)
     hb_r = hb_full.copy()
-    hb_r[:, :, 3] = np.clip(np.round(hb_alpha * split_r * 255.0), 0, 255).astype(np.uint8)
+    hb_r[:, :, 3] = np.clip(np.round(hb_edge_a * hb_w * split_r), 0, 255).astype(np.uint8)
     save_rgba(hb_l, PARTS_DIR / "sakura_hair_back_l.png")
     save_rgba(hb_r, PARTS_DIR / "sakura_hair_back_r.png")
 
@@ -346,8 +354,8 @@ def build_sakura_parts() -> list[dict]:
     save_rgba(s0, PARTS_DIR / "sakura_hairpin_ref.png")
     save_rgba(np.zeros_like(s0), PARTS_DIR / "sakura_hairpin_slot.png")
 
-    # 8) Neck column (z=38) between jawline y=336 and sailor collar V-lapels y=424
-    neck_poly = poly_mask((h, w), [(296, 336), (376, 336), (374, 424), (294, 424)])
+    # 8) Neck column (z=38) between jawline y=336 and sailor collar V-lapels y=428
+    neck_poly = poly_mask((h, w), [(296, 336), (376, 336), (374, 428), (294, 428)])
     neck_skin_known = neck_poly & is_skin & (~binary_dilation(is_dark_line, iterations=1)) & (yg >= 372) & (yg <= 416)
     neck_fill = neck_poly & (~neck_skin_known)
     neck_rgb = diffuse_from_known(s0[:, :, :3], neck_fill, neck_skin_known, iters=110)
@@ -357,205 +365,270 @@ def build_sakura_parts() -> list[dict]:
     neck_rgb_f[:, :, 1] *= 1.0 - submental_shade * 0.85
     neck_rgb_f[:, :, 2] *= 1.0 - submental_shade * 0.65
     neck_rgb = np.clip(np.round(neck_rgb_f), 0, 255).astype(np.uint8)
-    neck_shape = poly_mask((h, w), [(306, 344), (368, 344), (366, 422), (304, 422)])
+    neck_shape = poly_mask((h, w), [(306, 344), (368, 344), (366, 426), (304, 426)])
     sakura_neck = np.zeros_like(s0)
     sakura_neck[:, :, :3] = neck_rgb
     sakura_neck[:, :, 3] = np.clip(np.round(soft_weight(neck_shape, 1.0) * 255.0), 0, 255).astype(np.uint8)
     save_rgba(sakura_neck, PARTS_DIR / "sakura_neck.png")
 
-    # 9) Back Yellow Sailor Collar corner (z=24, x=436..482, y=420..505)
-    collar_b_poly = poly_mask((h, w), [(424, 420), (484, 420), (484, 506), (426, 506)])
-    cb_mask = opaque & collar_b_poly & (is_yellow_ribbon | (binary_dilation(is_yellow_ribbon, iterations=3) & is_dark_line))
-    cb_fade_in = np.clip((xg.astype(np.float32) - 424.0) / 14.0, 0.0, 1.0)
-    save_rgba(extract_layer(s0, soft_weight(cb_mask, 0.7) * cb_fade_in), PARTS_DIR / "sakura_collar_back.png")
-
-    # 10) Chest & Waist Ribbons (z=50, z=54) — connected-component isolated so sleeve cuff & cyan lapel never leak!
-    bow_c_zone = poly_mask((h, w), [(244, 466), (362, 466), (362, 572), (244, 572)])
-    bow_c_mask_guard = ~(
-        ((xg <= 243) & (yg >= 486))
-        | ((xg >= 354) & (yg >= 506))
-        | ((xg >= 347) & (yg >= 546))
-        | ((g >= 175) & (b >= 205) & (r <= 185))
+    # Helper guards so coat buttons, cyan trim, and dark outlines never get eroded or hole-punched
+    is_cyan_trim = opaque & (g >= 182) & (b >= 205) & (r <= 192) & ((g - r) >= 22)
+    is_dark_crisp = opaque & (r < 125) & (g < 130) & (b < 170)
+    btn_guard = (
+        poly_mask((h, w), [(259, 575), (277, 575), (277, 595), (259, 595)])
+        | poly_mask((h, w), [(321, 578), (343, 578), (343, 598), (321, 598)])
+        | poly_mask((h, w), [(242, 649), (260, 649), (260, 669), (242, 669)])
+        | poly_mask((h, w), [(319, 658), (338, 658), (338, 678), (319, 678)])
     )
-    bow_seeds_raw = bow_c_zone & is_purple_bow & bow_c_mask_guard
-    lbl_b, _ = label(binary_dilation(bow_seeds_raw, iterations=1))
+    hand_skin = is_skin & (yg <= 504) & (xg <= 336)
+
+    # 9) Back Yellow Sailor Collar corner (z=24, x=450..484, y=444..506, tucked under right sleeve outline!)
+    collar_b_poly = poly_mask((h, w), [(450, 444), (484, 444), (484, 506), (452, 506)])
+    cb_mask = opaque & collar_b_poly & (is_yellow_ribbon | (binary_dilation(is_yellow_ribbon, iterations=2) & is_dark_crisp))
+    save_rgba(extract_layer(s0, crisp_mask_weight(cb_mask, opaque & collar_b_poly, 0.45)), PARTS_DIR / "sakura_collar_back.png")
+
+    # 10) Closed-contour Chest & Waist Ribbons (z=50, z=54) — ZERO interior alpha loss, ZERO button/coat leakage!
+    bow_c_poly = poly_mask(
+        (h, w),
+        [(242, 464), (356, 464), (356, 510), (348, 550), (320, 574), (272, 574), (242, 532), (242, 486)],
+    )
+    bow_purple = opaque & bow_c_poly & (b >= r + 18) & (b >= g + 12) & (~is_cyan_trim) & (~is_skin)
+    lbl_b, _ = label(binary_dilation(bow_purple, iterations=1))
     main_lbl = lbl_b[495, 300]
-    bow_main = (lbl_b == main_lbl) if main_lbl > 0 else bow_seeds_raw
-    bow_main_filled = binary_fill_holes(bow_main) & bow_c_zone & (~is_skin)
-    bow_core = binary_dilation(bow_main_filled, iterations=2) & bow_c_zone & bow_c_mask_guard & opaque & (~is_skin)
-    # Remove any outer light coat halo (not adjacent white glint enclosed by bow)
-    bow_outside_white = is_pure_white_coat & (~binary_fill_holes(bow_main | (is_dark_line & binary_dilation(bow_main, iterations=2))))
-    bow_core = bow_core & (~bow_outside_white)
-    save_rgba(extract_layer(s0, soft_weight(bow_core, 0.7)), PARTS_DIR / "sakura_chest_bow.png")
+    bow_main = (lbl_b == main_lbl) if main_lbl > 0 else bow_purple
+    cbow_filled = binary_fill_holes(bow_main) & bow_c_poly & (~hand_skin)
+    hand_edge = binary_dilation(hand_skin, iterations=1)
+    cbow_mask = binary_fill_holes(
+        cbow_filled | (binary_dilation(cbow_filled, iterations=2) & is_dark_crisp & bow_c_poly & (~hand_edge))
+    ) & (~hand_skin)
+    cbow_w = crisp_mask_weight(cbow_mask, opaque & bow_c_poly & (~hand_skin) & (~is_pure_white_coat), 0.40)
+    save_rgba(extract_layer(s0, cbow_w), PARTS_DIR / "sakura_chest_bow.png")
 
-    bow_w_zone = poly_mask((h, w), [(314, 578), (434, 578), (434, 688), (314, 688)])
-    wbow_core = binary_dilation(bow_w_zone & is_yellow_ribbon, iterations=3) & bow_w_zone & opaque & (~is_pure_white_coat) & (~is_pure_navy_skirt)
-    save_rgba(extract_layer(s0, soft_weight(wbow_core, 0.7)), PARTS_DIR / "sakura_waist_bow.png")
+    bow_w_poly = poly_mask(
+        (h, w),
+        [(320, 582), (426, 580), (434, 650), (416, 684), (344, 686), (336, 640), (320, 616)],
+    )
+    wbow_yel = opaque & bow_w_poly & (r >= 190) & (g >= 182) & (b <= 212) & ((r - b) >= 20)
+    lbl_w, _ = label(binary_dilation(wbow_yel, iterations=1))
+    wmain_lbl = lbl_w[615, 375]
+    wbow_main = (lbl_w == wmain_lbl) if wmain_lbl > 0 else wbow_yel
+    wbow_filled = binary_fill_holes(wbow_main) & bow_w_poly & (~btn_guard)
+    wbow_mask = binary_fill_holes(
+        wbow_filled | (binary_dilation(wbow_filled, iterations=2) & is_dark_crisp & bow_w_poly & (~btn_guard))
+    ) & (~btn_guard)
+    wbow_w = crisp_mask_weight(wbow_mask, opaque & bow_w_poly & (~btn_guard) & (~is_pure_white_coat), 0.40)
+    save_rgba(extract_layer(s0, wbow_w), PARTS_DIR / "sakura_waist_bow.png")
 
-    # 11) Right Hanging Arm + Sleeve + Hand (z=44) — cleanly excluding thumb-adjacent skirt & back collar!
+    # 11) Right Hanging Arm + Sleeve + Hand (z=44) — keep sleeve cool shadows, cleanly trace skin fingers!
+    front_collar_guard = binary_dilation(opaque & (yg <= 454) & (xg <= 438) & is_yellow_ribbon, iterations=2)
     arm_r_poly = poly_mask(
         (h, w),
         [
             (402, 422),
-            (456, 422),
+            (462, 422),
             (536, 690),
-            (536, 826),
-            (494, 824),
-            (484, 804),
-            (474, 776),
-            (462, 746),
-            (448, 732),
-            (422, 650),
-            (404, 585),
+            (536, 828),
+            (484, 826),
+            (465, 792),
+            (466, 750),
+            (455, 740),
+            (447, 730),
+            (438, 720),
+            (432, 690),
+            (424, 650),
+            (400, 585),
             (396, 488),
         ],
     )
-    arm_r_mask = (
-        opaque
-        & arm_r_poly
-        & (~wbow_core)
-        & (~cb_mask)
-        & (~is_pure_navy_skirt)
-        & (~poly_mask((h, w), [(480, 808), (505, 808), (505, 830), (480, 830)]))
+    hand_r_skin = opaque & (yg >= 742) & (xg >= 458) & arm_r_poly & is_skin
+    hand_r_dil = binary_dilation(hand_r_skin, iterations=2) | (
+        (xg >= 496) & binary_dilation(hand_r_skin, iterations=3)
     )
-    arm_top_fade = np.clip((yg.astype(np.float32) - 422.0) / 16.0, 0.0, 1.0)
-    save_rgba(extract_layer(s0, soft_weight(arm_r_mask, 0.7) * arm_top_fade), PARTS_DIR / "sakura_arm_r.png")
+    hand_r_solid = binary_fill_holes(
+        hand_r_dil & opaque & arm_r_poly & (is_skin | is_dark_crisp | (r >= 200) | (g < 80))
+    )
+    # Include the subtle cool cuff transition above wrist without catching skirt or lower-right coat edge
+    arm_sleeve_region = opaque & arm_r_poly & ((yg <= 752) | ((xg >= 474) & (yg <= 758)))
+    arm_r_mask = (arm_sleeve_region | hand_r_solid) & (~cb_mask) & (~wbow_mask) & (~front_collar_guard)
+    arm_top_fade = np.clip((yg.astype(np.float32) - 438.0) / 14.0, 0.0, 1.0)
+    arm_r_w = crisp_mask_weight(arm_r_mask, opaque & arm_r_poly & (~cb_mask) & (~front_collar_guard) & ((yg <= 748) | hand_r_solid), 0.40) * arm_top_fade
+    save_rgba(extract_layer(s0, arm_r_w), PARTS_DIR / "sakura_arm_r.png")
 
-    # 12) Pleated Navy Skirt (z=28) — ZERO coat outline/pocket/button seeds!
-    hand_r_zone = poly_mask((h, w), [(456, 720), (542, 720), (542, 836), (456, 836)])
-    skirt_vis_poly = poly_mask((h, w), [(120, 680), (476, 680), (492, 845), (365, 886), (225, 884), (118, 805)])
-    # Strict interior navy skirt pixels excluding white coat, cyan pocket trim (g>=180), buttons, and yellow ribbon!
-    coat_trim_guard = binary_dilation(is_pure_white_coat | is_yellow_ribbon | is_skin | ((g >= 180) & (b >= 210)), iterations=5)
-    skirt_seed = (
+    # 12) Pleated Navy Skirt (z=28) — keep original s0 edge alpha intact + fill ONLY behind overlapping flaps/hand!
+    is_thigh_skin = opaque & (yg >= 845) & (r >= 210) & (g >= 165) & (r >= b + 14)
+    skirt_comp_cand = (
         opaque
-        & skirt_vis_poly
-        & (~hand_r_zone)
+        & (yg >= 677)
+        & (yg <= 884)
         & (~arm_r_mask)
-        & (~coat_trim_guard)
+        & (~btn_guard)
         & (b >= r + 24)
-        & (b <= 216)
-        & (r >= 78)
-        & (g >= 80)
-        & (r <= 155)
-        & (g <= 165)
+        & (r >= 48)
+        & (r <= 165)
+        & (g >= 54)
+        & (g <= 172)
+        & (b <= 222)
     )
-    skirt_pleat_lines = (
-        opaque
-        & skirt_vis_poly
-        & (~hand_r_zone)
-        & (~arm_r_mask)
-        & (~coat_trim_guard)
-        & (binary_dilation(skirt_seed, iterations=4))
+    lbl_sk, n_sk = label(skirt_comp_cand)
+    sk_vis = np.zeros((h, w), dtype=bool)
+    for k in range(1, n_sk + 1):
+        comp = lbl_sk == k
+        # Include smaller navy skirt wedge trapped beside thumb (x=475..505, y=785..820) when >= 40 px!
+        if int(comp.sum()) >= 40:
+            sk_vis |= comp
+    sk_border_cand = is_dark_crisp | ((yg >= 855) & (b >= r - 4) & (r <= 200))
+    sk_vis_full = binary_fill_holes(
+        sk_vis
+        | (
+            binary_dilation(sk_vis, iterations=3)
+            & sk_border_cand
+            & (yg >= 677)
+            & (~arm_r_mask)
+            & (~is_thigh_skin)
+        )
     )
-    skirt_vis_all = skirt_seed | skirt_pleat_lines
-    skirt_known = skirt_seed & is_pure_navy_skirt
-    dist_skirt = distance_transform_edt(~skirt_vis_all)
+    skirt_known = sk_vis & is_pure_navy_skirt
+    dist_skirt = distance_transform_edt(~sk_vis)
+    skirt_tuck_zone = poly_mask((h, w), [(120, 648), (476, 648), (512, 884), (118, 884)])
+    solid_inner = binary_erosion(opaque, iterations=1)
+    coat_hand_occluders = binary_dilation(
+        (opaque & (yg >= 596) & (yg <= 816) & (~sk_vis) & (~is_thigh_skin)) | hand_r_solid,
+        iterations=2,
+    )
     skirt_fill = (
-        opaque
-        & skirt_vis_poly
-        & (yg >= 654)
-        & (yg <= 880)
-        & (xg <= 474)
-        & (dist_skirt <= 16.0)
-        & (~skirt_vis_all)
-        & (~(opaque & (yg >= 868)))
+        solid_inner
+        & skirt_tuck_zone
+        & coat_hand_occluders
+        & (yg >= 650)
+        & (yg <= 872)
+        & (dist_skirt <= 22.0)
+        & (~sk_vis_full)
+        & (~is_thigh_skin)
     )
     skirt_rgb = diffuse_from_known(s0[:, :, :3], skirt_fill, skirt_known, iters=180)
-    skirt_mask = (skirt_vis_all | skirt_fill) & (~(opaque & (yg >= 875)))
+    skirt_mask = sk_vis_full | skirt_fill
+    # Preserve exact original anti-aliased silhouette alpha on visible skirt pixels; only solidify synthetic under-tuck fill!
     sakura_skirt = np.zeros_like(s0)
-    sakura_skirt[:, :, :3] = skirt_rgb
-    sakura_skirt[:, :, 3] = np.clip(np.round(soft_weight(skirt_mask, 0.7) * 255.0), 0, 255).astype(np.uint8)
+    sakura_skirt[:, :, :3] = np.where(skirt_fill[:, :, None], skirt_rgb, s0[:, :, :3])
+    sk_src_a = np.where(skirt_fill, 255.0, s0[:, :, 3].astype(np.float32))
+    sk_w = crisp_mask_weight(skirt_mask, sk_vis_full, 0.35)
+    sakura_skirt[:, :, 3] = np.clip(np.round(sk_src_a * sk_w), 0, 255).astype(np.uint8)
     save_rgba(sakura_skirt, PARTS_DIR / "sakura_skirt.png")
 
-    # 13) Coat Flaps (L z=36, R z=34) split cleanly at waist y=624 (well below upper buttons y=593, well above lower buttons y=654!)
-    coat_all = opaque & (yg >= 604) & (yg <= 812) & (~skirt_vis_all) & (~hand_r_zone) & (~arm_r_mask)
-    navy_slit = (yg >= 662) & (b >= r + 18) & (r <= 170) & (b <= 218)
-    coat_all &= ~navy_slit
+    # 13) Coat Flaps (L z=36, R z=34) — ZERO button holes, crisp dark slit/hem outlines, 14px hidden waist tuck!
+    arm_r_below_shoulder = arm_r_mask & (yg >= 445)
+    hand_r_guard = binary_dilation(hand_r_solid, iterations=1)
+    coat_all = (
+        (
+            opaque
+            & (yg >= 596)
+            & (yg <= 816)
+            & (~sk_vis)
+            & (~hand_r_guard)
+            & (~arm_r_below_shoulder)
+            & (~is_thigh_skin)
+        )
+        | (btn_guard & opaque & (yg >= 596))
+    )
+    # Keep outer 1px AA silhouette strictly on upper_torso (y <= 626) so composited alpha never doubles along waist edge!
+    coat_outer_trim = ~((yg <= 626) & (~solid_inner))
+    x_mid_slit = 358.0 + 0.13 * np.maximum(yg.astype(np.float32) - 678.0, 0.0)
+    flap_l_mask = coat_all & coat_outer_trim & (xg.astype(np.float32) <= x_mid_slit) & (xg >= 134)
+    tuck_ext = np.where(yg <= 676, 14.0, 0.0)
+    flap_r_base = coat_all & coat_outer_trim & (xg.astype(np.float32) >= x_mid_slit - tuck_ext) & (xg <= 478)
+    flap_r_base &= ~((yg <= 676) & (xg.astype(np.float32) < x_mid_slit) & (~solid_inner))
+    # Tuck 6px of clean coat white under arm_r's sleeve border (y=650..758) so arm sway never opens a gap or ghost seam!
+    flap_r_under_arm = (
+        solid_inner
+        & arm_r_below_shoulder
+        & binary_dilation(flap_r_base & (yg >= 650) & (yg <= 758), iterations=6)
+        & (yg >= 650)
+        & (yg <= 758)
+        & (~wbow_mask)
+    )
+    flap_r_mask = flap_r_base | flap_r_under_arm
 
-    x_slit = 356.0 - 0.14 * np.maximum(yg.astype(np.float32) - 600.0, 0.0)
-    flap_l_raw = coat_all & (xg.astype(np.float32) <= x_slit + 2.0) & (xg >= 136)
-    flap_r_raw = coat_all & (xg.astype(np.float32) >= x_slit - 2.0) & (xg <= 470)
+    flap_r_inpaint = (
+        flap_r_mask
+        & (
+            binary_erosion(wbow_mask, iterations=1)
+            | ((yg <= 676) & (xg.astype(np.float32) < x_mid_slit + 2.0))
+            | flap_r_under_arm
+        )
+        & (~btn_guard)
+    )
+    coat_known_r = flap_r_base & is_pure_white_coat & (~wbow_mask) & (~flap_r_inpaint)
+    flap_r_rgb = diffuse_from_known(s0[:, :, :3], flap_r_inpaint, coat_known_r, iters=120)
 
-    coat_known_r = flap_r_raw & is_pure_white_coat & (~wbow_core)
-    wbow_wipe_r = flap_r_raw & binary_dilation(wbow_core, iterations=4)
-    flap_r_rgb = diffuse_from_known(s0[:, :, :3], wbow_wipe_r, coat_known_r, iters=120)
-
-    waist_tuck_w = np.clip((yg.astype(np.float32) - 604.0) / 18.0, 0.0, 1.0)
-    save_rgba(extract_layer(s0, soft_weight(flap_l_raw, 0.7) * waist_tuck_w), PARTS_DIR / "sakura_coat_flap_l.png")
+    flap_l_w = crisp_mask_weight(flap_l_mask, coat_all & coat_outer_trim & (xg.astype(np.float32) <= x_mid_slit + 1.0), 0.35)
+    flap_r_w = crisp_mask_weight(flap_r_mask, coat_all & coat_outer_trim & (xg.astype(np.float32) >= x_mid_slit - tuck_ext - 1.0), 0.35)
+    save_rgba(extract_layer(s0, flap_l_w), PARTS_DIR / "sakura_coat_flap_l.png")
     flap_r_full = s0.copy()
     flap_r_full[:, :, :3] = flap_r_rgb
-    save_rgba(extract_layer(flap_r_full, soft_weight(flap_r_raw, 0.7) * waist_tuck_w), PARTS_DIR / "sakura_coat_flap_r.png")
+    flap_r_src_a = np.where(flap_r_under_arm, 255.0, s0[:, :, 3].astype(np.float32))
+    flap_r_out = flap_r_full.copy()
+    flap_r_out[:, :, 3] = np.clip(np.round(flap_r_src_a * flap_r_w), 0, 255).astype(np.uint8)
+    save_rgba(flap_r_out, PARTS_DIR / "sakura_coat_flap_r.png")
 
-    # 14) Upper Torso (z=40): collar + chest bodice + BOTH upper buttons (y<=593) + bent left arm (ZERO hair crumbs!)
+    # 14) Upper Torso (z=40): collar + chest bodice + solid shoulder sleeve cap + BOTH upper buttons (ZERO bow-halo bleed!)
     torso_poly = poly_mask(
         (h, w),
         [
-            (166, 396),
-            (256, 394),
-            (305, 388),
-            (306, 408),
-            (366, 408),
-            (368, 388),
-            (416, 394),
-            (448, 404),
-            (448, 434),
-            (402, 438),
-            (412, 588),
-            (420, 634),
-            (166, 634),
+            (166, 392),
+            (256, 392),
+            (308, 386),
+            (314, 408),
+            (356, 408),
+            (360, 386),
+            (446, 398),
+            (464, 448),
+            (468, 482),
+            (402, 482),
+            (414, 588),
+            (420, 628),
+            (166, 628),
         ],
     )
-    torso_mask = opaque & torso_poly & (~cb_mask) & (~arm_r_mask)
-    # Only keep collar pixels below shoulder top curve; remove hair crumbs on top edge
-    hair_scrap_top = torso_mask & is_hair_like & (yg <= 406)
+    torso_mask = opaque & torso_poly & (~cb_mask)
+    hair_scrap_top = torso_mask & is_hair_like & (yg <= 395)
     torso_mask &= ~hair_scrap_top
 
-    # Wipe purple chest bow & yellow waist bow + expand strictly over bow contours without touching sleeve cuff or cyan lapel!
-    hand_skin = is_skin & (yg <= 504) & (xg <= 336)
-    wbow_wipe_box = poly_mask((h, w), [(348, 584), (426, 584), (426, 642), (348, 642)]) | poly_mask(
-        (h, w), [(322, 598), (426, 598), (426, 642), (322, 642)]
-    )
-    bow_wipe_t = (
+    # Inpaint STRICTLY inside eroded bow interiors so cyan piping, outlines, and upper buttons stay 100% intact!
+    torso_inpaint = (
         torso_mask
-        & (
-            binary_dilation(bow_core, iterations=4)
-            | binary_dilation(wbow_core | wbow_wipe_box, iterations=5)
-        )
+        & (binary_erosion(cbow_mask, iterations=1) | binary_erosion(wbow_mask, iterations=1))
         & (~hand_skin)
-        & (yg >= 468)
+        & (~btn_guard)
+        & (yg >= 464)
     )
-    coat_known_t = (
-        torso_mask
-        & is_pure_white_coat
-        & (~bow_wipe_t)
-        & (~binary_dilation(is_dark_line | hand_skin | bow_core | wbow_core | wbow_wipe_box, iterations=2))
-        & (yg >= 462)
-    )
-    torso_rgb = diffuse_from_known(s0[:, :, :3], bow_wipe_t, coat_known_t, iters=150)
+    coat_known_t = torso_mask & is_pure_white_coat & (~cbow_mask) & (~wbow_mask) & (~torso_inpaint) & (yg >= 460)
+    torso_rgb = diffuse_from_known(s0[:, :, :3], torso_inpaint, coat_known_t, iters=150)
 
-    # Waist bottom fade y=616..632 (between upper buttons at y=585 and lower buttons at y=660!)
-    waist_bot_w = np.clip((632.0 - yg.astype(np.float32)) / 16.0, 0.0, 1.0)
+    # Smooth fade below waist (y=612..626, over coat_flap) & right shoulder arm tuck (y=462..478, under arm_r)
+    waist_bot_w = np.clip((626.0 - yg.astype(np.float32)) / 14.0, 0.0, 1.0)
+    shoulder_bot_w = np.where((xg >= 402) & (yg >= 455) & (yg <= 484), np.clip((478.0 - yg.astype(np.float32)) / 16.0, 0.0, 1.0), 1.0)
+    torso_outer_trim = ~((xg >= 402) & (yg >= 450) & (~solid_inner))
+    torso_w = crisp_mask_weight(torso_mask & torso_outer_trim, opaque & torso_poly & (~cb_mask) & torso_outer_trim, 0.35) * waist_bot_w * shoulder_bot_w
     sakura_torso = s0.copy()
     sakura_torso[:, :, :3] = torso_rgb
-    sakura_torso = extract_layer(sakura_torso, soft_weight(torso_mask, 0.7) * waist_bot_w)
+    sakura_torso = extract_layer(sakura_torso, torso_w)
     save_rgba(sakura_torso, PARTS_DIR / "sakura_upper_torso.png")
 
-    # 15) Cute Legs + Frilly Ribbon Socks + Feminine Mary Jane Dress Shoes (split into leg_l z=18 & leg_r z=19)
+    # 15) Cute Legs + Frilly Ribbon Socks + Mary Jane Shoes (solid under-skirt tuck & under-leg overlap, ZERO hem ghost!)
     legs_zone = opaque & (yg >= 862)
-    skirt_fringe = (yg <= 885) & (b > r + 14) & (r < 175)
-    legs_clean = legs_zone & (~skirt_fringe)
+    skirt_hem_overlap = (yg <= 885) & (binary_dilation(sk_vis_full, iterations=1) | ((b > r + 14) & (r < 175)))
+    legs_clean = legs_zone & (~skirt_hem_overlap)
     thigh_env = poly_mask((h, w), [(234, 836), (400, 836), (402, 886), (236, 886)])
-    thigh_extend = thigh_env & (~legs_clean) & (yg <= 886)
+    thigh_extend = thigh_env & (~legs_clean) & (yg <= 886) & solid_inner
     thigh_seed = legs_clean & (yg >= 878) & (yg <= 935) & (r >= 225) & (g >= 180) & (r >= b + 20)
-    legs_rgb = diffuse_from_known(s0[:, :, :3], thigh_extend, thigh_seed, iters=100)
+    legs_rgb = diffuse_from_known(s0[:, :, :3], thigh_extend, thigh_seed, iters=110)
     legs_all_mask = legs_clean | thigh_extend
 
     x_sep = np.where(yg < 995, 323.0, 325.0 + 0.10 * np.maximum(yg.astype(np.float32) - 995.0, 0.0))
-    blend_w = np.where(yg < 995, 8.0, 2.0)
-    mask_l_f = np.clip((x_sep - xg.astype(np.float32) + blend_w * 0.5) / blend_w, 0.0, 1.0) * soft_weight(legs_all_mask, 0.7)
-    mask_r_f = (1.0 - np.clip((x_sep - xg.astype(np.float32) + blend_w * 0.5) / blend_w, 0.0, 1.0)) * soft_weight(
-        legs_all_mask, 0.7
-    )
+    # leg_l (z=18, behind leg_r z=19) extends 10px right under leg_r for zero alpha dip at thigh overlap
+    leg_base_w = crisp_mask_weight(legs_all_mask, opaque | thigh_extend, 0.35)
+    mask_l_f = np.clip((x_sep + 10.0 - xg.astype(np.float32)) / 4.0, 0.0, 1.0) * np.where(xg.astype(np.float32) >= x_sep - 2.0, solid_inner.astype(np.float32), leg_base_w)
+    mask_r_f = np.clip((xg.astype(np.float32) - (x_sep - 2.0)) / 4.0, 0.0, 1.0) * leg_base_w
 
     legs_full = s0.copy()
     legs_full[:, :, :3] = legs_rgb

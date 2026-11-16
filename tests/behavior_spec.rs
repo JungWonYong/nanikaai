@@ -1340,6 +1340,47 @@ fn spec_l2d_01_02_external_sidecar_parts_and_path_safety() {
         .current_bitmap
         .count_opaque_pixels();
     assert_eq!(star_plain_px, 0, "star_hairpin must be empty when bindgroup50 is off");
+
+    // Regression guard: chest_bow interior & buttons & outfit boundaries must stay crisp and opaque without white halo bleed
+    let bow_bmp =
+        load_ukagaka_rgba(&assets.join("live2d/neo_default/parts/sakura_chest_bow.png"), None)
+            .expect("sakura_chest_bow.png must load");
+    let bow_idx = ((508 * bow_bmp.width + 309) * 4) as usize;
+    assert_eq!(
+        &bow_bmp.data[bow_idx..bow_idx + 4],
+        &[135, 142, 210, 255],
+        "chest_bow highlight pixel (309,508) must match opaque surface0 RGB"
+    );
+    sak_rig.reset();
+    let sak_rest = sak_rig.render_cpu_rgba();
+    let btn_idx = ((668 * sak_rest.width + 328) * 4) as usize;
+    assert_eq!(
+        sak_rest.data[btn_idx + 3],
+        255,
+        "lower-right coat button (328,668) must remain opaque (alpha=255)"
+    );
+    let mut bad_outfit_px = 0usize;
+    for y in 400..890u32 {
+        for x in 140..520u32 {
+            let idx = ((y * sak_rest.width + x) * 4) as usize;
+            let ra = sak_rest.data[idx + 3] as f32 / 255.0;
+            let pa = sak_plain.data[idx + 3] as f32 / 255.0;
+            let mut max_d = (sak_rest.data[idx + 3] as i32 - sak_plain.data[idx + 3] as i32).abs() as f32;
+            for c in 0..3 {
+                let rp = sak_rest.data[idx + c] as f32 * ra;
+                let pp = sak_plain.data[idx + c] as f32 * pa;
+                max_d = max_d.max((rp - pp).abs());
+            }
+            if max_d > 28.0 {
+                bad_outfit_px += 1;
+            }
+        }
+    }
+    assert!(
+        bad_outfit_px < 250,
+        "rest-pose Live2D outfit premultiplied diff > 28 must stay < 250 px vs surface0.png (got {bad_outfit_px})"
+    );
+
     let sak_ovs = manifest.collect_bind_overlays(0, &[50]);
     let _ = sak_rig.sync_from_surface_state(
         0,
