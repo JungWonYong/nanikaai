@@ -157,6 +157,10 @@ pub struct ShellGhostProfile {
     pub memories: Vec<MemoryItem>,
     #[serde(default)]
     pub active_binds: Option<Vec<i32>>,
+    #[serde(default)]
+    pub sakura_speaker_id: Option<i64>,
+    #[serde(default)]
+    pub kero_speaker_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -465,6 +469,34 @@ impl ConfigStore {
         profile.active_binds = Some(current.clone());
         Self::save_to_path(&self.file_path, &guard);
         (current, now_enabled)
+    }
+
+    pub fn get_shell_voice_speakers(&self, shell_id: &str) -> (Option<i64>, Option<i64>) {
+        let guard = self.inner.lock().expect("config mutex poisoned");
+        guard
+            .ghost_profiles
+            .get(shell_id)
+            .map(|p| (p.sakura_speaker_id, p.kero_speaker_id))
+            .unwrap_or((None, None))
+    }
+
+    pub fn set_shell_voice_speaker(
+        &self,
+        shell_id: &str,
+        scope: u8,
+        speaker_id: Option<i64>,
+    ) {
+        let mut guard = self.inner.lock().expect("config mutex poisoned");
+        let profile = guard
+            .ghost_profiles
+            .entry(shell_id.to_string())
+            .or_default();
+        if scope == 1 {
+            profile.kero_speaker_id = speaker_id;
+        } else {
+            profile.sakura_speaker_id = speaker_id;
+        }
+        Self::save_to_path(&self.file_path, &guard);
     }
 
     pub fn add_reminder(

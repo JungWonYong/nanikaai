@@ -2236,6 +2236,7 @@ enum MenuCommand {
     ToggleBind(i32),
     ToggleHourlyChime,
     ToggleVoiceTts,
+    SelectVoiceSpeaker { scope: u8, style_id: Option<i64> },
     CheckUpdates,
     InstallNarDialog,
     ResetPositions,
@@ -2579,6 +2580,7 @@ enum UserEvent {
         model: Option<String>,
         reply: mpsc::Sender<Result<Value, String>>,
     },
+    RefreshMenus,
     TriggerSmokeStep,
 }
 
@@ -3351,6 +3353,54 @@ impl AppRuntime {
             }
         }
 
+        if cfg.voice_tts {
+            let (eng_lbl, all_voices) = crate::companion_extras::cached_tts_voices();
+            if !all_voices.is_empty() {
+                let (sak_sp, ker_sp) = self
+                    .config_store
+                    .get_shell_voice_speakers(&cfg.active_shell_id);
+                let sample = Self::representative_voice_options(&all_voices, 8);
+                rows.push(MenuRow {
+                    label: format!("[声色 · {eng_lbl}]"),
+                    cmd: MenuCommand::Separator,
+                });
+                rows.push(MenuRow {
+                    label: format!("{} (\\0) 声: 自動 (Auto)", if sak_sp.is_none() { "✓" } else { " " }),
+                    cmd: MenuCommand::SelectVoiceSpeaker {
+                        scope: 0,
+                        style_id: None,
+                    },
+                });
+                for v in &sample {
+                    let mark = if sak_sp == Some(v.style_id) { "✓" } else { " " };
+                    rows.push(MenuRow {
+                        label: format!("{mark} (\\0) {}", v.label),
+                        cmd: MenuCommand::SelectVoiceSpeaker {
+                            scope: 0,
+                            style_id: Some(v.style_id),
+                        },
+                    });
+                }
+                rows.push(MenuRow {
+                    label: format!("{} (\\1) 声: 自動 (Auto)", if ker_sp.is_none() { "✓" } else { " " }),
+                    cmd: MenuCommand::SelectVoiceSpeaker {
+                        scope: 1,
+                        style_id: None,
+                    },
+                });
+                for v in &sample {
+                    let mark = if ker_sp == Some(v.style_id) { "✓" } else { " " };
+                    rows.push(MenuRow {
+                        label: format!("{mark} (\\1) {}", v.label),
+                        cmd: MenuCommand::SelectVoiceSpeaker {
+                            scope: 1,
+                            style_id: Some(v.style_id),
+                        },
+                    });
+                }
+            }
+        }
+
         rows.push(MenuRow {
             label: String::new(),
             cmd: MenuCommand::Separator,
@@ -3514,6 +3564,59 @@ impl AppRuntime {
             let _ = menu.append(&bind_sub);
         }
 
+        if cfg.voice_tts {
+            let (eng_lbl, all_voices) = crate::companion_extras::cached_tts_voices();
+            if !all_voices.is_empty() {
+                let (sak_sp, ker_sp) = self
+                    .config_store
+                    .get_shell_voice_speakers(&cfg.active_shell_id);
+                let choices = Self::representative_voice_options(&all_voices, 16);
+                let sak_voice_sub = Submenu::new(format!("\\0 声色 ({eng_lbl})"), true);
+                add_item(
+                    &sak_voice_sub,
+                    if sak_sp.is_none() { "✓ 自動 (Auto)" } else { "   自動 (Auto)" },
+                    MenuCommand::SelectVoiceSpeaker {
+                        scope: 0,
+                        style_id: None,
+                    },
+                );
+                for v in &choices {
+                    let mark = if sak_sp == Some(v.style_id) { "✓ " } else { "   " };
+                    add_item(
+                        &sak_voice_sub,
+                        &format!("{mark}{}", v.label),
+                        MenuCommand::SelectVoiceSpeaker {
+                            scope: 0,
+                            style_id: Some(v.style_id),
+                        },
+                    );
+                }
+                let _ = menu.append(&sak_voice_sub);
+
+                let ker_voice_sub = Submenu::new("\\1 パートナー声色", true);
+                add_item(
+                    &ker_voice_sub,
+                    if ker_sp.is_none() { "✓ 自動 (Auto)" } else { "   自動 (Auto)" },
+                    MenuCommand::SelectVoiceSpeaker {
+                        scope: 1,
+                        style_id: None,
+                    },
+                );
+                for v in &choices {
+                    let mark = if ker_sp == Some(v.style_id) { "✓ " } else { "   " };
+                    add_item(
+                        &ker_voice_sub,
+                        &format!("{mark}{}", v.label),
+                        MenuCommand::SelectVoiceSpeaker {
+                            scope: 1,
+                            style_id: Some(v.style_id),
+                        },
+                    );
+                }
+                let _ = menu.append(&ker_voice_sub);
+            }
+        }
+
         let _ = menu.append(&PredefinedMenuItem::separator());
 
         let update_item = MenuItem::new("🔄 更新確認 · Check Updates", true, None);
@@ -3675,11 +3778,64 @@ impl AppRuntime {
                     ..Default::default()
                 });
                 self.rebuild_tray_menu();
+                if !updated.voice_tts {
+                    crate::companion_extras::stop_managed_tts_engine();
+                }
                 if !self.smoke_mode {
-                    let st = if updated.voice_tts { "ON" } else { "OFF" };
-                    let _ = self.proxy.send_event(UserEvent::PlayActions(parse_dialogue(&format!(
-                        "\\0\\s[5]音声読み上げ（VOICEVOX / OS TTS）を {st} にしたよ！\\e"
-                    ))));
+                    if updated.voice_tts {
+                        self.apply_status_feedback(
+                            "音声エンジン準備中 (AivisSpeech / VOICEVOX)…".to_string(),
+                        );
+                        let proxy = self.proxy.clone();
+                        let v_url = updated.voicevox_url.clone();
+                        std::thread::spawn(move || {
+                            let status = crate::companion_extras::ensure_tts_engine_ready_blocking(
+                                &v_url, true,
+                            );
+                            let _ = proxy.send_event(UserEvent::RefreshMenus);
+                            let boot_tag = if status.auto_spawned {
+                                "（自動起動）"
+                            } else {
+                                ""
+                            };
+                            let msg = format!(
+                                "\\0\\s[5]音声読み上げ ON！[{}{boot_tag}] 私の声は「{}」だよ。\\1\\s[10]わしの声は「{}」やで！\\e",
+                                status.engine_label,
+                                status.sakura_voice_label,
+                                status.kero_voice_label
+                            );
+                            let _ = proxy.send_event(UserEvent::PlayActions(parse_dialogue(&msg)));
+                        });
+                    } else {
+                        let _ = self.proxy.send_event(UserEvent::PlayActions(parse_dialogue(
+                            "\\0\\s[0]音声読み上げを OFF にしたよ。\\e",
+                        )));
+                    }
+                }
+            }
+            MenuCommand::SelectVoiceSpeaker { scope, style_id } => {
+                let shell_id = self.config_store.get().active_shell_id;
+                self.config_store
+                    .set_shell_voice_speaker(&shell_id, scope, style_id);
+                self.rebuild_tray_menu();
+                if !self.smoke_mode {
+                    let (_, voices) = crate::companion_extras::cached_tts_voices();
+                    let v_name = match style_id {
+                        Some(id) => voices
+                            .iter()
+                            .find(|v| v.style_id == id)
+                            .map(|v| v.label.clone())
+                            .unwrap_or_else(|| format!("Speaker #{id}")),
+                        None => "自動 (Auto)".to_string(),
+                    };
+                    let script = if scope == 1 {
+                        format!("\\1\\s[10]わしの声を「{v_name}」に変えたで！\\e")
+                    } else {
+                        format!("\\0\\s[5]声色を「{v_name}」に変えたよ、よろしくね！\\e")
+                    };
+                    let _ = self
+                        .proxy
+                        .send_event(UserEvent::PlayActions(parse_dialogue(&script)));
                 }
             }
             MenuCommand::CheckUpdates => {
@@ -3735,6 +3891,7 @@ impl AppRuntime {
 
     fn begin_graceful_quit(&mut self, event_loop: &ActiveEventLoop) {
         if self.smoke_mode || self.closing_at.is_some() {
+            crate::companion_extras::stop_managed_tts_engine();
             if let Some(mut srv) = self.server.take() {
                 srv.stop();
             }
@@ -3749,6 +3906,32 @@ impl AppRuntime {
         self.apply_immediate_surface_actions(imm);
         self.sync_balloons_to_playback();
         self.closing_at = Some(Instant::now() + Duration::from_millis(1350));
+    }
+
+    fn representative_voice_options(
+        voices: &[crate::companion_extras::TtsVoiceOption],
+        max_items: usize,
+    ) -> Vec<crate::companion_extras::TtsVoiceOption> {
+        let mut distinct_speakers: Vec<&str> = Vec::new();
+        for v in voices {
+            if !distinct_speakers.contains(&v.speaker_name.as_str()) {
+                distinct_speakers.push(v.speaker_name.as_str());
+            }
+        }
+        let per_speaker = if distinct_speakers.len() <= 3 { 4 } else { 1 };
+        let mut picked = Vec::new();
+        let mut counts: HashMap<&str, usize> = HashMap::new();
+        for v in voices {
+            let cnt = counts.entry(v.speaker_name.as_str()).or_insert(0);
+            if *cnt < per_speaker {
+                *cnt += 1;
+                picked.push(v.clone());
+                if picked.len() >= max_items {
+                    break;
+                }
+            }
+        }
+        picked
     }
 
     fn apply_immediate_surface_actions(&mut self, imm: Vec<DialogueAction>) {
@@ -3776,11 +3959,19 @@ impl AppRuntime {
         if !cfg.voice_tts {
             return;
         }
-        for (scope_id, seg) in
-            crate::companion_extras::extract_speech_segments_from_actions(actions)
-        {
-            crate::companion_extras::speak_utterance_async(scope_id, &seg, &cfg.voicevox_url);
+        let segs = crate::companion_extras::extract_speech_segments_from_actions(actions);
+        if segs.is_empty() {
+            return;
         }
+        let (sak_sp, ker_sp) = self
+            .config_store
+            .get_shell_voice_speakers(&cfg.active_shell_id);
+        crate::companion_extras::speak_dialogue_batch_async(
+            segs,
+            &cfg.voicevox_url,
+            sak_sp,
+            ker_sp,
+        );
     }
 
     fn spawn_dropped_file_inspection(&mut self, path: &Path) {
@@ -4922,7 +5113,7 @@ impl AppRuntime {
                 sb.utterance_min_w = 0;
                 sb.large = false;
             }
-            let short_script = "\\0\\s[0]안녕! 何か藍(NanikaAi) v0.1.4!\\e";
+            let short_script = "\\0\\s[0]안녕! 何か藍(NanikaAi) v0.1.5!\\e";
             self.playback.enqueue(parse_dialogue(short_script));
             let _ = self.playback.fast_forward();
             self.sync_balloons_to_playback();
@@ -4948,7 +5139,7 @@ impl AppRuntime {
                 sb.utterance_min_w = 0;
                 sb.large = false;
             }
-            let demo_script = "\\0\\s[0]안녕! 100% Safe Rust 何か藍(NanikaAi) v0.1.4 テスト完了だよ！\\n\\n長い文章では吹き出しが内容に合わせて滑らかに広がり、最大サイズに達すると自動的にスクロールバーとトラックが表示されて、マウスホイールで快適に読み進められます。\\n\\n1行目: Live2D骨格・胸部呼吸・髪/アホ毛/スカートの物理揺れを有効化。\\n2行目: うにゅうの体型専用メッシュと自然な色味を保持。\\n3行目: Gemma/SentencePieceのバイトフォールバック文字も完全復元。\\w3\\1\\s[10]サングラスの上からもバッチリ見えてるぜ。\\e";
+            let demo_script = "\\0\\s[0]안녕! 100% Safe Rust 何か藍(NanikaAi) v0.1.5 テスト完了だよ！\\n\\n長い文章では吹き出しが内容に合わせて滑らかに広がり、最大サイズに達すると自動的にスクロールバーとトラックが表示されて、マウスホイールで快適に読み進められます。\\n\\n1行目: Live2D骨格・胸部呼吸・髪/アホ毛/スカートの物理揺れを有効化。\\n2行目: うにゅうの体型専用メッシュと自然な色味を保持。\\n3行目: Gemma/SentencePieceのバイトフォールバック文字も完全復元。\\w3\\1\\s[10]サングラスの上からもバッチリ見えてるぜ。\\e";
             self.playback.enqueue(parse_dialogue(demo_script));
             let _ = self.playback.fast_forward();
             self.sync_balloons_to_playback();
@@ -5663,6 +5854,14 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
         if self.smoke_mode {
             let _ = self.proxy.send_event(UserEvent::TriggerSmokeStep);
         } else {
+            if cfg.voice_tts {
+                let v_url = cfg.voicevox_url.clone();
+                let proxy_tts = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let _ = crate::companion_extras::ensure_tts_engine_ready_blocking(&v_url, true);
+                    let _ = proxy_tts.send_event(UserEvent::RefreshMenus);
+                });
+            }
             // Boot greeting on background thread
             let eng = self.engine.clone();
             let proxy = self.proxy.clone();
@@ -5738,6 +5937,9 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
             }
             UserEvent::ServerSwitchProvider { provider, model, reply } => {
                 let _ = reply.send(self.handle_provider_switch(provider, model));
+            }
+            UserEvent::RefreshMenus => {
+                self.rebuild_tray_menu();
             }
             UserEvent::TriggerSmokeStep => {
                 if self.smoke_mode && self.smoke_phase == 0 {
@@ -5940,6 +6142,7 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
         let mut next_wakeup = Instant::now() + Duration::from_millis(poll_ms);
         if let Some(deadline) = self.closing_at {
             if Instant::now() >= deadline {
+                crate::companion_extras::stop_managed_tts_engine();
                 if let Some(mut srv) = self.server.take() {
                     srv.stop();
                 }
@@ -6186,6 +6389,8 @@ pub fn run(smoke_test: bool) -> Result<(), String> {
     event_loop
         .run_app(&mut app)
         .map_err(|e| format!("GUI 이벤트 루프 오류: {e}"))?;
+
+    crate::companion_extras::stop_managed_tts_engine();
 
     if smoke_test && !*smoke_passed.lock().expect("smoke mutex poisoned") {
         return Err("스모크 테스트가 통과되지 않았습니다.".to_string());

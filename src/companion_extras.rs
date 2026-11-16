@@ -3,9 +3,9 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 use std::sync::{mpsc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use regex::Regex;
 use reqwest::blocking::Client;
@@ -14,11 +14,32 @@ use url::Url;
 
 use crate::agent_engine::wrap_untrusted_data;
 use crate::builtin_tools::{is_sensitive_path, validate_public_url};
+use crate::config_store::user_home_dir;
 use crate::dialogue_parser::{parse_dialogue, ActionKind, Scope};
 
 pub const GITHUB_RELEASES_LATEST_API: &str =
     "https://api.github.com/repos/JungWonYong/nanikaai/releases/latest";
+pub const DEFAULT_AIVIS_URL: &str = "http://127.0.0.1:10101";
 pub const DEFAULT_VOICEVOX_URL: &str = "http://127.0.0.1:50021";
+pub const DEFAULT_COEIROINK_URL: &str = "http://127.0.0.1:50032";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TtsVoiceOption {
+    pub style_id: i64,
+    pub speaker_name: String,
+    pub style_name: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TtsEngineStatus {
+    pub engine_label: String,
+    pub base_url: Option<String>,
+    pub auto_spawned: bool,
+    pub sakura_voice_label: String,
+    pub kero_voice_label: String,
+    pub voices: Vec<TtsVoiceOption>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateCheckInfo {
@@ -47,16 +68,57 @@ struct GitHubReleaseResponse {
     body: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct SpeechJob {
-    scope_id: u8,
-    text: String,
-    voicevox_url: String,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SpeechBatch {
+    segments: Vec<(u8, String)>,
+    preferred_url: String,
+    sakura_speaker_override: Option<i64>,
+    kero_speaker_override: Option<i64>,
 }
 
-fn tts_sender() -> &'static Mutex<Option<mpsc::Sender<SpeechJob>>> {
-    static SENDER: OnceLock<Mutex<Option<mpsc::Sender<SpeechJob>>>> = OnceLock::new();
+struct ManagedTtsProcess {
+    child: Child,
+}
+
+#[derive(Default, Clone)]
+struct CachedTtsState {
+    engine_label: String,
+    base_url: Option<String>,
+    voices: Vec<TtsVoiceOption>,
+}
+
+fn tts_sender() -> &'static Mutex<Option<mpsc::Sender<SpeechBatch>>> {
+    static SENDER: OnceLock<Mutex<Option<mpsc::Sender<SpeechBatch>>>> = OnceLock::new();
     SENDER.get_or_init(|| Mutex::new(None))
+}
+
+fn managed_tts_process() -> &'static Mutex<Option<ManagedTtsProcess>> {
+    static PROC: OnceLock<Mutex<Option<ManagedTtsProcess>>> = OnceLock::new();
+    PROC.get_or_init(|| Mutex::new(None))
+}
+
+fn tts_init_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn cached_tts_state() -> &'static Mutex<CachedTtsState> {
+    static CACHE: OnceLock<Mutex<CachedTtsState>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        Mutex::new(CachedTtsState {
+            engine_label: "OS Native TTS".to_string(),
+            base_url: None,
+            voices: Vec::new(),
+        })
+    })
+}
+
+/// Synchronously read cached engine label and discovered character voice styles without blocking.
+pub fn cached_tts_voices() -> (String, Vec<TtsVoiceOption>) {
+    cached_tts_state()
+        .lock()
+        .map(|g| (g.engine_label.clone(), g.voices.clone()))
+        .unwrap_or_else(|_| ("OS Native TTS".to_string(), Vec::new()))
 }
 
 /// Extract speakable `(scope_id, text)` segments (`0` = Sakura, `1` = Kero) from SakuraScript.
@@ -119,33 +181,413 @@ pub fn extract_speech_segments_from_actions(
     segments
 }
 
-/// Speak an utterance asynchronously via local VOICEVOX (if reachable) or OS native TTS.
-pub fn speak_utterance_async(scope_id: u8, text: &str, voicevox_url: &str) {
-    let clean: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if clean.is_empty() {
+/// Discover installed headless TTS engine binaries (AivisSpeech Engine first, then VOICEVOX vv-engine).
+pub fn discover_tts_engine_binaries() -> Vec<(&'static str, PathBuf, u16)> {
+    let mut candidates: Vec<(&'static str, PathBuf, u16)> = Vec::new();
+    let home = user_home_dir();
+
+    if let Some(custom) = std::env::var_os("NANIKAAI_TTS_ENGINE_BIN") {
+        let p = PathBuf::from(custom);
+        if p.is_file() {
+            let low = p.to_string_lossy().to_ascii_lowercase();
+            let (lbl, port) = if low.contains("aivis") {
+                ("AivisSpeech Engine", 10101)
+            } else {
+                ("VOICEVOX Engine", 50021)
+            };
+            candidates.push((lbl, p, port));
+        }
+    }
+
+    let mut add_if_exists = |label: &'static str, p: PathBuf, port: u16| {
+        if p.is_file() && !candidates.iter().any(|(_, existing, _)| existing == &p) {
+            candidates.push((label, p, port));
+        }
+    };
+
+    // 1. AivisSpeech Engine (Style-Bert-VITS2 natural anime voices, vv-engine compatible :10101)
+    add_if_exists(
+        "AivisSpeech Engine",
+        home.join(".local/share/aivisspeech-engine/run"),
+        10101,
+    );
+    add_if_exists(
+        "AivisSpeech Engine",
+        home.join(".local/share/aivisspeech-engine/run.exe"),
+        10101,
+    );
+    add_if_exists(
+        "AivisSpeech Engine",
+        PathBuf::from("/Applications/AivisSpeech.app/Contents/Resources/AivisSpeech-Engine/run"),
+        10101,
+    );
+    add_if_exists(
+        "AivisSpeech Engine",
+        home.join("Applications/AivisSpeech.app/Contents/Resources/AivisSpeech-Engine/run"),
+        10101,
+    );
+    add_if_exists(
+        "AivisSpeech Engine",
+        PathBuf::from("/opt/aivisspeech-engine/run"),
+        10101,
+    );
+    if let Some(local_app) = std::env::var_os("LOCALAPPDATA") {
+        add_if_exists(
+            "AivisSpeech Engine",
+            PathBuf::from(&local_app).join(r"Programs\AivisSpeech\AivisSpeech-Engine\run.exe"),
+            10101,
+        );
+    }
+    if let Some(prog_files) = std::env::var_os("PROGRAMFILES") {
+        add_if_exists(
+            "AivisSpeech Engine",
+            PathBuf::from(&prog_files).join(r"AivisSpeech\AivisSpeech-Engine\run.exe"),
+            10101,
+        );
+    }
+    add_if_exists(
+        "AivisSpeech Engine",
+        PathBuf::from(r"C:\usr\local\AivisSpeech\AivisSpeech-Engine\run.exe"),
+        10101,
+    );
+
+    // 2. VOICEVOX vv-engine (classic character voices, :50021)
+    add_if_exists(
+        "VOICEVOX Engine",
+        PathBuf::from("/Applications/VOICEVOX.app/Contents/Resources/vv-engine/run"),
+        50021,
+    );
+    add_if_exists(
+        "VOICEVOX Engine",
+        home.join("Applications/VOICEVOX.app/Contents/Resources/vv-engine/run"),
+        50021,
+    );
+    add_if_exists(
+        "VOICEVOX Engine",
+        home.join(".local/share/voicevox-engine/run"),
+        50021,
+    );
+    add_if_exists(
+        "VOICEVOX Engine",
+        PathBuf::from("/opt/voicevox_engine/run"),
+        50021,
+    );
+    add_if_exists(
+        "VOICEVOX Engine",
+        PathBuf::from(r"C:\usr\local\VOICEVOX\vv-engine\run.exe"),
+        50021,
+    );
+    if let Some(local_app) = std::env::var_os("LOCALAPPDATA") {
+        add_if_exists(
+            "VOICEVOX Engine",
+            PathBuf::from(&local_app).join(r"Programs\VOICEVOX\vv-engine\run.exe"),
+            50021,
+        );
+    }
+    if let Some(prog_files) = std::env::var_os("PROGRAMFILES") {
+        add_if_exists(
+            "VOICEVOX Engine",
+            PathBuf::from(&prog_files).join(r"VOICEVOX\vv-engine\run.exe"),
+            50021,
+        );
+    }
+
+    candidates
+}
+
+/// Stop any headless TTS engine child process that was auto-spawned by NanikaAi.
+pub fn stop_managed_tts_engine() {
+    if let Ok(mut guard) = managed_tts_process().lock() {
+        if let Some(mut proc_info) = guard.take() {
+            let _ = proc_info.child.kill();
+            let _ = proc_info.child.wait();
+        }
+    }
+    if let Ok(mut cache) = cached_tts_state().lock() {
+        cache.engine_label = "OS Native TTS".to_string();
+        cache.base_url = None;
+        cache.voices.clear();
+    }
+}
+
+/// Parse `GET {base}/speakers` from a VOICEVOX / AivisSpeech compatible engine.
+pub fn fetch_voices_from_engine(base: &str) -> Result<Vec<TtsVoiceOption>, String> {
+    let client = Client::builder()
+        .connect_timeout(Duration::from_millis(500))
+        .timeout(Duration::from_secs(3))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let clean = base.trim_end_matches('/');
+    let resp = client
+        .get(format!("{clean}/speakers"))
+        .send()
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {}", resp.status()));
+    }
+    let arr: Vec<serde_json::Value> = resp.json().map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for sp in arr {
+        let sp_name = sp
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Speaker")
+            .trim()
+            .to_string();
+        if let Some(styles) = sp.get("styles").and_then(|v| v.as_array()) {
+            for st in styles {
+                let Some(id) = st.get("id").and_then(|v| v.as_i64()) else {
+                    continue;
+                };
+                let st_name = st
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("ノーマル")
+                    .trim()
+                    .to_string();
+                let label = format!("{sp_name} ({st_name})");
+                out.push(TtsVoiceOption {
+                    style_id: id,
+                    speaker_name: sp_name.clone(),
+                    style_name: st_name,
+                    label,
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Choose distinct default `\0` and `\1` speaker style IDs from discovered speakers.
+pub fn pick_default_speaker_pair(voices: &[TtsVoiceOption]) -> (Option<i64>, Option<i64>) {
+    if voices.is_empty() {
+        return (None, None);
+    }
+    let find_normal = |speaker_substr: &str| -> Option<i64> {
+        voices
+            .iter()
+            .find(|v| {
+                v.speaker_name.contains(speaker_substr)
+                    && (v.style_name.contains("ノーマル") || v.style_name.eq_ignore_ascii_case("normal"))
+            })
+            .or_else(|| voices.iter().find(|v| v.speaker_name.contains(speaker_substr)))
+            .map(|v| v.style_id)
+    };
+    if let (Some(metan), Some(zunda)) = (find_normal("四国めたん"), find_normal("ずんだもん")) {
+        return (Some(metan), Some(zunda));
+    }
+
+    let first = &voices[0];
+    let second = voices
+        .iter()
+        .find(|v| {
+            v.speaker_name != first.speaker_name
+                && (v.style_name.contains("ノーマル")
+                    || v.style_name.contains("ふつ")
+                    || v.style_name.eq_ignore_ascii_case("normal"))
+        })
+        .or_else(|| voices.iter().find(|v| v.speaker_name != first.speaker_name))
+        .or_else(|| voices.get(1));
+
+    (Some(first.style_id), second.map(|v| v.style_id).or(Some(first.style_id)))
+}
+
+fn voice_label_for_id(voices: &[TtsVoiceOption], id: Option<i64>) -> String {
+    match id {
+        Some(target) => voices
+            .iter()
+            .find(|v| v.style_id == target)
+            .map(|v| v.label.clone())
+            .unwrap_or_else(|| format!("Speaker #{target}")),
+        None => "標準".to_string(),
+    }
+}
+
+fn probe_tts_version(base: &str) -> bool {
+    let Ok(client) = Client::builder()
+        .connect_timeout(Duration::from_millis(300))
+        .timeout(Duration::from_millis(900))
+        .build()
+    else {
+        return false;
+    };
+    client
+        .get(format!("{}/version", base.trim_end_matches('/')))
+        .send()
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+fn label_for_engine_url(base: &str, voices: &[TtsVoiceOption]) -> String {
+    if base.contains(":10101") {
+        "AivisSpeech Engine (:10101)".to_string()
+    } else if base.contains(":50032") {
+        "COEIROINK (:50032)".to_string()
+    } else if voices.iter().any(|v| v.style_id > 100_000) {
+        "AivisSpeech Engine".to_string()
+    } else {
+        "VOICEVOX Engine (:50021)".to_string()
+    }
+}
+
+/// Probe running local character TTS engines or headlessly launch an installed AivisSpeech / VOICEVOX engine.
+pub fn ensure_tts_engine_ready_blocking(
+    preferred_url: &str,
+    allow_autostart: bool,
+) -> TtsEngineStatus {
+    let _init_guard = tts_init_lock().lock().ok();
+
+    let mut probe_urls: Vec<String> = Vec::new();
+    let trimmed_pref = preferred_url.trim();
+    let pref_is_default = trimmed_pref.is_empty()
+        || trimmed_pref.eq_ignore_ascii_case("auto")
+        || trimmed_pref.trim_end_matches('/') == DEFAULT_VOICEVOX_URL;
+    if !pref_is_default {
+        if let Some(valid) = validate_local_tts_url(trimmed_pref) {
+            probe_urls.push(valid);
+        }
+    }
+    for std_url in [DEFAULT_AIVIS_URL, DEFAULT_VOICEVOX_URL, DEFAULT_COEIROINK_URL] {
+        if !probe_urls.iter().any(|u| u == std_url) {
+            probe_urls.push(std_url.to_string());
+        }
+    }
+
+    for url in &probe_urls {
+        if probe_tts_version(url) {
+            let voices = fetch_voices_from_engine(url).unwrap_or_default();
+            let (s0, s1) = pick_default_speaker_pair(&voices);
+            let engine_label = label_for_engine_url(url, &voices);
+            let sakura_voice_label = voice_label_for_id(&voices, s0);
+            let kero_voice_label = voice_label_for_id(&voices, s1);
+            if let Ok(mut cache) = cached_tts_state().lock() {
+                cache.engine_label = engine_label.clone();
+                cache.base_url = Some(url.clone());
+                cache.voices = voices.clone();
+            }
+            return TtsEngineStatus {
+                engine_label,
+                base_url: Some(url.clone()),
+                auto_spawned: false,
+                sakura_voice_label,
+                kero_voice_label,
+                voices,
+            };
+        }
+    }
+
+    if allow_autostart {
+        if let Ok(mut proc_guard) = managed_tts_process().lock() {
+            if let Some(ref mut existing) = *proc_guard {
+                if let Ok(Some(_)) = existing.child.try_wait() {
+                    *proc_guard = None;
+                }
+            }
+            if proc_guard.is_none() {
+                for (lbl, bin_path, port) in discover_tts_engine_binaries() {
+                    let mut cmd = Command::new(&bin_path);
+                    if let Some(parent) = bin_path.parent() {
+                        cmd.current_dir(parent);
+                    }
+                    cmd.args(["--host", "127.0.0.1", "--port", &port.to_string()])
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null());
+                    #[cfg(target_os = "windows")]
+                    {
+                        use std::os::windows::process::CommandExt;
+                        cmd.creation_flags(0x0800_0000);
+                    }
+                    if let Ok(mut child) = cmd.spawn() {
+                        let base = format!("http://127.0.0.1:{port}");
+                        let start = Instant::now();
+                        let mut ready = false;
+                        while start.elapsed() < Duration::from_secs(12) {
+                            if let Ok(Some(_)) = child.try_wait() {
+                                break;
+                            }
+                            if probe_tts_version(&base) {
+                                ready = true;
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(200));
+                        }
+                        if ready {
+                            let voices = fetch_voices_from_engine(&base).unwrap_or_default();
+                            let (s0, s1) = pick_default_speaker_pair(&voices);
+                            let engine_label = format!("{lbl} (:{port})");
+                            let sakura_voice_label = voice_label_for_id(&voices, s0);
+                            let kero_voice_label = voice_label_for_id(&voices, s1);
+                            if let Ok(mut cache) = cached_tts_state().lock() {
+                                cache.engine_label = engine_label.clone();
+                                cache.base_url = Some(base.clone());
+                                cache.voices = voices.clone();
+                            }
+                            *proc_guard = Some(ManagedTtsProcess { child });
+                            return TtsEngineStatus {
+                                engine_label,
+                                base_url: Some(base),
+                                auto_spawned: true,
+                                sakura_voice_label,
+                                kero_voice_label,
+                                voices,
+                            };
+                        }
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                }
+            }
+        }
+    }
+
+    TtsEngineStatus {
+        engine_label: "OS Native TTS".to_string(),
+        base_url: None,
+        auto_spawned: false,
+        sakura_voice_label: "OS標準 (女性)".to_string(),
+        kero_voice_label: "OS標準 (男性)".to_string(),
+        voices: Vec::new(),
+    }
+}
+
+/// Speak an ordered batch of `(scope_id, text)` utterances asynchronously via AivisSpeech / VOICEVOX or OS TTS.
+pub fn speak_dialogue_batch_async(
+    segments: Vec<(u8, String)>,
+    preferred_url: &str,
+    sakura_speaker_override: Option<i64>,
+    kero_speaker_override: Option<i64>,
+) {
+    let cleaned_segments: Vec<(u8, String)> = segments
+        .into_iter()
+        .filter_map(|(sc, txt)| {
+            let clean: String = txt.split_whitespace().collect::<Vec<_>>().join(" ");
+            if clean.is_empty() {
+                None
+            } else {
+                Some((sc, clean.chars().take(600).collect()))
+            }
+        })
+        .collect();
+    if cleaned_segments.is_empty() {
         return;
     }
-    let truncated: String = clean.chars().take(600).collect();
-    let base_url = if voicevox_url.trim().is_empty() {
-        DEFAULT_VOICEVOX_URL.to_string()
-    } else {
-        voicevox_url.trim().trim_end_matches('/').to_string()
-    };
+    let pref = preferred_url.trim().trim_end_matches('/').to_string();
 
     let Ok(mut guard) = tts_sender().lock() else {
         return;
     };
     if guard.is_none() {
-        let (tx, rx) = mpsc::channel::<SpeechJob>();
+        let (tx, rx) = mpsc::channel::<SpeechBatch>();
         if std::thread::Builder::new()
             .name("nanikaai-tts".to_string())
             .spawn(move || {
-                while let Ok(mut job) = rx.recv() {
-                    // Drain stale backlog to speak only the most recent lines without piling up.
+                while let Ok(mut batch) = rx.recv() {
+                    // Drain stale older turns while keeping all segments within the newest turn intact.
                     while let Ok(newer) = rx.try_recv() {
-                        job = newer;
+                        batch = newer;
                     }
-                    speak_blocking(&job);
+                    speak_batch_blocking(&batch);
                 }
             })
             .is_ok()
@@ -154,12 +596,18 @@ pub fn speak_utterance_async(scope_id: u8, text: &str, voicevox_url: &str) {
         }
     }
     if let Some(tx) = guard.as_ref() {
-        let _ = tx.send(SpeechJob {
-            scope_id,
-            text: truncated,
-            voicevox_url: base_url,
+        let _ = tx.send(SpeechBatch {
+            segments: cleaned_segments,
+            preferred_url: pref,
+            sakura_speaker_override,
+            kero_speaker_override,
         });
     }
+}
+
+/// Speak a single utterance asynchronously (convenience wrapper over batch speech).
+pub fn speak_utterance_async(scope_id: u8, text: &str, voicevox_url: &str) {
+    speak_dialogue_batch_async(vec![(scope_id, text.to_string())], voicevox_url, None, None);
 }
 
 fn validate_local_tts_url(raw: &str) -> Option<String> {
@@ -175,25 +623,34 @@ fn validate_local_tts_url(raw: &str) -> Option<String> {
     }
 }
 
-fn speak_blocking(job: &SpeechJob) {
-    if let Some(base) = validate_local_tts_url(&job.voicevox_url) {
-        if try_voicevox_blocking(job.scope_id, &job.text, &base) {
-            return;
+fn speak_batch_blocking(batch: &SpeechBatch) {
+    let status = ensure_tts_engine_ready_blocking(&batch.preferred_url, true);
+    let (def_s0, def_s1) = pick_default_speaker_pair(&status.voices);
+
+    for (scope_id, text) in &batch.segments {
+        let mut spoken_by_engine = false;
+        if let Some(ref base) = status.base_url {
+            let chosen_id = if *scope_id == 0 {
+                batch.sakura_speaker_override.or(def_s0).unwrap_or(2)
+            } else {
+                batch.kero_speaker_override.or(def_s1).unwrap_or(3)
+            };
+            spoken_by_engine = try_tts_api_synthesis(base, chosen_id, text);
+        }
+        if !spoken_by_engine {
+            try_os_tts_blocking(*scope_id, text);
         }
     }
-    try_os_tts_blocking(job.scope_id, &job.text);
 }
 
-fn try_voicevox_blocking(scope_id: u8, text: &str, base: &str) -> bool {
+fn try_tts_api_synthesis(base: &str, speaker: i64, text: &str) -> bool {
     let Ok(client) = Client::builder()
-        .connect_timeout(Duration::from_millis(300))
-        .timeout(Duration::from_secs(5))
+        .connect_timeout(Duration::from_millis(400))
+        .timeout(Duration::from_secs(10))
         .build()
     else {
         return false;
     };
-    // VOICEVOX default speaker IDs: 2 = Shikoku Metan (Normal), 3 = Zundamon (Normal)
-    let speaker = if scope_id == 0 { 2 } else { 3 };
     let mut query_url = match Url::parse(&format!("{base}/audio_query")) {
         Ok(u) => u,
         Err(_) => return false,

@@ -1,7 +1,7 @@
 # 何か藍 (`NanikaAi`) — 現行動作仕様および自動検証基準 (`BEHAVIOR_SPEC`)
 
-- **Document Version**: `v1.4.0`
-- **Target Software**: `nanikaai` `v0.1.4+`
+- **Document Version**: `v1.5.0`
+- **Target Software**: `nanikaai` `v0.1.5+`
 - **Purpose**: テスト実行前の機密・個人情報・AI指示配置境界検査（Phase 0）、改修後の自動動作確認テスト（`cargo test` / `--smoke-test` / 静的監査）における合否基準、変更内容に応じた検証ティアおよび結果報告様式を定義する。
 
 ---
@@ -19,7 +19,7 @@
 
 ---
 
-## 2. 現行動作仕様および判定基準一覧（30 項目）
+## 2. 現行動作仕様および判定基準一覧（31 項目）
 
 | 仕様 ID | 領域 | 期待される現行動作（仕様） | 合格基準（パス条件） | 検証手段 |
 | :--- | :--- | :--- | :--- | :--- |
@@ -53,7 +53,8 @@
 | `SPEC-DLG-04` | リンク・即時表示 | `\_q` 一括即時表示および `\_a[url]label\_a`・裸 URL のクリック可能リンクを抽出し安全検証のうえ開く | `\_q` 区間が 1 tick で完了し、`validate_public_url` 通過の公開 URL のみ（`dry_run` 時は起動なし）許可し非公開 URL を遮断すること | `behavior_spec` / `--smoke-test` Phase E |
 | `SPEC-COMP-01` | 時報・リマインダー・終了挨拶 | 毎時 00 分の時報、`set_reminder` / `list_reminders` 通知、および終了時（`OnClose`）挨拶を実行する | ツール登録したリマインダーが期日到達で消化通知され、時報・終了挨拶スクリプトが現在キャラクター名で生成されること | `behavior_spec` / `agent_engine` |
 | `SPEC-COMP-02` | ファイル D&D 反応 | `.nar`/`.zip` 以外の汎用ファイル（文章・コード・画像・URL ショートカット・フォルダ）のドロップ内容を受理し要約反応する | `.env`/秘密鍵/資格情報ファイルを読込前に即拒否し、安全ファイル内容のみ `<untrusted_data>` で囲んで抽出すること | `behavior_spec` / `companion_extras` |
-| `SPEC-COMP-03` | 音声読み上げ・更新確認 | 既定 OFF の VOICEVOX (`127.0.0.1:50021`)＋OS TTS フォールバックおよび GitHub Releases 更新確認を提供する | `\0`/`\1` 別の発話抽出および SemVer 版数比較が正確に機能し、スモーク検証時は外部起動・音声ブロックを発生させないこと | `behavior_spec` / `companion_extras` |
+| `SPEC-COMP-03` | 音声読み上げ・更新確認 | 既定 OFF の AivisSpeech (`:10101`) / VOICEVOX (`:50021`)＋OS TTS フォールバックおよび GitHub Releases 更新確認を提供する | `\0`/`\1` バッチ発話抽出および SemVer 版数比較が正確に機能し、スモーク検証時は外部起動・音声ブロックを発生させないこと | `behavior_spec` / `companion_extras` |
+| `SPEC-COMP-04` | ヘッドレス音声自動起動 | 導入済み `AivisSpeech Engine` / `VOICEVOX vv-engine` を手動起動不要で自動検出・無画面起動/終了し、`/speakers` から `\0`/`\1` 話者選択をシェル別保存する | `/speakers` の 32bit/整数スタイルID解析と既定 `\0`/`\1` ペア選出およびシェル別 `sakura_speaker_id`/`kero_speaker_id` 永続化が一致すること | `behavior_spec` / `companion_extras` |
 
 ---
 

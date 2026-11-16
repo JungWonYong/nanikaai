@@ -16,7 +16,8 @@ use nanikaai::agent_engine::{
 };
 use nanikaai::builtin_tools::{is_sensitive_path, validate_public_url, BuiltinToolRunner};
 use nanikaai::companion_extras::{
-    compare_semver, extract_speech_segments, inspect_dropped_path, open_validated_browser_url,
+    compare_semver, extract_speech_segments, fetch_voices_from_engine, inspect_dropped_path,
+    open_validated_browser_url, pick_default_speaker_pair,
 };
 use nanikaai::config_store::{ConfigPatch, ConfigStore};
 use nanikaai::dialogue_parser::{parse_dialogue, ActionKind, DialogueAction, Scope};
@@ -1031,4 +1032,80 @@ fn spec_comp_01_02_03_dlg_04_reminders_drop_links_and_updates() {
     assert_eq!(compare_semver("0.1.4", "v0.1.5"), std::cmp::Ordering::Greater);
 
     let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn spec_comp_04_headless_tts_speaker_discovery_and_profile_voice() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock tts listener");
+    let port = listener.local_addr().unwrap().port();
+    let speakers_json = serde_json::json!([
+        {
+            "name": "まお",
+            "speaker_uuid": "a59cb814-0083-4369-8542-f51a29e72af7",
+            "styles": [
+                {"name": "ノーマル", "id": 888753760},
+                {"name": "あまあま", "id": 888753762}
+            ]
+        },
+        {
+            "name": "コハク",
+            "speaker_uuid": "22e8ed77-94fe-4ef2-871f-a86f94e9a579",
+            "styles": [
+                {"name": "ノーマル", "id": 1878365376}
+            ]
+        }
+    ])
+    .to_string();
+
+    let server_handle = std::thread::spawn(move || {
+        for stream in listener.incoming().take(2) {
+            if let Ok(mut sock) = stream {
+                let mut buf = [0u8; 1024];
+                let n = sock.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let body = if req.contains("GET /version") {
+                    "\"1.2.0\"".to_string()
+                } else {
+                    speakers_json.clone()
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = sock.write_all(resp.as_bytes());
+                let _ = sock.flush();
+            }
+        }
+    });
+
+    let base_url = format!("http://127.0.0.1:{port}");
+    let voices = fetch_voices_from_engine(&base_url).expect("parse mock /speakers");
+    assert_eq!(voices.len(), 3);
+    let (def0, def1) = pick_default_speaker_pair(&voices);
+    assert_eq!(def0, Some(888_753_760));
+    assert_eq!(def1, Some(1_878_365_376));
+
+    // Confirm remaining mock request closes cleanly if not consumed
+    let _ = reqwest::blocking::get(format!("{base_url}/version"));
+    let _ = server_handle.join();
+
+    // Per-shell custom voice cast isolation
+    let cfg_dir = fresh_temp_dir("nanikaai_spec_voice_profile");
+    let store = ConfigStore::new(Some(cfg_dir.clone()));
+    store.set_shell_voice_speaker("neo_default", 0, Some(888_753_762));
+    store.set_shell_voice_speaker("neo_default", 1, Some(1_878_365_376));
+    store.set_shell_voice_speaker("mayura", 0, Some(2));
+    assert_eq!(
+        store.get_shell_voice_speakers("neo_default"),
+        (Some(888_753_762), Some(1_878_365_376))
+    );
+    assert_eq!(store.get_shell_voice_speakers("mayura"), (Some(2), None));
+
+    let reloaded = ConfigStore::new(Some(cfg_dir.clone()));
+    assert_eq!(
+        reloaded.get_shell_voice_speakers("neo_default"),
+        (Some(888_753_762), Some(1_878_365_376))
+    );
+    let _ = fs::remove_dir_all(&cfg_dir);
 }

@@ -447,6 +447,7 @@ def check_tier1_cargo_tests() -> tuple[list[dict[str, Any]], str]:
         ("SPEC-SEC-02", "spec_sec_02_instruction_data_trust_boundary_and_rogue_config_block", "AI指示境界・データ隔離防御"),
         ("SPEC-GHOST-01/SKIN-05", "spec_ghost_01_and_skin_05_profile_isolation_and_bind_dressup", "ゴーストプロファイル分離・着せ替え(bind)"),
         ("SPEC-COMP-01/02/03/DLG-04", "spec_comp_01_02_03_dlg_04_reminders_drop_links_and_updates", "時報/リマインダー・D&D・リンク/\\ _q・音声/更新確認"),
+        ("SPEC-COMP-04", "spec_comp_04_headless_tts_speaker_discovery_and_profile_voice", "ヘッドレス音声エンジン話者解決・シェル別声色永続化"),
     ]
     for spec_id, test_fn, label in expected_groups:
         ok = spec_cases.get(test_fn, False)
