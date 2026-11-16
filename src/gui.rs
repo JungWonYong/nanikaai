@@ -10,7 +10,9 @@ use cosmic_text::{
 use mouse_position::mouse_position::Mouse;
 use rand::seq::SliceRandom;
 use serde_json::{json, Value};
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use tray_icon::{Icon as TrayIconImage, TrayIcon, TrayIconBuilder};
 use wgpu::util::DeviceExt;
 use winit::application::ApplicationHandler;
@@ -2780,7 +2782,9 @@ struct AppRuntime {
     communicate: Option<CommunicateWindowState>,
     menu: Option<MenuWindowState>,
     playback: PlaybackQueue,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     tray: Option<TrayIcon>,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     tray_actions: HashMap<MenuId, MenuCommand>,
     server: Option<ServerHandle>,
     modifiers: ModifiersState,
@@ -3213,6 +3217,7 @@ impl AppRuntime {
         rows
     }
 
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn rebuild_tray_menu(&mut self) {
         let Some(ref tray) = self.tray else { return };
         let (menu, map) = self.create_tray_menu_model();
@@ -3220,6 +3225,10 @@ impl AppRuntime {
         tray.set_menu(Some(Box::new(menu)));
     }
 
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    fn rebuild_tray_menu(&mut self) {}
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn create_tray_menu_model(&self) -> (Menu, HashMap<MenuId, MenuCommand>) {
         let cfg = self.config_store.get();
         let menu = Menu::new();
@@ -4381,6 +4390,7 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
         self.reset_character_positions();
 
         // Tray icon (skip during automated headless/ephemeral smoke test if desired, or build safely)
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         if !self.smoke_mode {
             let assets = resolve_assets_dir();
             let icon_rgba = image::open(assets.join("icon.png"))
@@ -5130,14 +5140,17 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
         }
 
         // Poll tray menu clicks
-        let mut pending_cmds = Vec::new();
-        while let Ok(ev) = MenuEvent::receiver().try_recv() {
-            if let Some(cmd) = self.tray_actions.get(&ev.id).cloned() {
-                pending_cmds.push(cmd);
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            let mut pending_cmds = Vec::new();
+            while let Ok(ev) = MenuEvent::receiver().try_recv() {
+                if let Some(cmd) = self.tray_actions.get(&ev.id).cloned() {
+                    pending_cmds.push(cmd);
+                }
             }
-        }
-        for cmd in pending_cmds {
-            self.execute_menu_command(event_loop, cmd);
+            for cmd in pending_cmds {
+                self.execute_menu_command(event_loop, cmd);
+            }
         }
 
         // Caret blink & Siri aura pulse inside Communicate window
@@ -5308,7 +5321,9 @@ pub fn run(smoke_test: bool) -> Result<(), String> {
         communicate: None,
         menu: None,
         playback: PlaybackQueue::new(),
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         tray: None,
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         tray_actions: HashMap::new(),
         server: None,
         os_insets: detect_os_insets(),

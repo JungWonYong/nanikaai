@@ -38,14 +38,53 @@ macOS・Windows・Linux 環境において、外部ランタイムの導入や O
 | Windows | `%APPDATA%\NanikaAi\` |
 | Linux | `$XDG_CONFIG_HOME/nanikaai/`（既定 `~/.config/nanikaai/`） |
 
-### ビルドおよび起動方法
+### 導入・インストール（初心者向けクイックスタート）
 
-#### 前提条件
+ソースコードのビルド環境（Rust 等）が不要な**配布実行ファイル**と、ローカル AI（**Ollama**）の構築まで AI エージェントに丸投げできる**ワンショット導入プロンプト**の両方を用意している。
 
-- Rust ツールチェーン（`cargo`, `rustc` 1.80+）
-- Linux ビルド時は X11/Wayland/GTK トレイ開発パッケージ（`libgtk-3-dev`, `libxdo-dev` 等）
+#### 方法 1（推奨）: AI エージェント（`agy` / `claude` CLI 等）に全自動セットアップを任せる
 
-#### OS 別ビルド・実行
+手元の PC に **[Google Antigravity CLI (`agy`)](https://antigravity.google/docs/cli/reference)** または **Claude Code (`claude`)** などの AI コーディングエージェントを入れていれば、以下のコマンドまたはプロンプトを実行するだけで、実行ファイルの取得・Ollama の導入・PC メモリ容量に合った無料モデルのダウンロード・起動接続まで自動完了する。
+
+**ターミナル 1 行実行例（`agy` または `claude` 導入後）:**
+
+```bash
+# Google Antigravity CLI (`agy`) を使う場合
+agy -i "https://github.com/JungWonYong/nanikaai の最新リリース実行ファイルとローカルOllamaをこのPCに導入・起動し、スペックに合う無料モデル(gemma4/llama3系)を接続して動作確認まで完了して。"
+
+# Claude Code CLI (`claude`) を使う場合
+claude "https://github.com/JungWonYong/nanikaai の最新リリース実行ファイルとローカルOllamaをこのPCに導入・起動し、スペックに合う無料モデル(gemma4/llama3系)を接続して動作確認まで完了して。"
+```
+
+<details>
+<summary>📋 AI エージェント用・完全セットアップ指示プロンプト（クリックで展開・コピペ用）</summary>
+
+```text
+このPCにデスクトップマスコット「何か藍 (NanikaAi)」とローカルAI（Ollama）を導入し、すぐ会話できる状態までセットアップしてください。
+
+1. OS（macOS / Windows / Linux）とCPUアーキテクチャ、搭載RAM/GPU VRAMを確認する。
+2. https://github.com/JungWonYong/nanikaai/releases/latest から該当OS用のビルド済みアーカイブ（NanikaAi-macos-arm64.zip / NanikaAi-windows-x64.zip / NanikaAi-linux-x64.tar.gz）を取得し、適切な場所（macOSは ~/Applications/NanikaAi.app と xattr -cr 実行、Windowsは %LOCALAPPDATA%\NanikaAi、Linuxは ~/.local/share/nanikaai）へ展開する。該当アーキテクチャの配布物がない場合のみソースをビルドする。
+3. Ollama が未導入なら公式手段（macOS: brew install ollama または ollama.com、Windows: winget install Ollama.Ollama、Linux: 公式インストール手順）で導入し、http://127.0.0.1:11434 で ollama serve が起動している状態にする。
+4. PCのメモリ容量に合わせて、安全な無料モデル（gemma4 または llama3 系）を1つ `ollama pull` する（目安: 8GBなら `llama3.2:3b` または `gemma4:e2b`、16GBなら `gemma4:e4b` または `llama3.1:8b`、32GB以上なら `gemma4:12b` または `gemma4:31b`）。※制限対象モデルは使用しないこと。
+5. NanikaAi を起動し、`GET http://127.0.0.1:9821/api/health` が応答するまで待機したあと、`POST http://127.0.0.1:9821/api/provider` に `{"provider":"ollama","model":"auto"}` を送信して接続し、`POST http://127.0.0.1:9821/api/speak` に `{"script":"\\0\\s[5]セットアップ完了だよ！\\1\\s[10]いつでも話しかけてな！\\e"}` を送って動作を確認し、配置パスと使用モデル名を報告する。
+```
+
+</details>
+
+> 💡 **`agy` / `claude` CLI を直接会話バックエンドにする場合**: ローカル GPU / Ollama を使わなくても、`agy` または `claude` CLI がインストール・認証済みであれば、キャラクター右クリックメニューの `[AI プロバイダー · Providers]` からそのまま呼び出して会話できる。
+
+#### 方法 2: 実行ファイル＋Ollama で手動導入（3 ステップ・コンパイラ不要）
+
+| ステップ | 作業内容 |
+| :--- | :--- |
+| **1. アプリ本体を取得・展開** | [GitHub Releases (Latest)](https://github.com/JungWonYong/nanikaai/releases/latest) から OS 別の配布ファイル（`NanikaAi-macos-arm64.zip` / `NanikaAi-windows-x64.zip` / `NanikaAi-linux-x64.tar.gz`）をダウンロードして展開する（macOS 初回起動時に警告が出た場合は `xattr -cr NanikaAi.app` を実行）。 |
+| **2. Ollama と無料モデルを導入** | [Ollama 公式サイト](https://ollama.com/download) から Ollama を導入し、ターミナルで 1 つモデルを取得する（例: 16GB 環境 `ollama pull gemma4:e4b` または `ollama pull llama3.1:8b`、8GB 環境 `ollama pull llama3.2:3b`）。 |
+| **3. 起動して会話開始** | `NanikaAi` を起動すると既定設定のままローカル Ollama（`http://127.0.0.1:11434` / `model: "auto"`）へ自動接続する。さくらをダブルクリックすると `Communicate` 入力バーが開き、そのまま会話できる。 |
+
+<details>
+<summary>🛠️ 方法 3（開発者向け）: ソースコードからの手動ビルド・テスト手順</summary>
+
+- 前提: Rust ツールチェーン（`cargo`, `rustc` 1.80+）、Linux は開発ヘッダ（`pkg-config libgtk-3-dev libx11-dev libxcb1-dev libxkbcommon-dev libwayland-dev`）
 
 ```bash
 # macOS（.app バンドル作成と起動）
@@ -55,6 +94,10 @@ open "dist/NanikaAi.app"
 # Linux
 bash scripts/build_linux.sh
 ./dist/nanikaai-linux/nanikaai
+
+# 単体テストおよびスモーク検証
+cargo test
+cargo run --release -- --smoke-test
 ```
 
 ```bat
@@ -63,12 +106,7 @@ scripts\build_windows.bat
 dist\NanikaAi-win64\nanikaai.exe
 ```
 
-#### 単体テストおよびスモーク検証
-
-```bash
-cargo test
-cargo run --release -- --smoke-test
-```
+</details>
 
 ### HTTP / SSTP 連携 API
 
@@ -78,6 +116,7 @@ cargo run --release -- --smoke-test
 | AI 対話実行 | `POST http://127.0.0.1:9821/api/chat` | `{"message": "今日の天気はどう？"}` |
 | スクリプト発話 | `POST http://127.0.0.1:9821/api/speak` | `{"script": "\\0\\s[5]こんにちは！\\1\\s[10]よろしくな！\\e"}` |
 | スキン切替 | `POST http://127.0.0.1:9821/api/skin` | `{"shell": "neo_default", "balloon": "clean_default"}` |
+| AI プロバイダー切替 | `POST http://127.0.0.1:9821/api/provider` | `{"provider": "ollama", "model": "auto"}` |
 | 一覧取得 | `GET http://127.0.0.1:9821/api/skins` / `/api/providers` | `curl -s http://127.0.0.1:9821/api/providers` |
 | クラシック `SSTP/1.4` | TCP `127.0.0.1:9801` | `SEND SSTP/1.4`（`Charset: UTF-8`, `Script: ...`） |
 
@@ -125,14 +164,56 @@ Drag and drop `.nar` or `.zip` skin archives onto the character window to instal
 | Windows | `%APPDATA%\NanikaAi\` |
 | Linux | `$XDG_CONFIG_HOME/nanikaai/` (default `~/.config/nanikaai/`) |
 
-### Build & Run
+### Installation & Beginner Quick Start
 
-#### Prerequisites
+No compiler is needed to get started. We distribute **prebuilt executable archives** alongside a **one-shot AI agent setup prompt** so beginners can either delegate Ollama + local LLM installation to their coding CLI or finish manually in three steps.
 
-- Rust toolchain (`cargo`, `rustc` 1.80+)
-- On Linux: X11/Wayland/GTK tray development headers (`libgtk-3-dev`, `libxdo-dev`, etc.)
+#### Option 1 (Recommended): Let an AI Agent (`agy` / `claude` CLI) Set Everything Up
 
-#### Platform Builds
+If you have **[Google Antigravity CLI (`agy`)](https://antigravity.google/docs/cli/reference)** or **Claude Code (`claude`)** installed, run a single command below (or paste the full prompt) to let your AI agent download the release binary, install **Ollama**, pick a free local model matching your RAM/VRAM, launch `NanikaAi`, and verify dialogue output automatically.
+
+**One-Line CLI Launch (after installing `agy` or `claude`):**
+
+```bash
+# Using Google Antigravity CLI (`agy`)
+agy -i "Install the latest release binary of https://github.com/JungWonYong/nanikaai and local Ollama on this machine, pull a free gemma4/llama3 model matching my PC specs, bind them, and verify it works."
+
+# Using Claude Code CLI (`claude`)
+claude "Install the latest release binary of https://github.com/JungWonYong/nanikaai and local Ollama on this machine, pull a free gemma4/llama3 model matching my PC specs, bind them, and verify it works."
+```
+
+<details>
+<summary>📋 Full Copy-Paste Setup Prompt for Any AI Agent (Antigravity / Claude Code / Cursor / Codex)</summary>
+
+```text
+Please install and configure the "NanikaAi (何か藍)" desktop mascot and local Ollama LLM on this machine so I can start chatting immediately:
+
+1. Check my OS (macOS / Windows / Linux), CPU architecture, system RAM, and GPU VRAM.
+2. Download the matching prebuilt release archive (`NanikaAi-macos-arm64.zip`, `NanikaAi-windows-x64.zip`, or `NanikaAi-linux-x64.tar.gz`) from https://github.com/JungWonYong/nanikaai/releases/latest and extract it to a clean app folder (macOS: `~/Applications/NanikaAi.app` and clear quarantine with `xattr -cr ~/Applications/NanikaAi.app`; Windows: `%LOCALAPPDATA%\NanikaAi`; Linux: `~/.local/share/nanikaai`). Only build from source if no matching archive exists for this architecture.
+3. If `ollama` is not installed yet, install it cleanly (`brew install ollama` or ollama.com on macOS, `winget install Ollama.Ollama` on Windows, or the official Linux installer) and ensure `ollama serve` is listening on `http://127.0.0.1:11434`.
+4. Choose and `ollama pull` one free non-restricted `gemma4` or `llama3` model that fits available memory:
+   - ~8 GB RAM: `llama3.2:3b` or `gemma4:e2b`
+   - ~16 GB RAM: `gemma4:e4b` or `llama3.1:8b`
+   - 32 GB+ RAM: `gemma4:12b` or `gemma4:31b`
+5. Launch `NanikaAi`, wait for `GET http://127.0.0.1:9821/api/health` to return `ok`, call `POST http://127.0.0.1:9821/api/provider` with `{"provider":"ollama","model":"auto"}`, trigger a greeting via `POST http://127.0.0.1:9821/api/speak` with `{"script":"\\0\\s[5]Setup complete!\\1\\s[10]Ready when you are!\\e"}`, and report the install path and active model.
+```
+
+</details>
+
+> 💡 **Using `agy` or `claude` directly without a local GPU**: When `agy` or `claude` CLI is installed and signed in on your machine, `NanikaAi` also detects it automatically under right-click `[AI プロバイダー · Providers]` so you can chat right away without downloading local LLM weights.
+
+#### Option 2: Prebuilt Binary + Ollama in 3 Manual Steps (No Rust Required)
+
+| Step | Instructions |
+| :--- | :--- |
+| **1. Download App Bundle** | Download your OS package (`NanikaAi-macos-arm64.zip`, `NanikaAi-windows-x64.zip`, or `NanikaAi-linux-x64.tar.gz`) from [GitHub Releases (Latest)](https://github.com/JungWonYong/nanikaai/releases/latest) and extract it (on macOS, run `xattr -cr NanikaAi.app` once if Gatekeeper prompts). |
+| **2. Install Ollama & Model** | Install [Ollama](https://ollama.com/download) and pull one model (e.g., 16 GB PCs: `ollama pull gemma4:e4b` or `ollama pull llama3.1:8b`; 8 GB PCs: `ollama pull llama3.2:3b`). |
+| **3. Launch & Chat** | Start `NanikaAi` — default settings automatically connect to local Ollama (`http://127.0.0.1:11434`, `model: "auto"`). Double-click Sakura to open the chat bar. |
+
+<details>
+<summary>🛠️ Option 3 (Developers): Build from Source & Run Tests</summary>
+
+- Prerequisites: Rust toolchain (`cargo`, `rustc` 1.80+); on Linux: `pkg-config libgtk-3-dev libx11-dev libxcb1-dev libxkbcommon-dev libwayland-dev`
 
 ```bash
 # macOS (.app bundle)
@@ -142,6 +223,10 @@ open "dist/NanikaAi.app"
 # Linux
 bash scripts/build_linux.sh
 ./dist/nanikaai-linux/nanikaai
+
+# Unit tests & smoke verification
+cargo test
+cargo run --release -- --smoke-test
 ```
 
 ```bat
@@ -150,12 +235,7 @@ scripts\build_windows.bat
 dist\NanikaAi-win64\nanikaai.exe
 ```
 
-#### Tests & Smoke Verification
-
-```bash
-cargo test
-cargo run --release -- --smoke-test
-```
+</details>
 
 ### HTTP / SSTP Integration API
 
@@ -165,6 +245,7 @@ cargo run --release -- --smoke-test
 | AI chat | `POST http://127.0.0.1:9821/api/chat` | `{"message": "How is the weather today?"}` |
 | Speak Sakura Script | `POST http://127.0.0.1:9821/api/speak` | `{"script": "\\0\\s[5]Hello!\\1\\s[10]Nice to meet you!\\e"}` |
 | Switch skin | `POST http://127.0.0.1:9821/api/skin` | `{"shell": "neo_default", "balloon": "clean_default"}` |
+| Switch AI provider | `POST http://127.0.0.1:9821/api/provider` | `{"provider": "ollama", "model": "auto"}` |
 | List skins / providers | `GET http://127.0.0.1:9821/api/skins` / `/api/providers` | `curl -s http://127.0.0.1:9821/api/providers` |
 | Classic TCP `SSTP/1.4` | `127.0.0.1:9801` | `SEND SSTP/1.4` (`Charset: UTF-8`, `Script: ...`) |
 
@@ -188,6 +269,7 @@ cargo run --release -- --smoke-test
 - `wgpu` WGSL 기반 **계층형 Live2D 관절·감쇠 스프링 물리 리깅**(원본 RGB 색상 무변경, 발끝 고정·흉부 호흡·목 회전·시차·머리카락/바보털/치마 물리, SERIKO `talk` 립싱크)과 **모에 사쿠라(`\0`) + 선명한 페리윙클 블루(`#94A3FF`) 말랑 우뉴(`\1`) `@2x` 스킨**을 제공한다.
 - 내용에 따라 자동 신축·스크롤되는 **유리 글래스 말풍선**과 점멸 커서·IME 밑줄·닫기/전송 버튼이 포함된 **사파이어 블루 Siri 스타일 입력 바**(기본 UI 일/영 병기)를 탑재했다.
 - **엄격한 `\0`/`\1` 스코프 분리**, 원클릭 기본 스킨 복구·스크롤 메뉴, `.pna` 알파 마스크/`seriko.use_self_alpha`/SERIKO(`overlayf`·`replace`·`alternativestart`)·Shift-JIS 클래식 스킨 호환 및 **멀티 AI 백엔드 + HTTP JSON (`127.0.0.1:9821`) · 클래식 `SSTP/1.4` (`127.0.0.1:9801`)** 듀얼 서버를 지원한다.
-- 전체 한국어 안내 및 빌드·API 사용법은 **[README.ko.md](README.ko.md)** 에서 확인할 수 있다.
+- [GitHub Releases](https://github.com/JungWonYong/nanikaai/releases/latest)에서 OS별 **실행 파일**을 내려받거나, `agy` / `claude` CLI 등 AI 에이전트에게 **원클릭 설치 프롬프트**를 지시해 **Ollama + 무료 로컬 모델(`gemma4`/`llama3`) 자동 설치 및 연결**까지 한 번에 마칠 수 있다.
+- 전체 한국어 안내 및 AI 설치 프롬프트·API 사용법은 **[README.ko.md](README.ko.md)** 에서 확인할 수 있다.
 
 </details>

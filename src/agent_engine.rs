@@ -15,7 +15,15 @@ use crate::dialogue_parser::{
 };
 use crate::shell_parser::ShellManifest;
 
-pub const PREFERRED_MODELS: &[&str] = &["gemma4:31b", "llama3.1:8b"];
+pub const PREFERRED_MODELS: &[&str] = &[
+    "gemma4:31b",
+    "gemma4:12b",
+    "gemma4:latest",
+    "gemma4:e4b",
+    "gemma4:e2b",
+    "llama3.1:8b",
+    "llama3.2:3b",
+];
 pub const REMOTE_PREFERRED_MODELS: &[&str] = &[
     "gemma4:e2b",
     "gemma4:latest",
@@ -58,9 +66,17 @@ pub fn provider_catalog() -> Vec<ProviderInfo> {
         },
         ProviderInfo {
             id: "ollama".to_string(),
-            label: "Ollama ローカルAI (gemma4:31b・無料)".to_string(),
+            label: "Ollama ローカルAI (gemma4 / llama3・無料)".to_string(),
             default_model: "auto".to_string(),
-            models: vec!["auto".into(), "gemma4:31b".into(), "llama3.1:8b".into()],
+            models: vec![
+                "auto".into(),
+                "gemma4:latest".into(),
+                "gemma4:e4b".into(),
+                "gemma4:12b".into(),
+                "gemma4:31b".into(),
+                "llama3.1:8b".into(),
+                "llama3.2:3b".into(),
+            ],
             needs_api_key: false,
             available: false,
             detail: String::new(),
@@ -623,10 +639,11 @@ impl AgentEngine {
         let fallback = if is_remote {
             "gemma4:latest"
         } else {
-            "gemma4:31b"
+            "gemma4:e4b"
         };
         let chosen = models
-            .first()
+            .iter()
+            .find(|m| !is_forbidden_model(m))
             .cloned()
             .unwrap_or_else(|| fallback.to_string());
         assert_allowed_model(&chosen)?;
@@ -1700,6 +1717,9 @@ mod tests {
         assert!(assert_allowed_model("deepseek-r1:8b").is_err());
         assert!(assert_allowed_model("glm-4").is_err());
         assert!(assert_allowed_model("gemma4:latest").is_ok());
+        assert!(PREFERRED_MODELS.contains(&"gemma4:e4b"));
+        assert!(PREFERRED_MODELS.contains(&"llama3.2:3b"));
+        assert!(PREFERRED_MODELS.iter().all(|m| !is_forbidden_model(m)));
 
         let dir = std::env::temp_dir().join(format!("nanikaai_agent_test_{}", std::process::id()));
         let cfg_store = ConfigStore::new(Some(dir.clone()));
