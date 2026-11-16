@@ -392,7 +392,412 @@ pub fn normalize_sakura_script(text: &str) -> String {
         });
         out.push_str(&step2);
     }
-    out.trim().to_string()
+    strip_stage_emotion_tags(out.trim())
+}
+
+fn resolve_emotion_keyword_surface(raw: &str, scope: Scope) -> Option<i32> {
+    let s = raw.trim().to_ascii_lowercase();
+    if s.is_empty() {
+        return None;
+    }
+    let sakura_id = if s.contains("苦笑")
+        || s.contains("困")
+        || s.contains("悩")
+        || s.contains("焦")
+        || s.contains("汗")
+        || s.contains("trouble")
+        || s.contains("worri")
+        || s.contains("worry")
+        || s.contains("sweat")
+        || s.contains("awkward")
+        || s.contains("fluster")
+        || s.contains("당황")
+        || s.contains("곤란")
+        || s.contains("난처")
+        || s.contains("땀")
+    {
+        Some(1)
+    } else if s.contains("照")
+        || s.contains("赤面")
+        || s.contains("恥")
+        || s.contains("shy")
+        || s.contains("blush")
+        || s.contains("embarrass")
+        || s.contains("부끄")
+        || s.contains("수줍")
+        || s.contains("홍조")
+    {
+        Some(1)
+    } else if s.contains("驚")
+        || s.contains("びっくり")
+        || s.contains("ショック")
+        || s.contains("surpris")
+        || s.contains("shock")
+        || s.contains("gasp")
+        || s.contains("놀람")
+        || s.contains("놀라")
+        || s.contains("깜짝")
+    {
+        Some(2)
+    } else if s.contains("悲")
+        || s.contains("泣")
+        || s.contains("切な")
+        || s.contains("sad")
+        || s.contains("teary")
+        || s.contains("cry")
+        || s.contains("슬픔")
+        || s.contains("슬퍼")
+        || s.contains("울먹")
+    {
+        Some(3)
+    } else if s.contains("呆")
+        || s.contains("ジト")
+        || s.contains("ため息")
+        || s.contains("クール")
+        || s.contains("気怠")
+        || s.contains("毒舌")
+        || s.contains("annoy")
+        || s.contains("sigh")
+        || s.contains("deadpan")
+        || s.contains("cool")
+        || s.contains("어이없")
+        || s.contains("한숨")
+    {
+        Some(4)
+    } else if s.contains("目閉")
+        || s.contains("目を閉")
+        || s.contains("ウインク")
+        || s.contains("ウィンク")
+        || s.contains("小声")
+        || s.contains("囁")
+        || s.contains("wink")
+        || s.contains("closed")
+        || s.contains("whisper")
+        || s.contains("눈감")
+        || s.contains("눈 감")
+        || s.contains("윙크")
+        || s.contains("속삭")
+    {
+        Some(6)
+    } else if s.contains("怒")
+        || s.contains("ムッ")
+        || s.contains("真剣")
+        || s.contains("真面目")
+        || s.contains("考")
+        || s.contains("angr")
+        || s.contains("mad")
+        || s.contains("pout")
+        || s.contains("serious")
+        || s.contains("think")
+        || s.contains("화남")
+        || s.contains("화내")
+        || s.contains("삐짐")
+        || s.contains("진지")
+        || s.contains("고민")
+    {
+        Some(7)
+    } else if s.contains("得意")
+        || s.contains("ニヤリ")
+        || s.contains("ドヤ")
+        || s.contains("smug")
+        || s.contains("proud")
+        || s.contains("우쭐")
+        || s.contains("능청")
+    {
+        Some(8)
+    } else if s.contains("微笑")
+        || s.contains("笑顔")
+        || s.contains("笑み")
+        || s.contains("満面")
+        || s.contains("元気")
+        || s.contains("明る")
+        || s.contains("嬉")
+        || s.contains("喜")
+        || s.contains("楽")
+        || s.contains("smile")
+        || s.contains("happy")
+        || s.contains("joy")
+        || s.contains("grin")
+        || s.contains("laugh")
+        || s.contains("미소")
+        || s.contains("웃음")
+        || s.contains("활짝")
+        || s.contains("기쁨")
+    {
+        Some(5)
+    } else if s.contains("素")
+        || s.contains("通常")
+        || s.contains("普通")
+        || s.contains("無表情")
+        || s.contains("すまし")
+        || s.contains("冷静")
+        || s.contains("落ち着")
+        || s.contains("normal")
+        || s.contains("neutral")
+        || s.contains("calm")
+        || s.contains("무표정")
+        || s.contains("보통")
+        || s.contains("차분")
+    {
+        Some(0)
+    } else {
+        None
+    };
+
+    sakura_id.map(|id| {
+        if scope == Scope::Sakura {
+            id
+        } else {
+            match id {
+                2 | 8 => 11,
+                _ => 10,
+            }
+        }
+    })
+}
+
+fn resolve_stage_emotion_token(token: &str, scope: Scope) -> Option<i32> {
+    let t = token.trim();
+    if t == "笑" || t == "ｗ" || t.eq_ignore_ascii_case("w") {
+        return Some(if scope == Scope::Sakura { 5 } else { 10 });
+    }
+    resolve_emotion_keyword_surface(t, scope)
+}
+
+fn try_match_stage_emotion_tag(rest: &str, scope: Scope) -> Option<(usize, i32)> {
+    let open = rest.chars().next()?;
+    if !matches!(open, '(' | '（' | '[' | '【') {
+        return None;
+    }
+    if open == '['
+        && (compact_speaker_re().is_match(rest)
+            || compact_surface_re().is_match(rest)
+            || compact_choice_re().is_match(rest))
+    {
+        return None;
+    }
+    let after_open = &rest[open.len_utf8()..];
+    let mut inner_chars = 0usize;
+    let mut close_byte = None;
+    for (idx, c) in after_open.char_indices() {
+        if matches!(c, '\n' | '\r' | '(' | '（' | '[' | '【') {
+            return None;
+        }
+        let is_close = match open {
+            '(' => c == ')' || c == '）',
+            '（' => c == '）' || c == ')',
+            '[' => c == ']' || c == '］',
+            '【' => c == '】',
+            _ => false,
+        };
+        if is_close {
+            close_byte = Some(open.len_utf8() + idx + c.len_utf8());
+            break;
+        }
+        inner_chars += 1;
+        if inner_chars > 28 {
+            return None;
+        }
+    }
+    let end_byte = close_byte?;
+    let close_ch_len = rest[..end_byte].chars().last()?.len_utf8();
+    let inner = rest[open.len_utf8()..end_byte - close_ch_len].trim();
+    let char_cnt = inner.chars().count();
+    if char_cnt == 0
+        || char_cnt > 20
+        || inner
+            .chars()
+            .any(|c| c.is_ascii_digit() || matches!(c, ':' | '=' | '<' | '>' | '\\' | '.'))
+    {
+        return None;
+    }
+    let tokens: Vec<&str> = inner
+        .split(|c: char| matches!(c, '/' | '／' | '・' | ',' | '、' | '|') || c.is_whitespace())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if tokens.is_empty() || tokens.len() > 4 {
+        return None;
+    }
+    let mut first_sid = None;
+    for tok in tokens {
+        let sid = resolve_stage_emotion_token(tok, scope)?;
+        if first_sid.is_none() {
+            first_sid = Some(sid);
+        }
+    }
+    first_sid.map(|sid| (end_byte, sid))
+}
+
+fn strip_stage_emotion_tags(input: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(input.len());
+    let mut scope = Scope::Sakura;
+    let mut at_head = true;
+    let mut saw_surface = false;
+    let mut i = 0usize;
+    let n = input.len();
+
+    while i < n {
+        if at_head {
+            let mut la = i;
+            while la < n {
+                if let Some(c) = input[la..].chars().next() {
+                    if matches!(c, ' ' | '\t' | '\u{3000}') {
+                        la += c.len_utf8();
+                        continue;
+                    }
+                }
+                break;
+            }
+            if let Some((bracket_len, sid)) = try_match_stage_emotion_tag(&input[la..], scope) {
+                if !saw_surface {
+                    let _ = write!(out, "\\s[{sid}]");
+                    saw_surface = true;
+                }
+                i = la + bracket_len;
+                while i < n {
+                    if let Some(c) = input[i..].chars().next() {
+                        if matches!(c, ' ' | '\t' | '\u{3000}') {
+                            i += c.len_utf8();
+                            continue;
+                        }
+                    }
+                    break;
+                }
+                continue;
+            }
+        }
+
+        let rest = &input[i..];
+        let ch = rest.chars().next().unwrap();
+
+        if ch == '[' {
+            if let Some(m) = compact_speaker_re().captures(rest) {
+                let end = m.get(0).unwrap().end();
+                let is_kero = m.get(1).is_some_and(|x| x.as_str() == "1")
+                    || m.get(2)
+                        .is_some_and(|x| x.as_str().eq_ignore_ascii_case("kero"));
+                scope = if is_kero { Scope::Kero } else { Scope::Sakura };
+                at_head = true;
+                saw_surface = true;
+                out.push_str(&rest[..end]);
+                i += end;
+                continue;
+            }
+            if let Some(m) = compact_surface_re().find(rest) {
+                saw_surface = true;
+                out.push_str(m.as_str());
+                i += m.end();
+                continue;
+            }
+            if let Some(m) = compact_choice_re().find(rest) {
+                at_head = false;
+                out.push_str(m.as_str());
+                i += m.end();
+                continue;
+            }
+        }
+
+        if ch == '\\' {
+            let after = &rest[1..];
+            if let Some(nxt) = after.chars().next() {
+                match nxt {
+                    '\\' => {
+                        out.push_str("\\\\");
+                        at_head = false;
+                        i += 2;
+                        continue;
+                    }
+                    '0' | 'h' => {
+                        out.push_str(&rest[..2]);
+                        scope = Scope::Sakura;
+                        at_head = true;
+                        saw_surface = false;
+                        i += 2;
+                        continue;
+                    }
+                    '1' | '2' | 'u' => {
+                        out.push_str(&rest[..2]);
+                        scope = Scope::Kero;
+                        at_head = true;
+                        saw_surface = false;
+                        i += 2;
+                        continue;
+                    }
+                    'c' if !after.starts_with("c[") => {
+                        out.push_str("\\c");
+                        at_head = true;
+                        saw_surface = false;
+                        i += 2;
+                        continue;
+                    }
+                    'e' => {
+                        out.push_str("\\e");
+                        at_head = true;
+                        saw_surface = false;
+                        i += 2;
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(m) = p_scope_re().captures(rest) {
+                let end = m.get(0).unwrap().end();
+                scope = if &m[1] == "1" { Scope::Kero } else { Scope::Sakura };
+                at_head = true;
+                saw_surface = false;
+                out.push_str(&rest[..end]);
+                i += end;
+                continue;
+            }
+            if let Some(m) = surface_re().find(rest) {
+                saw_surface = true;
+                out.push_str(m.as_str());
+                i += m.end();
+                continue;
+            }
+            if let Some(m) = newline_re().find(rest) {
+                at_head = true;
+                saw_surface = false;
+                out.push_str(m.as_str());
+                i += m.end();
+                continue;
+            }
+            if let Some(m) = balloon_re()
+                .find(rest)
+                .or_else(|| wait_ms_re().find(rest))
+                .or_else(|| wait_digit_re().find(rest))
+                .or_else(|| benign_tag_re().find(rest))
+            {
+                out.push_str(m.as_str());
+                i += m.end();
+                continue;
+            }
+            if rest.starts_with("\\_q") {
+                out.push_str("\\_q");
+                i += 3;
+                continue;
+            }
+            if let Some(m) = anchor_link_re().find(rest).or_else(|| choice_q_re().find(rest)) {
+                at_head = false;
+                out.push_str(m.as_str());
+                i += m.end();
+                continue;
+            }
+        }
+
+        if matches!(ch, '\n' | '\r') {
+            at_head = true;
+            saw_surface = false;
+        } else if !matches!(ch, ' ' | '\t' | '\u{3000}') {
+            at_head = false;
+        }
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+
+    out
 }
 
 fn append_text(actions: &mut Vec<DialogueAction>, scope: Scope, chunk: &str) {
@@ -531,25 +936,12 @@ pub fn parse_dialogue(raw_input: &str) -> Vec<DialogueAction> {
                 let raw_sid = m[1].trim();
                 let sid: i32 = if let Ok(n) = raw_sid.parse::<i32>() {
                     n
+                } else if let Some(n) = resolve_emotion_keyword_surface(raw_sid, scope) {
+                    n
+                } else if scope == Scope::Sakura {
+                    0
                 } else {
-                    let s = raw_sid.to_ascii_lowercase();
-                    if s.contains("smile") || s.contains("happy") || s.contains("joy") {
-                        if scope == Scope::Sakura { 5 } else { 10 }
-                    } else if s.contains("shy") || s.contains("blush") {
-                        2
-                    } else if s.contains("surpris") || s.contains("shock") {
-                        if scope == Scope::Sakura { 6 } else { 12 }
-                    } else if s.contains("trouble") || s.contains("sad") || s.contains("worry") {
-                        3
-                    } else if s.contains("wink") {
-                        7
-                    } else if s.contains("smug") || s.contains("cool") {
-                        if scope == Scope::Sakura { 1 } else { 11 }
-                    } else if scope == Scope::Sakura {
-                        0
-                    } else {
-                        10
-                    }
+                    10
                 };
                 actions.push(DialogueAction::surface(scope, sid));
                 i += m.get(0).unwrap().end();
@@ -700,5 +1092,60 @@ mod tests {
         for bad in ["preface", "secret", "<|", "|>", "<0x", "<end_of_turn>", "<sakura>", "<br", "\\", "\u{FFFD}", "_a", "i[10]"] {
             assert!(!combined.contains(bad), "leaked `{bad}` in `{combined}`");
         }
+    }
+
+    #[test]
+    fn strips_leaked_stage_emotion_tags_and_preserves_real_parentheses() {
+        let a1 = parse_dialogue(r"\0\s[1](困り/照れ)えっ、な、何するの…。\e");
+        assert!(a1
+            .iter()
+            .any(|a| a.kind == ActionKind::Surface && a.scope == Scope::Sakura && a.surface_id == 1));
+        let t1: String = a1
+            .iter()
+            .filter(|a| a.kind == ActionKind::Text && a.scope == Scope::Sakura)
+            .map(|a| a.text.as_str())
+            .collect();
+        assert_eq!(t1, "えっ、な、何するの…。");
+
+        let a2 = parse_dialogue("(困り/照れ)えっ、な、何するの…。");
+        assert!(a2
+            .iter()
+            .any(|a| a.kind == ActionKind::Surface && a.scope == Scope::Sakura && a.surface_id == 1));
+        let t2: String = a2
+            .iter()
+            .filter(|a| a.kind == ActionKind::Text && a.scope == Scope::Sakura)
+            .map(|a| a.text.as_str())
+            .collect();
+        assert_eq!(t2, "えっ、な、何するの…。");
+
+        let a3 = parse_dialogue(r"\1（ニヤリ/得意げ） おお、ええやん！\e");
+        assert!(a3
+            .iter()
+            .any(|a| a.kind == ActionKind::Surface && a.scope == Scope::Kero && a.surface_id == 11));
+        let t3: String = a3
+            .iter()
+            .filter(|a| a.kind == ActionKind::Text && a.scope == Scope::Kero)
+            .map(|a| a.text.as_str())
+            .collect();
+        assert_eq!(t3, "おお、ええやん！");
+
+        let a4 = parse_dialogue(r"(당황/부끄) 어, 뭐 하는 거야…!\e");
+        assert!(a4
+            .iter()
+            .any(|a| a.kind == ActionKind::Surface && a.scope == Scope::Sakura && a.surface_id == 1));
+        let t4: String = a4
+            .iter()
+            .filter(|a| a.kind == ActionKind::Text && a.scope == Scope::Sakura)
+            .map(|a| a.text.as_str())
+            .collect();
+        assert_eq!(t4, "어, 뭐 하는 거야…!");
+
+        let a5 = parse_dialogue(r"\0\s[0](macOS) 100% Safe Rust だよ（笑）\e");
+        let t5: String = a5
+            .iter()
+            .filter(|a| a.kind == ActionKind::Text && a.scope == Scope::Sakura)
+            .map(|a| a.text.as_str())
+            .collect();
+        assert_eq!(t5, "(macOS) 100% Safe Rust だよ（笑）");
     }
 }

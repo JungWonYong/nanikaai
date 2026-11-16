@@ -1,7 +1,7 @@
 # 何か藍 (`NanikaAi`) — 現行動作仕様および自動検証基準 (`BEHAVIOR_SPEC`)
 
-- **Document Version**: `v1.7.0`
-- **Target Software**: `nanikaai` `v0.1.7+`
+- **Document Version**: `v1.8.0`
+- **Target Software**: `nanikaai` `v0.1.8+`
 - **Purpose**: テスト実行前の機密・個人情報・AI指示配置境界検査（Phase 0）、改修後の自動動作確認テスト（`cargo test` / `--smoke-test` / 静的監査）における合否基準、変更内容に応じた検証ティアおよび結果報告様式を定義する。
 
 ---
@@ -31,7 +31,7 @@
 | `SPEC-SKIN-03` | HiDPI・SERIKO | `neo_default` を `@2x` 解像度と目パチ/発話アニメーション付きで読み込む | `descript.display_scale` が `2.0` であり、surface `0` と `10` の双方に `talk`/`always` 等の SERIKO アニメーションが定義されること | `behavior_spec` / unit tests |
 | `SPEC-SKIN-04` | クラシック互換 | `.pna` アルファマスク透過と `.nar` パストラバーサル防御が機能する | `.pna` で `(0,0,0)` 黒衣装が不透明保持・背景が `alpha == 0` になり、`../../` を含む `.nar` 導入で親ディレクトリ外へ書込まないこと | `behavior_spec` / `--smoke-test` |
 | `SPEC-DLG-01` | スクリプト解析 | 話者切替・表情・選択肢・一時停止・早期 `\e` 回復を正確に解釈する | `\0` / `\1` / `\s[n]` / `\q[label,id]` / `\wN` / `\e` が対応する `ActionKind` へ変換され、早期 `\e` 後の発話も失われないこと | `behavior_spec` / unit tests |
-| `SPEC-DLG-02` | タグ・文字浄化 | LLM 思考タグ・バイトトークン・HTML 残骸・未対応制御タグを発話へ出さない | `<|thought|>...<|/thought|>`、`<end_of_turn>`、`<0xE3><0x80><0x80>` が `U+3000` 復元または完全除去されること | `behavior_spec` / unit tests |
+| `SPEC-DLG-02` | タグ・文字浄化 | LLM 思考タグ・バイトトークン・HTML 残骸・未対応制御タグ・感情ト書き括弧を発話へ出さない | `<\|thought\|>...<\|/thought\|>`、`<end_of_turn>`、`<0xE3><0x80><0x80>` が `U+3000` 復元または完全除去され、`\0\s[1](困り/照れ)` 等の行頭/タグ直後感情ラベルを表情解決のうえ除去し本文中の `(macOS)`・`（笑）` を保持すること | `behavior_spec` / unit tests |
 | `SPEC-DLG-03` | 履歴保護 | 会話履歴保存時に `\1` スコープ不整合と制御タグを再帰浄化する | `sanitize_reply_for_history` が `\1\s[5]` を `\1` 側サーフェス(`12`)へ補正し `<|thought|>` 等を残さないこと | `behavior_spec` / unit tests |
 | `SPEC-AI-01` | モデル規制 | 制限対象 LLM（`FORBIDDEN_MODEL_PREFIXES`）の呼び出しを拒否する | 禁止プレフィックス全種で `assert_allowed_model` が `Err` を返し、`PREFERRED_MODELS` に禁止モデルが含まれないこと | `behavior_spec` / unit tests |
 | `SPEC-AI-02` | Ollama 適応 | 初心者向けローカルモデル候補を幅広に自動選択する | `PREFERRED_MODELS` に `gemma4:e4b`・`llama3.2:3b` 等が含まれ、`provider_catalog()` の `"ollama"` 既定モデルが `"auto"` であること | `behavior_spec` / unit tests |
@@ -41,8 +41,8 @@
 | `SPEC-UI-03` | リリース版数 | `Cargo.toml` と配布バンドル版数が一致し、文書過負荷更新を避ける | `Cargo.toml` の版数と `scripts/build_macos.sh` のバンドル版数が一致し、`scripts/build_macos.sh` が正常終了すること | `verify_behavior.py --mode full` |
 | `SPEC-UI-04` | GUI 対話操作性 | 右クリックメニュー展開/ホバー/スクロール/切替実行、キャラダブルクリック入力バー展開、IME入力/編集/送信(`↑`)/`×`/`Esc`、吹き出し早送り/選択肢ホバー/スクロール/クリック非表示が正常に動作する | `--smoke-test` Phase E において全ウィンドウ対話操作・ヒット判定・状態遷移が 1 件も欠落せず合格すること | `--smoke-test` Phase E (`SPEC-UI-04`) |
 | `SPEC-UI-05` | 3秒以内反応性 SLA | ユーザー操作（送信・選択肢・右クリック・入力バー・制御API・オフライン縮退）から 3 秒（`3,000 ms`）以内に視覚反応または応答を返す | 送信/選択直後の「AI 応答準備中…」即時表示（`< 500 ms` ステータス通知）、GUI 全操作合計 `ui_ms <= 3,000 ms`、HTTP/TCP 制御応答 `ipc_ms <= 3,000 ms`、オフライン即断 `< 3,000 ms` を実測で満たすこと | `--smoke-test` Phase E / `behavior_spec` |
-| `SPEC-SRV-01` | HTTP 状態 API | `GET /api/health`・`/api/skins`・`/api/providers` が JSON (`ok: true`) を返す | 一時的 `start_dual_server(0, 0)` に対して全 3 エンドポイントが `200 OK` かつ `"ok": true` を返すこと | `behavior_spec` / `--smoke-test` |
-| `SPEC-SRV-02` | HTTP 操作 API | `POST /api/speak`・`/api/chat`・`/api/event`・`/api/skin`・`/api/provider` を処理する | 正常ペイロードで `200 OK`、必須項目欠落（空 `script`/`message`/`provider`）で `400 Bad Request` を返すこと | `behavior_spec` |
+| `SPEC-SRV-01` | HTTP 状態 API | `GET /api/health`・`/api/skins`・`/api/providers`・`/api/voices` が JSON (`ok: true`) を返す | 一時的 `start_dual_server(0, 0)` に対して全 4 エンドポイントが `200 OK` かつ `"ok": true` を返すこと | `behavior_spec` / `--smoke-test` |
+| `SPEC-SRV-02` | HTTP 操作 API | `POST /api/speak`・`/api/chat`・`/api/event`・`/api/skin`・`/api/provider`・`/api/voice` を処理する | 正常ペイロードで `200 OK`、必須項目欠落や不正値（空 `script`/`message`/`provider`、不正 `tts_engine`/`install_aivm_uuid`）で `400 Bad Request` を返すこと | `behavior_spec` |
 | `SPEC-SRV-03` | SSTP 互換 | HTTP `/sstp` および生 TCP `SSTP/1.4` 要求を受理する | HTTP `/sstp` が `200 OK`＋`X-Actions`、TCP `SSTP/1.4` が `200 OK`＋`Charset: UTF-8` を返し、空 `Script` に `400 Bad Request` を返すこと | `behavior_spec` / `--smoke-test` |
 | `SPEC-SRV-04` | 自動監査・保守 | 個人パス・機密・未処理マーカーをリポジトリへ混入させない | 追跡対象ファイルに未処理の作業待ち・仮置き注記やローカル個人パスが `0` 件であること | `verify_behavior.py` |
 | `SPEC-SEC-01` | 事前機密検査 | テスト・ビルド・リモート転送前に個人情報・APIキー・認証情報・秘密鍵の混入を遮断する | Phase 0 が全対象ファイルおよび Git 履歴から個人パス・非公開 LAN IP・個人メール・API キー・認証ファイル（`.env`/証明書）・秘密鍵 `0` 件を確認し、合成秘密サンプルをテスト前停止（Exit Code `!= 0`）で遮断すること | `verify_behavior.py` Phase 0 / `behavior_spec` |
@@ -54,8 +54,8 @@
 | `SPEC-COMP-01` | 時報・リマインダー・終了挨拶 | 毎時 00 分の時報、`set_reminder` / `list_reminders` 通知、および終了時（`OnClose`）挨拶を実行する | ツール登録したリマインダーが期日到達で消化通知され、時報・終了挨拶スクリプトが現在キャラクター名で生成されること | `behavior_spec` / `agent_engine` |
 | `SPEC-COMP-02` | ファイル D&D 反応 | `.nar`/`.zip` 以外の汎用ファイル（文章・コード・画像・URL ショートカット・フォルダ）のドロップ内容を受理し要約反応する | `.env`/秘密鍵/資格情報ファイルを読込前に即拒否し、安全ファイル内容のみ `<untrusted_data>` で囲んで抽出すること | `behavior_spec` / `companion_extras` |
 | `SPEC-COMP-03` | 音声読み上げ・更新確認 | 既定 OFF の AivisSpeech (`:10101`) / VOICEVOX (`:50021`)＋OS TTS フォールバックおよび GitHub Releases 更新確認を提供する | `\0`/`\1` バッチ発話抽出および SemVer 版数比較が正確に機能し、スモーク検証時は外部起動・音声ブロックを発生させないこと | `behavior_spec` / `companion_extras` |
-| `SPEC-COMP-04` | ヘッドレス音声自動起動 | 導入済み `AivisSpeech Engine` / `VOICEVOX vv-engine` を手動起動不要で自動検出・無画面起動/終了し、`/speakers` から `\0`/`\1` 話者選択をシェル別保存する | `/speakers` の 32bit/整数スタイルID解析と既定 `\0`/`\1` ペア選出およびシェル別 `sakura_speaker_id`/`kero_speaker_id` 永続化が一致すること | `behavior_spec` / `companion_extras` |
-| `SPEC-L2D-01` | 外付けサイドカー Live2D マルチパーツ | 既存 `.nar` を無改変のまま外付け `live2d.json`＋パーツ PNG 階層を読み込み、ユーザー配置優先で解剖学的関節（首/C1 頭部/顔視差/多層髪/衣装裾・リボン/腕）・`surface_overrides` 無欠損表情・`AlphaMask` 合成・層別 `opacity`（40%半透明サングラス）・階層ボーン/減衰バネを CPU/GPU で駆動する | `neo_default` で `\0`(18層以上: 解剖学的首/C1/髪/衣装/フリル靴下＆メリージェーン靴)と `\1`(6層以上: 無欠損 `surface11` 目元・alpha 40%レンズ)が読込まれ、表情/着せ替え差分反映・物理変位描画および `<user_data>/live2d` 優先上書きが通過すること | `behavior_spec` / `--smoke-test` |
+| `SPEC-COMP-04` | ヘッドレス音声・`\0`/`\1` 別声自動配役＆エンジン選択 | 導入済み `AivisSpeech Engine` / `VOICEVOX vv-engine` / OS 標準音声を切替・自動起動し、シェルの `\1` 属性（少年系・女性相棒・青年男性）に応じて `\0`/`\1` を別声優・別モデル（AivisHub `らせつん` 自動/手動導入含む）へ自動配役する | `/speakers` 解析、`infer_kero_voice_archetype` / `pick_speaker_pair_for_archetype` による `\0`/`\1` 別声選出、および `tts_engine`・`kero_voice_archetype`・`sakura_speaker_id`/`kero_speaker_id` の永続化が一致すること | `behavior_spec` / `companion_extras` |
+| `SPEC-L2D-01` | 外付けサイドカー Live2D マルチパーツ | 既存 `.nar` を無改変のまま外付け `live2d.json`＋パーツ PNG 階層を読み込み、ユーザー配置優先で解剖学的関節（首/C1 頭部/顔視差/多層髪/衣装裾・リボン/腕）・`surface_overrides` 無欠損表情・`AlphaMask` 合成・層別 `opacity`（40%半透明サングラス）・階層ボーン/減衰バネを CPU/GPU で駆動する | `neo_default` で `\0`(18層以上: 解剖学的首/C1/髪/衣装/フリル靴下＆メリージェーン靴・閉じ目領域 `[350..390, 260..300]` で `sakura_hair_curl_r.png` 透過保持)と `\1`(6層以上: 無欠損 `surface11` 目元・alpha 40%レンズ)が読込まれ、表情/着せ替え差分反映・物理変位描画および `<user_data>/live2d` 優先上書きが通過すること | `behavior_spec` / `--smoke-test` |
 | `SPEC-L2D-02` | サイドカー信頼境界＆オフラインスタジオ | `live2d.json` を純粋データとして検証し、パストラバーサル・機密参照・循環ボーンを遮断するとともにオフライン専用編集 UI を同梱する | `../`・`.env`・絶対パス・循環親参照が拒否され、`tools/live2d_studio.html` に外部 CDN URL が `0` 件であること | `behavior_spec` / `live2d_rig` |
 
 ---

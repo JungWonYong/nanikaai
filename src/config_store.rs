@@ -7,12 +7,21 @@ use std::sync::{Arc, Mutex};
 
 pub const DEFAULT_PERSONA: &str = concat!(
     "あなたはデスクトップマスコット「伺か（MATERIA）」の『さくら（\\0）』と相棒『うにゅう（\\1）』の2人組AIエージェントです。\n",
-    "・さくら（\\0）: 少しクールで落ち着いた口調だが面倒見が良い女の子。表情は \\s[0](素), \\s[1](困り/照れ), \\s[4](ジト目/呆れ), ",
-    "\\s[5](微笑み), \\s[6](目閉じ), \\s[7](怒り), \\s[8](明るい笑顔), \\s[9](照れ怒り) を使い分ける。\n",
-    "・うにゅう（\\1）: 関西弁（〜やねん、せやな、なんでやねん）で話す、薄紫青色（ペリウィンクルブルー）のもちもちした謎の生き物。鼻先に小さな丸サングラスを老眼鏡のように低く掛けており、フレームの上から両目が見えている。表情は \\s[10](素), \\s[11](驚き), \\s[12](得意げ) を使う。\n",
-    "・応答は必ず Sakura Script 形式（例: \\0\\s[5]こんにちは。\\1\\s[10]今日も元気やな！\\e）で出力し、吹き出しに収まるよう簡潔（2〜5文程度）にまとめること。\n",
+    "・さくら（\\0）: 少しクールで落ち着いた口調だが面倒見が良い女の子。表情番号は 0=素, 1=困り・照れ, 4=ジト目・呆れ, ",
+    "5=微笑み, 6=目閉じ, 7=怒り, 8=明るい笑顔, 9=照れ怒り を \\s[番号] タグのみで指定する。\n",
+    "・うにゅう（\\1）: 関西弁（〜やねん、せやな、なんでやねん）で話す、薄紫青色（ペリウィンクルブルー）のもちもちした謎の生き物。鼻先に小さな丸サングラスを老眼鏡のように低く掛けており、フレームの上から両目が見えている。表情番号は 10=素, 11=驚き, 12=得意げ を \\s[番号] タグのみで指定する。\n",
+    "・応答は必ず Sakura Script 形式（例: \\0\\s[5]こんにちは。\\1\\s[10]今日も元気やな！\\e）で出力し、吹き出しに収まるよう簡潔（2〜5文程度）にまとめること。(照れ) 等の感情名・ト書き括弧は本文に一切書かないこと。\n",
     "・PC状態の調査、ファイル確認、Web検索、長期記憶の記録が必要な場合は自律的にツールを呼び出して事実に基づき回答すること。"
 );
+
+/// Returns `true` when `raw` matches the built-in default persona (including older revisions).
+pub fn is_stock_default_persona(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    trimmed.is_empty()
+        || trimmed == DEFAULT_PERSONA.trim()
+        || (trimmed.starts_with("あなたはデスクトップマスコット「伺か（MATERIA）」の『さくら")
+            && trimmed.contains("2人組AIエージェントです。"))
+}
 
 pub fn user_home_dir() -> PathBuf {
     #[cfg(target_os = "windows")]
@@ -135,6 +144,29 @@ fn default_voicevox() -> String {
     "http://127.0.0.1:50021".to_string()
 }
 
+fn default_tts_engine() -> String {
+    "auto".to_string()
+}
+
+pub fn normalize_tts_engine(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "aivisspeech" | "aivis" => "aivisspeech".to_string(),
+        "voicevox" | "vv" => "voicevox".to_string(),
+        "coeiroink" => "coeiroink".to_string(),
+        "os" | "native" => "os".to_string(),
+        _ => "auto".to_string(),
+    }
+}
+
+pub fn normalize_kero_archetype_str(raw: &str) -> Option<String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "boy" | "boyish" => Some("boy".to_string()),
+        "girl" | "female" | "female_partner" => Some("girl".to_string()),
+        "male" | "youth_male" | "man" => Some("male".to_string()),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReminderItem {
     #[serde(default)]
@@ -161,6 +193,8 @@ pub struct ShellGhostProfile {
     pub sakura_speaker_id: Option<i64>,
     #[serde(default)]
     pub kero_speaker_id: Option<i64>,
+    #[serde(default)]
+    pub kero_voice_archetype: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -205,6 +239,8 @@ pub struct AgentConfig {
     pub hourly_chime: bool,
     #[serde(default)]
     pub voice_tts: bool,
+    #[serde(default = "default_tts_engine")]
+    pub tts_engine: String,
     #[serde(default = "default_voicevox")]
     pub voicevox_url: String,
     #[serde(default = "default_persona")]
@@ -240,6 +276,7 @@ impl Default for AgentConfig {
             live2d_motion: true,
             hourly_chime: true,
             voice_tts: false,
+            tts_engine: default_tts_engine(),
             voicevox_url: default_voicevox(),
             system_persona: default_persona(),
             memories: Vec::new(),
@@ -267,6 +304,7 @@ pub struct ConfigPatch {
     pub live2d_motion: Option<bool>,
     pub hourly_chime: Option<bool>,
     pub voice_tts: Option<bool>,
+    pub tts_engine: Option<String>,
     pub voicevox_url: Option<String>,
 }
 
@@ -299,6 +337,13 @@ impl ConfigStore {
         match fs::read_to_string(file_path) {
             Ok(txt) => {
                 let mut cfg = serde_json::from_str::<AgentConfig>(&txt).unwrap_or_default();
+                let mut changed = false;
+                if is_stock_default_persona(&cfg.system_persona)
+                    && cfg.system_persona != DEFAULT_PERSONA
+                {
+                    cfg.system_persona = DEFAULT_PERSONA.to_string();
+                    changed = true;
+                }
                 if !cfg.memories.is_empty() {
                     let shell_id = if cfg.active_shell_id.trim().is_empty() {
                         default_shell_id()
@@ -311,6 +356,9 @@ impl ConfigStore {
                     } else {
                         cfg.memories.clear();
                     }
+                    changed = true;
+                }
+                if changed {
                     Self::save_to_path(file_path, &cfg);
                 }
                 cfg
@@ -378,6 +426,9 @@ impl ConfigStore {
         }
         if let Some(v) = patch.voice_tts {
             guard.voice_tts = v;
+        }
+        if let Some(v) = patch.tts_engine {
+            guard.tts_engine = normalize_tts_engine(&v);
         }
         if let Some(v) = patch.voicevox_url {
             guard.voicevox_url = v;
@@ -478,6 +529,36 @@ impl ConfigStore {
             .get(shell_id)
             .map(|p| (p.sakura_speaker_id, p.kero_speaker_id))
             .unwrap_or((None, None))
+    }
+
+    pub fn get_shell_voice_profile(
+        &self,
+        shell_id: &str,
+    ) -> (Option<i64>, Option<i64>, Option<String>) {
+        let guard = self.inner.lock().expect("config mutex poisoned");
+        guard
+            .ghost_profiles
+            .get(shell_id)
+            .map(|p| {
+                (
+                    p.sakura_speaker_id,
+                    p.kero_speaker_id,
+                    p.kero_voice_archetype.clone(),
+                )
+            })
+            .unwrap_or((None, None, None))
+    }
+
+    pub fn set_shell_kero_archetype(&self, shell_id: &str, archetype: Option<String>) {
+        let mut guard = self.inner.lock().expect("config mutex poisoned");
+        let profile = guard
+            .ghost_profiles
+            .entry(shell_id.to_string())
+            .or_default();
+        profile.kero_voice_archetype = archetype
+            .as_deref()
+            .and_then(normalize_kero_archetype_str);
+        Self::save_to_path(&self.file_path, &guard);
     }
 
     pub fn set_shell_voice_speaker(

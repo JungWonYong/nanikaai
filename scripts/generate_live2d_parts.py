@@ -192,7 +192,7 @@ def build_sakura_parts() -> list[dict]:
     bang_excl_rgba = np.zeros_like(s0)
     bang_excl_rgba[:, :, :3] = 255
     bang_excl_rgba[:, :, 3] = np.clip(
-        np.round(soft_weight(binary_dilation(bang_center_mask, iterations=1), 0.7) * 255.0),
+        np.round(soft_weight(binary_erosion(bang_center_mask, iterations=2), 0.7) * 255.0),
         0,
         255,
     ).astype(np.uint8)
@@ -214,21 +214,23 @@ def build_sakura_parts() -> list[dict]:
 
     # 4) Lower cyan-tipped wavy curls:
     # - hair_curl_l at z=56 (BEHIND head_base z=58 so crisp cheek jawline renders cleanly on top!)
-    # - hair_curl_r at z=64 (IN FRONT on right jaw, with clean blue hair tuck behind on head_base!)
-    collar_guard = is_yellow_ribbon | is_pure_white_coat | is_skin
-    curl_l_poly = poly_mask((h, w), [(188, 240), (274, 240), (294, 336), (300, 405), (188, 405)])
-    curl_r_poly = poly_mask((h, w), [(382, 238), (488, 238), (488, 406), (356, 406), (366, 332)])
+    # - hair_curl_r at z=64 (IN FRONT on right jaw, strictly guarded outside eye/lash/cheek bbox!)
+    eye_and_cheek_guard = binary_dilation(
+        ellipse_mask((h, w), 275.0, 282.0, 34.0, 42.0)
+        | ellipse_mask((h, w), 367.0, 282.0, 34.0, 42.0)
+        | poly_mask((h, w), [(252, 220), (392, 220), (386, 342), (346, 366), (294, 364), (258, 332)]),
+        iterations=2,
+    )
+    collar_guard = is_yellow_ribbon | is_pure_white_coat | is_skin | eye_and_cheek_guard
+    curl_l_poly = poly_mask((h, w), [(188, 240), (249, 240), (250, 306), (264, 340), (300, 405), (188, 405)])
+    curl_r_poly = poly_mask((h, w), [(396, 238), (488, 238), (488, 406), (358, 406), (378, 348), (394, 308)])
     curl_l_raw = (curl_l_poly & opaque & is_hair_like & (~collar_guard)).astype(np.float32)
     curl_r_raw = (curl_r_poly & opaque & is_hair_like & (~collar_guard)).astype(np.float32)
     cl_top = np.clip((yg.astype(np.float32) - 240.0) / 26.0, 0.0, 1.0)
     cr_top = np.clip((yg.astype(np.float32) - 238.0) / 26.0, 0.0, 1.0)
-    cr_in = np.clip((xg.astype(np.float32) - 364.0) / 14.0, 0.0, 1.0)
+    cr_in = np.where(yg < 312, np.clip((xg.astype(np.float32) - 392.0) / 8.0, 0.0, 1.0), 1.0)
     curl_l_w = np.clip(gaussian_filter(curl_l_raw, 0.7) * cl_top, 0.0, 1.0)
-    curl_r_w = np.clip(
-        gaussian_filter(curl_r_raw, 0.7) * cr_top * np.maximum(cr_in, (yg >= 338).astype(np.float32)),
-        0.0,
-        1.0,
-    )
+    curl_r_w = np.clip(gaussian_filter(curl_r_raw, 0.7) * cr_top * cr_in, 0.0, 1.0)
     save_rgba(extract_layer(s0, curl_l_w), PARTS_DIR / "sakura_hair_curl_l.png")
     save_rgba(extract_layer(s0, curl_r_w), PARTS_DIR / "sakura_hair_curl_r.png")
 
@@ -290,8 +292,8 @@ def build_sakura_parts() -> list[dict]:
     # Exclude tiny isolated dark lash pixels inside face interior
     face_int_poly = poly_mask((h, w), [(252, 224), (390, 224), (382, 344), (320, 358), (258, 342)])
     stray_dark_face = face_int_poly & is_dark_line & (yg >= 224) & (yg <= 346)
-    curved_hairline = 192.0 + 0.010 * ((xg.astype(np.float32) - 310.0) ** 2)
-    bang_lower_wipe = binary_dilation(bang_center_mask, iterations=2) & (yg >= curved_hairline)
+    curved_hairline = 226.0 + 0.008 * ((xg.astype(np.float32) - 312.0) ** 2)
+    bang_lower_wipe = binary_dilation(bang_center_mask, iterations=4) & (yg >= curved_hairline)
     face_skin_wipe = (eye_l_wipe | eye_r_wipe | brows_wipe | nose_mouth_wipe | stray_dark_face | bang_lower_wipe) & poly_mask(
         (h, w), [(244, 190), (398, 190), (384, 354), (320, 366), (256, 344)]
     )
@@ -300,11 +302,11 @@ def build_sakura_parts() -> list[dict]:
         & is_skin
         & (~binary_dilation(face_skin_wipe, iterations=3))
         & (~binary_dilation(is_dark_line, iterations=2))
-        & (~bang_center_mask)
+        & (~binary_dilation(bang_center_mask, iterations=3))
         & (yg >= 220)
         & (yg <= 362)
     )
-    bang_crown_wipe = binary_dilation(bang_center_mask, iterations=2) & (yg < curved_hairline) & jaw_poly
+    bang_crown_wipe = binary_dilation(bang_center_mask, iterations=3) & (yg < curved_hairline) & jaw_poly
     bang_crown_known = jaw_poly & is_pure_hair & (~bang_crown_wipe) & (~bang_center_mask) & (yg >= 124) & (yg <= 212)
 
     head_rgb = diffuse_from_known(s0[:, :, :3], face_skin_wipe, forehead_skin_known, iters=180)
@@ -319,24 +321,26 @@ def build_sakura_parts() -> list[dict]:
     face_poly = poly_mask(
         (h, w),
         [
-            (238, 206),
-            (404, 206),
-            (396, 312),
-            (370, 346),
-            (320, 360),
-            (270, 344),
-            (242, 306),
+            (248, 212),
+            (396, 212),
+            (396, 306),
+            (380, 336),
+            (356, 354),
+            (320, 363),
+            (284, 352),
+            (262, 332),
+            (250, 302),
         ],
     )
-    face_mask_f = soft_weight(face_poly, 4.5) * (
-        1.0 - np.clip(soft_weight(binary_dilation(bang_center_mask, iterations=1), 0.7), 0.0, 1.0)
+    face_mask_f = soft_weight(face_poly, 3.2) * (
+        1.0 - np.clip(soft_weight(binary_erosion(bang_center_mask, iterations=2), 0.7), 0.0, 1.0)
     )
     sakura_face = extract_layer(s0, face_mask_f)
     save_rgba(sakura_face, PARTS_DIR / "sakura_face_features.png")
 
     fmask_rgba = np.zeros_like(s0)
     fmask_rgba[:, :, :3] = 255
-    fmask_rgba[:, :, 3] = np.clip(np.round(soft_weight(face_poly, 4.5) * 255.0), 0, 255).astype(np.uint8)
+    fmask_rgba[:, :, 3] = np.clip(np.round(soft_weight(face_poly, 3.2) * 255.0), 0, 255).astype(np.uint8)
     save_rgba(fmask_rgba, PARTS_DIR / "sakura_face_mask.png")
 
     save_rgba(s0, PARTS_DIR / "sakura_hairpin_ref.png")
@@ -1075,10 +1079,15 @@ def _render_unyu_paws_4x(shape: tuple[int, int], body_rgba: np.ndarray) -> tuple
     return make_paw(False), make_paw(True)
 
 
-def build_unyu_parts() -> tuple[list[dict], dict[str, str]]:
-    u10 = load_rgba(SHELL_DIR / "surface10.png")
-    u11 = load_rgba(SHELL_DIR / "surface11.png")
-    u12 = load_rgba(SHELL_DIR / "surface12.png")
+def build_unyu_parts(clean_sources: dict[str, np.ndarray] | None = None) -> tuple[list[dict], dict[str, str]]:
+    if clean_sources and all(k in clean_sources for k in ("s10", "s11", "s12")):
+        u10 = clean_sources["s10"]
+        u11 = clean_sources["s11"]
+        u12 = clean_sources["s12"]
+    else:
+        u10 = load_rgba(SHELL_DIR / "surface10.png")
+        u11 = load_rgba(SHELL_DIR / "surface11.png")
+        u12 = load_rgba(SHELL_DIR / "surface12.png")
     h, w = u10.shape[:2]
     alpha = u10[:, :, 3]
     opaque = alpha > 16
@@ -1415,17 +1424,40 @@ def build_unyu_parts() -> tuple[list[dict], dict[str, str]]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate anatomical CC0-1.0 Live2D layered parts for neo_default.")
-    parser.parse_args()
+    parser.add_argument("--sakura-only", action="store_true", help="Regenerate only Sakura parts cleanly.")
+    args = parser.parse_args()
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     PARTS_DIR.mkdir(parents=True, exist_ok=True)
-    for old_png in PARTS_DIR.glob("*.png"):
-        old_png.unlink()
+
+    # Preserve existing clean Unyu bases before wiping so repeated runs remain 100% idempotent
+    cached_clean: dict[str, np.ndarray] = {}
+    for key, fname in (("s10", "unyu_clean_s10.png"), ("s11", "unyu_clean_s11.png"), ("s12", "unyu_clean_s12.png")):
+        p = PARTS_DIR / fname
+        if p.is_file():
+            cached_clean[key] = load_rgba(p)
+
+    if args.sakura_only:
+        for old_png in PARTS_DIR.glob("sakura_*.png"):
+            old_png.unlink()
+    else:
+        for old_png in PARTS_DIR.glob("*.png"):
+            old_png.unlink()
 
     (OUT_DIR / "LICENSE-CC0.txt").write_text(CC0_NOTICE, encoding="utf-8")
 
     sakura_parts = build_sakura_parts()
-    unyu_parts, unyu_overrides = build_unyu_parts()
+    if args.sakura_only and (OUT_DIR / "live2d.json").is_file():
+        existing_manifest = json.loads((OUT_DIR / "live2d.json").read_text(encoding="utf-8"))
+        kero_block = existing_manifest["kero"]
+        unyu_parts = kero_block["parts"]
+    else:
+        unyu_parts, unyu_overrides = build_unyu_parts(cached_clean or None)
+        kero_block = {
+            "canvas_size": [380, 420],
+            "surface_overrides": unyu_overrides,
+            "parts": unyu_parts,
+        }
 
     manifest = {
         "schema_version": 1,
@@ -1434,11 +1466,7 @@ def main() -> None:
             "canvas_size": [660, 1350],
             "parts": sakura_parts,
         },
-        "kero": {
-            "canvas_size": [380, 420],
-            "surface_overrides": unyu_overrides,
-            "parts": unyu_parts,
-        },
+        "kero": kero_block,
     }
     (OUT_DIR / "live2d.json").write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",

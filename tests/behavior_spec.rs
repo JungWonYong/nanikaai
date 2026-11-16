@@ -16,10 +16,12 @@ use nanikaai::agent_engine::{
 };
 use nanikaai::builtin_tools::{is_sensitive_path, validate_public_url, BuiltinToolRunner};
 use nanikaai::companion_extras::{
-    compare_semver, extract_speech_segments, fetch_voices_from_engine, inspect_dropped_path,
-    open_validated_browser_url, pick_default_speaker_pair,
+    compare_semver, extract_speech_segments, fetch_voices_from_engine, infer_kero_voice_archetype,
+    inspect_dropped_path, is_valid_aivm_uuid, open_validated_browser_url,
+    pick_default_speaker_pair, pick_speaker_pair_for_archetype, KeroVoiceArchetype,
+    TtsVoiceOption,
 };
-use nanikaai::config_store::{ConfigPatch, ConfigStore};
+use nanikaai::config_store::{is_stock_default_persona, ConfigPatch, ConfigStore, DEFAULT_PERSONA};
 use nanikaai::dialogue_parser::{parse_dialogue, ActionKind, DialogueAction, Scope};
 use nanikaai::live2d_rig::{
     discover_and_load_rig, load_character_rig, validate_safe_rel_asset_path, Live2dMotionInputs,
@@ -27,7 +29,7 @@ use nanikaai::live2d_rig::{
 use nanikaai::shell_parser::{
     install_nar_archive, load_ukagaka_rgba, parse_descript_txt, BalloonManager, ShellManager,
 };
-use nanikaai::sstp_server::{start_dual_server, ServerBackend};
+use nanikaai::sstp_server::{start_dual_server, ServerBackend, VoiceConfigReq};
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -348,6 +350,35 @@ fn spec_dlg_01_02_03_sakura_script_and_tag_sanitization() {
     assert!(!clean_hist.contains("<|thought|>"));
     assert!(!clean_hist.contains("<0x"));
     assert!(clean_hist.contains('\u{3000}'));
+
+    // LLM stage-direction emotion tag stripping (ja/ko/en) without clobbering legitimate inline parens
+    let leaked_acts = parse_dialogue(r"\0\s[1](困り/照れ)えっ、な、何するの…。\1（ニヤリ/得意げ） おお、ええやん！\e");
+    let leaked_sak: String = leaked_acts
+        .iter()
+        .filter(|a| a.kind == ActionKind::Text && a.scope == Scope::Sakura)
+        .map(|a| a.text.as_str())
+        .collect();
+    let leaked_ker: String = leaked_acts
+        .iter()
+        .filter(|a| a.kind == ActionKind::Text && a.scope == Scope::Kero)
+        .map(|a| a.text.as_str())
+        .collect();
+    assert_eq!(leaked_sak, "えっ、な、何するの…。");
+    assert_eq!(leaked_ker, "おお、ええやん！");
+    assert!(leaked_acts
+        .iter()
+        .any(|a| a.kind == ActionKind::Surface && a.scope == Scope::Kero && a.surface_id == 11));
+    assert!(!engine
+        .sanitize_reply_for_history(r"\0\s[1](困り/照れ)えっ、な、何するの…。\e")
+        .contains("困り"));
+
+    let benign_acts = parse_dialogue(r"\0\s[0](macOS) 100% Safe Rust だよ（笑）\e");
+    let benign_sak: String = benign_acts
+        .iter()
+        .filter(|a| a.kind == ActionKind::Text && a.scope == Scope::Sakura)
+        .map(|a| a.text.as_str())
+        .collect();
+    assert_eq!(benign_sak, "(macOS) 100% Safe Rust だよ（笑）");
     let _ = fs::remove_dir_all(&tmp);
 }
 
@@ -483,6 +514,34 @@ impl ServerBackend for MockSpecBackend {
         *self.active_provider.lock().unwrap() = (provider.clone(), m.clone());
         Ok(json!({ "provider": provider, "model": m }))
     }
+
+    fn get_voices(&self) -> Value {
+        json!({
+            "active_shell": self.active_shell.lock().unwrap().clone(),
+            "voice_tts": true,
+            "tts_engine": "auto",
+            "effective_kero_voice_archetype": "boy",
+            "voices": []
+        })
+    }
+
+    fn on_configure_voice(&self, req: VoiceConfigReq) -> Result<Value, String> {
+        if let Some(ref eng) = req.tts_engine {
+            if !matches!(eng.as_str(), "auto" | "aivisspeech" | "voicevox" | "os") {
+                return Err(format!("Invalid tts_engine: {eng}"));
+            }
+        }
+        if let Some(ref uuid) = req.install_aivm_uuid {
+            if !is_valid_aivm_uuid(uuid) {
+                return Err(format!("Invalid AIVM UUID format: {uuid}"));
+            }
+        }
+        Ok(json!({
+            "voice_tts": req.voice_tts.unwrap_or(true),
+            "tts_engine": req.tts_engine.unwrap_or_else(|| "auto".to_string()),
+            "kero_voice_archetype": req.kero_voice_archetype.unwrap_or_else(|| "boy".to_string()),
+        }))
+    }
 }
 
 #[test]
@@ -498,7 +557,7 @@ fn spec_srv_01_02_03_dual_http_and_sstp_tcp_contract() {
         .expect("http client");
 
     // GET routes
-    for path in ["/api/health", "/api/skins", "/api/providers"] {
+    for path in ["/api/health", "/api/skins", "/api/providers", "/api/voices"] {
         let resp = client.get(format!("{base}{path}")).send().expect("GET route");
         assert_eq!(resp.status().as_u16(), 200, "GET {path} status");
         let body: Value = resp.json().expect("JSON body");
@@ -560,6 +619,26 @@ fn spec_srv_01_02_03_dual_http_and_sstp_tcp_contract() {
         .send()
         .unwrap();
     assert_eq!(prov_bad.status().as_u16(), 400);
+
+    // POST /api/voice valid + invalid
+    let voice_ok = client
+        .post(format!("{base}/api/voice"))
+        .json(&json!({"voice_tts": true, "tts_engine": "aivisspeech", "kero_voice_archetype": "boy"}))
+        .send()
+        .unwrap();
+    assert_eq!(voice_ok.status().as_u16(), 200);
+    let voice_bad_engine = client
+        .post(format!("{base}/api/voice"))
+        .json(&json!({"tts_engine": "unsupported_engine"}))
+        .send()
+        .unwrap();
+    assert_eq!(voice_bad_engine.status().as_u16(), 400);
+    let voice_bad_uuid = client
+        .post(format!("{base}/api/voice"))
+        .json(&json!({"install_aivm_uuid": "../evil"}))
+        .send()
+        .unwrap();
+    assert_eq!(voice_bad_uuid.status().as_u16(), 400);
 
     // POST /sstp valid + invalid
     let sstp_http_ok = client
@@ -876,6 +955,39 @@ fn spec_ghost_01_and_skin_05_profile_isolation_and_bind_dressup() {
     assert_eq!(engine.history_len_for_shell("alt_shell"), 0);
     assert_eq!(engine.history_len_for_shell("neo_default"), 1);
 
+    // Legacy stock DEFAULT_PERSONA in config.json migrates automatically & yields to active shell persona
+    let legacy_stock = "あなたはデスクトップマスコット「伺か（MATERIA）」の『さくら（\\0）』と相棒『うにゅう（\\1）』の2人組AIエージェントです。\n・さくら（\\0）: 少しクールで落ち着いた口調だが面倒見が良い女の子。表情は \\s[0](素), \\s[1](困り/照れ) を使い分ける。";
+    assert!(is_stock_default_persona(legacy_stock));
+    let mig_dir = tmp.join("legacy_cfg");
+    fs::create_dir_all(&mig_dir).unwrap();
+    fs::write(
+        mig_dir.join("config.json"),
+        json!({
+            "active_shell_id": "mayura",
+            "system_persona": legacy_stock
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mig_store = ConfigStore::new(Some(mig_dir));
+    assert_eq!(mig_store.get().system_persona, DEFAULT_PERSONA);
+    let mig_runner = BuiltinToolRunner::new(mig_store.clone(), None);
+    let mut mayura_manifest = ShellManager::new(vec![assets_root.join("shells")])
+        .load_shell("neo_default")
+        .unwrap();
+    mayura_manifest.shell_id = "mayura".to_string();
+    let mig_engine = AgentEngine::new(
+        mig_store,
+        mig_runner,
+        Arc::new(Mutex::new(mayura_manifest)),
+        None,
+    );
+    let prompt_preview = mig_engine.system_prompt_preview();
+    assert!(
+        prompt_preview.contains("黒うにゅう") && !prompt_preview.contains("\\s[1]("),
+        "SPEC-GHOST-01: legacy stock persona must yield to mayura persona cleanly: {prompt_preview}"
+    );
+
     // .nar ghost/master/descript.txt `name` propagates as `ghost.name`
     let nar_path = tmp.join("ghost_probe.nar");
     let mut png_bytes = std::io::Cursor::new(Vec::new());
@@ -1093,24 +1205,86 @@ fn spec_comp_04_headless_tts_speaker_discovery_and_profile_voice() {
     let _ = reqwest::blocking::get(format!("{base_url}/version"));
     let _ = server_handle.join();
 
-    // Per-shell custom voice cast isolation
+    // Per-shell custom voice cast isolation + tts_engine & kero archetype persistence
     let cfg_dir = fresh_temp_dir("nanikaai_spec_voice_profile");
     let store = ConfigStore::new(Some(cfg_dir.clone()));
+    store.update(ConfigPatch {
+        tts_engine: Some("voicevox".to_string()),
+        ..Default::default()
+    });
     store.set_shell_voice_speaker("neo_default", 0, Some(888_753_762));
     store.set_shell_voice_speaker("neo_default", 1, Some(1_878_365_376));
+    store.set_shell_kero_archetype("naru", Some("girl".to_string()));
     store.set_shell_voice_speaker("mayura", 0, Some(2));
     assert_eq!(
         store.get_shell_voice_speakers("neo_default"),
         (Some(888_753_762), Some(1_878_365_376))
     );
     assert_eq!(store.get_shell_voice_speakers("mayura"), (Some(2), None));
+    assert_eq!(
+        store.get_shell_voice_profile("naru"),
+        (None, None, Some("girl".to_string()))
+    );
 
     let reloaded = ConfigStore::new(Some(cfg_dir.clone()));
+    assert_eq!(reloaded.get().tts_engine, "voicevox");
     assert_eq!(
         reloaded.get_shell_voice_speakers("neo_default"),
         (Some(888_753_762), Some(1_878_365_376))
     );
+    assert_eq!(
+        reloaded.get_shell_voice_profile("naru"),
+        (None, None, Some("girl".to_string()))
+    );
     let _ = fs::remove_dir_all(&cfg_dir);
+
+    // Archetype inference & distinct voice casting across Boyish / FemalePartner / YouthMale
+    assert_eq!(
+        infer_kero_voice_archetype("neo_default", "さくら＆うにゅう", "うにゅう", None),
+        KeroVoiceArchetype::Boyish
+    );
+    assert_eq!(
+        infer_kero_voice_archetype("naru", "奈留", "ゆうか", None),
+        KeroVoiceArchetype::FemalePartner
+    );
+    assert_eq!(
+        infer_kero_voice_archetype("futaba", "双葉", "ただきちさん", None),
+        KeroVoiceArchetype::YouthMale
+    );
+    let cast_pool = vec![
+        TtsVoiceOption {
+            style_id: 1001,
+            speaker_name: "まお".to_string(),
+            style_name: "ノーマル".to_string(),
+            label: "まお (ノーマル)".to_string(),
+        },
+        TtsVoiceOption {
+            style_id: 1002,
+            speaker_name: "コハク".to_string(),
+            style_name: "ノーマル".to_string(),
+            label: "コハク (ノーマル)".to_string(),
+        },
+        TtsVoiceOption {
+            style_id: 1003,
+            speaker_name: "らせつん".to_string(),
+            style_name: "標準".to_string(),
+            label: "らせつん (標準)".to_string(),
+        },
+        TtsVoiceOption {
+            style_id: 1004,
+            speaker_name: "Lux".to_string(),
+            style_name: "ノーマル".to_string(),
+            label: "Lux (ノーマル)".to_string(),
+        },
+    ];
+    assert_eq!(
+        pick_speaker_pair_for_archetype(&cast_pool, KeroVoiceArchetype::Boyish),
+        (Some(1001), Some(1003), false)
+    );
+    assert_eq!(
+        pick_speaker_pair_for_archetype(&cast_pool, KeroVoiceArchetype::YouthMale),
+        (Some(1001), Some(1004), false)
+    );
 }
 
 #[test]
@@ -1171,6 +1345,23 @@ fn spec_l2d_01_02_external_sidecar_parts_and_path_safety() {
         0,
         sak_ovs.iter().map(|(ox, oy, bmp)| (*ox, *oy, false, bmp)),
         &sak_clip,
+    );
+
+    // Regression guard: sakura_hair_curl_r.png must stay transparent over the open-eye corner so closed eyes never clip
+    let curl_r_bmp =
+        load_ukagaka_rgba(&assets.join("live2d/neo_default/parts/sakura_hair_curl_r.png"), None)
+            .expect("sakura_hair_curl_r.png must load");
+    assert!(curl_r_bmp.width > 390 && curl_r_bmp.height > 300);
+    let mut max_eye_corner_alpha = 0u8;
+    for y in 260..=300 {
+        for x in 350..=390 {
+            let idx = ((y * curl_r_bmp.width + x) * 4) as usize;
+            max_eye_corner_alpha = max_eye_corner_alpha.max(curl_r_bmp.data[idx + 3]);
+        }
+    }
+    assert_eq!(
+        max_eye_corner_alpha, 0,
+        "sakura_hair_curl_r must leave eye corner [350..390, 260..300] transparent (got alpha={max_eye_corner_alpha})"
     );
     let star_clip_px = sak_rig
         .parts

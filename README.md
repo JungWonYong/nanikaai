@@ -1,4 +1,4 @@
-# 何か藍 — NanikaAi (`nanikaai` `v0.1.7`)
+# 何か藍 — NanikaAi (`nanikaai` `v0.1.8`)
 
 > 🌐 **Language**: **[日本語 (Default)](#日本語)** | **[English (Default)](#english)** | **[한국어 (Optional)](README.ko.md)**
 >
@@ -121,6 +121,7 @@ dist\NanikaAi-win64\nanikaai.exe
 | スクリプト発話 | `POST http://127.0.0.1:9821/api/speak` | `{"script": "\\0\\s[5]こんにちは！\\1\\s[10]よろしくな！\\e"}` |
 | スキン切替 | `POST http://127.0.0.1:9821/api/skin` | `{"shell": "neo_default", "balloon": "clean_default"}` |
 | AI プロバイダー切替 | `POST http://127.0.0.1:9821/api/provider` | `{"provider": "ollama", "model": "auto"}` |
+| 音声一覧取得 / 音声設定 | `GET /api/voices` ・ `POST /api/voice` | `{"tts_engine": "auto", "kero_voice_archetype": "boy"}` |
 | 一覧取得 | `GET http://127.0.0.1:9821/api/skins` / `/api/providers` | `curl -s http://127.0.0.1:9821/api/providers` |
 | クラシック `SSTP/1.4` | TCP `127.0.0.1:9801` | `SEND SSTP/1.4`（`Charset: UTF-8`, `Script: ...`） |
 
@@ -255,6 +256,7 @@ dist\NanikaAi-win64\nanikaai.exe
 | Speak Sakura Script | `POST http://127.0.0.1:9821/api/speak` | `{"script": "\\0\\s[5]Hello!\\1\\s[10]Nice to meet you!\\e"}` |
 | Switch skin | `POST http://127.0.0.1:9821/api/skin` | `{"shell": "neo_default", "balloon": "clean_default"}` |
 | Switch AI provider | `POST http://127.0.0.1:9821/api/provider` | `{"provider": "ollama", "model": "auto"}` |
+| Voices / Configure TTS | `GET /api/voices` & `POST /api/voice` | `{"tts_engine": "auto", "kero_voice_archetype": "boy"}` |
 | List skins / providers | `GET http://127.0.0.1:9821/api/skins` / `/api/providers` | `curl -s http://127.0.0.1:9821/api/providers` |
 | Classic TCP `SSTP/1.4` | `127.0.0.1:9801` | `SEND SSTP/1.4` (`Charset: UTF-8`, `Script: ...`) |
 

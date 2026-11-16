@@ -41,6 +41,12 @@ pub trait ServerBackend: Send + Sync + 'static {
     fn on_event(&self, event: &str, detail: &str) -> AgentReply;
     fn on_switch_skin(&self, shell: Option<String>, balloon: Option<String>) -> Result<Value, String>;
     fn on_switch_provider(&self, provider: String, model: Option<String>) -> Result<Value, String>;
+    fn get_voices(&self) -> Value {
+        json!({"voices": [], "error": "voice configuration not supported"})
+    }
+    fn on_configure_voice(&self, _req: VoiceConfigReq) -> Result<Value, String> {
+        Err("voice configuration not supported".to_string())
+    }
 }
 
 #[derive(Clone)]
@@ -76,6 +82,21 @@ struct SkinReq {
 struct ProviderReq {
     provider: Option<String>,
     model: Option<String>,
+}
+
+/// JSON payload for configuring TTS engine, speaker overrides, archetype, or AivisHub model install.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct VoiceConfigReq {
+    pub voice_tts: Option<bool>,
+    pub tts_engine: Option<String>,
+    pub sakura_speaker_id: Option<i64>,
+    #[serde(default)]
+    pub clear_sakura_speaker: bool,
+    pub kero_speaker_id: Option<i64>,
+    #[serde(default)]
+    pub clear_kero_speaker: bool,
+    pub kero_voice_archetype: Option<String>,
+    pub install_aivm_uuid: Option<String>,
 }
 
 async fn handle_health(State(st): State<AppState>) -> Json<Value> {
@@ -227,6 +248,46 @@ async fn handle_switch_provider(
     }
 }
 
+async fn handle_get_voices(State(st): State<AppState>) -> Json<Value> {
+    let b = st.backend.clone();
+    let mut obj = tokio::task::spawn_blocking(move || b.get_voices())
+        .await
+        .unwrap_or_else(|_| json!({}));
+    if let Some(map) = obj.as_object_mut() {
+        map.insert("ok".to_string(), json!(true));
+    }
+    Json(obj)
+}
+
+async fn handle_post_voice(
+    State(st): State<AppState>,
+    Json(req): Json<VoiceConfigReq>,
+) -> Response {
+    let b = st.backend.clone();
+    let res = tokio::task::spawn_blocking(move || b.on_configure_voice(req)).await;
+    match res {
+        Ok(Ok(mut val)) => {
+            if let Some(m) = val.as_object_mut() {
+                m.insert("ok".to_string(), json!(true));
+            }
+            (StatusCode::OK, Json(val)).into_response()
+        }
+        Ok(Err(e)) => {
+            let status = if e.contains("Invalid") || e.contains("不正") {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (status, Json(json!({"ok": false, "error": e}))).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"ok": false, "error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
 async fn handle_http_sstp(State(st): State<AppState>, body: String) -> Response {
     let (_, script) = parse_sstp_text(&body);
     if script.is_empty() {
@@ -325,11 +386,13 @@ pub fn start_dual_server(
                     .route("/api/health", get(handle_health))
                     .route("/api/skins", get(handle_skins))
                     .route("/api/providers", get(handle_providers))
+                    .route("/api/voices", get(handle_get_voices))
                     .route("/api/speak", post(handle_speak))
                     .route("/api/chat", post(handle_chat))
                     .route("/api/event", post(handle_event))
                     .route("/api/skin", post(handle_switch_skin))
                     .route("/api/provider", post(handle_switch_provider))
+                    .route("/api/voice", post(handle_post_voice))
                     .route("/sstp", post(handle_http_sstp))
                     .with_state(state);
 

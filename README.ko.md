@@ -1,4 +1,4 @@
-# 何か藍 — NanikaAi (`nanikaai` `v0.1.7`)
+# 何か藍 — NanikaAi (`nanikaai` `v0.1.8`)
 
 > 🌐 **Language**: **[日本語 (Default)](README.md#日本語)** | **[English (Default)](README.md#english)** | **한국어 (Optional)**
 >
@@ -117,6 +117,7 @@ dist\NanikaAi-win64\nanikaai.exe
 | 사쿠라 스크립트 발화 | `POST http://127.0.0.1:9821/api/speak` | `{"script": "\\0\\s[5]안녕!\\1\\s[10]반가워!\\e"}` |
 | 스킨 전환 | `POST http://127.0.0.1:9821/api/skin` | `{"shell": "neo_default", "balloon": "clean_default"}` |
 | AI 프로바이더 전환 | `POST http://127.0.0.1:9821/api/provider` | `{"provider": "ollama", "model": "auto"}` |
+| 음성 목록 / 엔진·화자 설정 | `GET /api/voices` · `POST /api/voice` | `{"tts_engine": "auto", "kero_voice_archetype": "boy"}` |
 | 스킨/프로바이더 목록 | `GET http://127.0.0.1:9821/api/skins` / `/api/providers` | `curl -s http://127.0.0.1:9821/api/providers` |
 | 클래식 TCP `SSTP/1.4` | `127.0.0.1:9801` | `SEND SSTP/1.4` (`Charset: UTF-8`, `Script: ...`) |
 
