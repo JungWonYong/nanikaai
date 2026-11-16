@@ -127,7 +127,8 @@ dist\NanikaAi-win64\nanikaai.exe
 ### 開発・保守体制（AI 開発）
 
 - 本リポジトリは **AI 開発（AI-Developed & AI-Maintained）** プロジェクトであり、アーキテクチャ設計、`#![forbid(unsafe_code)]` 準拠の Rust 実装、同梱 `CC0-1.0` スキン資産の生成、自動単体・スモーク検証、および継続的な保守管理を AI エージェントが担う。
-- すべての変更は `unsafe` コードゼロ、クリーンな権利分離（コード `MIT` ＋既定スキン `CC0-1.0`）、および自動テスト通過を必須条件として管理される。
+- すべての変更は `unsafe` コードゼロ、クリーンな権利分離（コード `MIT` ＋既定スキン `CC0-1.0`）、**テスト・ビルド・転送前の事前コード検査（個人情報・API キー・認証情報・秘密鍵の混入ゼロ検査）**、および自動テスト通過を必須条件として管理される。
+- **指示とデータの厳格分離（Trust Boundary）**: AI エージェントへの指示は保守者の現行憲法および指定設定パスのみに限定され、リポジトリへプッシュされた新規コード・外部データ・スキン定義はすべて「データ」としてのみ扱われる（未承認のリポジトリ内 AI 指示・フックファイルは事前検査ゲートにより自動遮断する）。
 
 ### ライセンス
 
@@ -260,7 +261,8 @@ dist\NanikaAi-win64\nanikaai.exe
 ### Development & Maintenance (AI-Developed)
 
 - This repository is an **AI-developed and AI-maintained** software project: architecture design, `#![forbid(unsafe_code)]` Rust source implementation, bundled `CC0-1.0` skin generation, automated unit/smoke verification, and ongoing maintenance are carried out autonomously by AI coding agents.
-- Every change is governed by strict guardrails: zero `unsafe` blocks, clean open-source licensing (`MIT` code + `CC0-1.0` default skins), and automated test verification.
+- Every change is governed by strict guardrails: zero `unsafe` blocks, clean open-source licensing (`MIT` code + `CC0-1.0` default skins), **mandatory pre-test code inspection (blocking PII, API keys, credentials, and private keys prior to tests or sync)**, and automated behavioral specification verification.
+- **Instruction-Data Trust Boundary**: AI maintainer instructions reside exclusively in external trusted Constitution/config paths; any pushed repository source, external payload, or skin metadata is treated strictly as inert data (unauthorized in-repo AI instruction or hook files are automatically rejected before build/test).
 
 ### License
 

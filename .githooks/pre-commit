@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(git rev-parse --show-toplevel)"
+cd "$ROOT_DIR"
+
+echo "[NanikaAi pre-commit] Running Phase 0 pre-test secret/PII & trust-boundary code inspection..."
+if command -v python3 >/dev/null 2>&1; then
+    python3 "$ROOT_DIR/scripts/verify_behavior.py" --pretest-only --quiet
+else
+    python "$ROOT_DIR/scripts/verify_behavior.py" --pretest-only --quiet
+fi

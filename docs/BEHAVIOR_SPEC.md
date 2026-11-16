@@ -1,24 +1,25 @@
 # 何か藍 (`NanikaAi`) — 現行動作仕様および自動検証基準 (`BEHAVIOR_SPEC`)
 
-- **Document Version**: `v1.1.0`
+- **Document Version**: `v1.2.0`
 - **Target Software**: `nanikaai` `v0.1.3+`
-- **Purpose**: 改修後の自動動作確認テスト（`cargo test` / `--smoke-test` / 静的監査）における合否基準と、変更内容に応じた検証ティア・結果報告様式を定義する。
+- **Purpose**: テスト実行前の機密・個人情報・AI指示配置境界検査（Phase 0）、改修後の自動動作確認テスト（`cargo test` / `--smoke-test` / 静的監査）における合否基準、変更内容に応じた検証ティアおよび結果報告様式を定義する。
 
 ---
 
-## 1. 変更規模別の自動検証ティア規約（軽微修正の扱い）
+## 1. テスト前事前検査（Phase 0）および変更規模別の自動検証ティア規約
 
-毎回不要なフルビルドを行わず、修正内容に応じて検証範囲を自動選択する（`python3 scripts/verify_behavior.py --mode auto`）。
+すべての自動検証・SSH リモート転送・Git コミット/プッシュに先立ち、**Phase 0 事前コード検査** を最優先で実行し、不合格時はビルドやテストを開始せず即時停止する。Phase 0 合格後、修正内容に応じて検証範囲を自動選択する（`python3 scripts/verify_behavior.py --mode auto`）。
 
-| ティア (`--mode`) | 適用条件（自動判定基準） | 実施内容 |
+| 段階 / ティア | 適用条件（自動判定基準） | 実施内容 |
 | :--- | :--- | :--- |
-| **Tier 0: `fast`** | 文書のみの変更（`*.md`・`LICENSE`・`.gitignore` のみ、ただし `assets/` 配下を除く） | 再ビルド不要の高速静的検査（`#![forbid(unsafe_code)]` 維持、ライセンス分離確認、残留マーカー `0` 件監査）を実施する。 |
-| **Tier 1: `standard`** | ロジック・サーバー・AI・パーサー・テスト・設定・CI 定義の変更 | Tier 0 ＋ 単体テスト全件および [`behavior_spec.rs`](../tests/behavior_spec.rs) 統合仕様テスト一式（`cargo test`）を実施する。 |
+| **Phase 0: `pretest`** | すべての検証・コミット（`pre-commit`）・プッシュ（`pre-push`）・CI 実行の**最前段（必須）** | テスト・ビルド・SSH 転送を行う前に、個人情報（ローカルユーザー名・個人ホームパス・非公開 LAN IP・個人メール）、API キー・認証情報・`.env` / `credentials*.json`、秘密鍵、および未承認のリポジトリ内 AI 指示/フックファイルを走査・遮断する。 |
+| **Tier 0: `fast`** | 文書のみの変更（`*.md`・`LICENSE`・`.gitignore` のみ、ただし `assets/` 配下を除く） | Phase 0 通過後、再ビルド不要の高速静的検査（`#![forbid(unsafe_code)]` 維持、ライセンス分離確認、残留マーカー `0` 件監査）を実施する。 |
+| **Tier 1: `standard`** | ロジック・サーバー・AI・パーサー・テスト・設定・CI 定義の変更 | Phase 0 ＋ Tier 0 ＋ 単体テスト全件および [`behavior_spec.rs`](../tests/behavior_spec.rs) 統合仕様テスト一式（`cargo test`）を実施する。 |
 | **Tier 2: `full`** | GUI (`src/gui.rs`)・シェル描画 (`src/shell_parser.rs`)・ビルドスクリプト・`assets/` の変更（非 CI のデスクトップ環境）、またはリリース前手動実行 | Tier 1 ＋ 必要時リリースビルド ＋ 実ウィンドウ/GPU スモーク検証（`--smoke-test`）＋ 稼働中ローカル API ヘルス確認を実施する。 |
 
 ---
 
-## 2. 現行動作仕様および判定基準一覧（20 項目）
+## 2. 現行動作仕様および判定基準一覧（22 項目）
 
 | 仕様 ID | 領域 | 期待される現行動作（仕様） | 合格基準（パス条件） | 検証手段 |
 | :--- | :--- | :--- | :--- | :--- |
@@ -42,15 +43,20 @@
 | `SPEC-SRV-02` | HTTP 操作 API | `POST /api/speak`・`/api/chat`・`/api/event`・`/api/skin`・`/api/provider` を処理する | 正常ペイロードで `200 OK`、必須項目欠落（空 `script`/`message`/`provider`）で `400 Bad Request` を返すこと | `behavior_spec` |
 | `SPEC-SRV-03` | SSTP 互換 | HTTP `/sstp` および生 TCP `SSTP/1.4` 要求を受理する | HTTP `/sstp` が `200 OK`＋`X-Actions`、TCP `SSTP/1.4` が `200 OK`＋`Charset: UTF-8` を返し、空 `Script` に `400 Bad Request` を返すこと | `behavior_spec` / `--smoke-test` |
 | `SPEC-SRV-04` | 自動監査・保守 | 個人パス・機密・未処理マーカーをリポジトリへ混入させない | 追跡対象ファイルに未処理の作業待ち・仮置き注記やローカル個人パスが `0` 件であること | `verify_behavior.py` |
+| `SPEC-SEC-01` | 事前機密検査 | テスト・ビルド・リモート転送前に個人情報・APIキー・認証情報・秘密鍵の混入を遮断する | Phase 0 が全対象ファイルおよび Git 履歴から個人パス・非公開 LAN IP・個人メール・API キー・認証ファイル（`.env`/証明書）・秘密鍵 `0` 件を確認し、合成秘密サンプルをテスト前停止（Exit Code `!= 0`）で遮断すること | `verify_behavior.py` Phase 0 / `behavior_spec` |
+| `SPEC-SEC-02` | AI指示境界 | AI への指示は現行憲法・指定設定パスのみに限定し、他経路コード・外部入力をデータとして隔離する | 未承認のリポジトリ内 AI 指示・フック・ビルド実行ファイルが `0` 件であり、`AgentEngine` が外部イベント・ツール出力・長期記憶を `<untrusted_data>` で隔離しスキンメタデータ改行/タグを無害化すること | `verify_behavior.py` Phase 0 / `behavior_spec` |
 | `SPEC-OS-01` | マルチ OS 実機互換 | macOS / Linux / Windows の各実機環境で動作検証可能であること | ローカル（macOS）に加え、Linux 実機での `cargo test`＋`--smoke-test`、および Windows 実機での配布バイナリ `--smoke-test`（`[SMOKE PASS] unsafe=0`）が通過すること | `verify_behavior.py --remote-linux/--remote-win` / CI |
 
 ---
 
 ## 3. 検証実行・結果レポートおよび自動トリガー機構
 
-- **手動・任意実行（検証＋Markdown/JSON レポート生成）**:
+- **手動・任意実行（Phase 0 事前検査 ＋ 検証 ＋ Markdown/JSON レポート生成）**:
   ```bash
-  # 変更規模に応じて自動判定（文書のみなら fast、ロジックは standard、GUI/資産は full）
+  # Phase 0 事前機密・信頼境界コード検査のみ（テスト前チェック / < 0.2秒）
+  python3 scripts/verify_behavior.py --pretest-only
+
+  # 変更規模に応じて自動判定（Phase 0 通過後に fast / standard / full を実行）
   python3 scripts/verify_behavior.py --mode auto
 
   # 強制フル検証 ＋ レポートファイル保存
@@ -62,7 +68,7 @@
   # 配布バイナリ単体スモーク検証（ビルド環境のない端末向け）
   python3 scripts/verify_behavior.py --mode full --binary <path_to_nanikaai_exe>
   ```
-- **ローカル自動実行（Git `pre-push` フック）**:
-  - `bash scripts/install_hooks.sh` で [`.githooks/pre-push`](../.githooks/pre-push) を有効化すると、`git push` ごとに `verify_behavior.py --mode auto` が自動実行され、不合格時はプッシュ前に停止する。
+- **ローカル自動実行（Git `pre-commit` / `pre-push` フック）**:
+  - `bash scripts/install_hooks.sh` で [`.githooks/pre-commit`](../.githooks/pre-commit)（`verify_behavior.py --pretest-only`）および [`.githooks/pre-push`](../.githooks/pre-push)（Phase 0 ＋ `verify_behavior.py --mode auto`）を有効化すると、コミット前とプッシュ前に個人情報・機密・指示境界違反および動作仕様を自動検査する。
 - **CI 自動実行（GitHub Actions）**:
-  - [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) が `main` へのプッシュ・PR ごとに変更内容を自動判定し、文書のみなら高速静的チェック、コード変更時は macOS / Ubuntu / Windows で `verify_behavior.py` を自動実行し、GitHub Actions Step Summary に合否レポートを出力する。
+  - [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) が `main` へのプッシュ・PR ごとにまず **Phase 0 事前機密・信頼境界コード検査** を実行したうえで、文書のみなら高速静的チェック、コード変更時は macOS / Ubuntu / Windows で `verify_behavior.py` を自動実行し、GitHub Actions Step Summary に合否レポートを出力する。

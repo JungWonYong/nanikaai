@@ -29,6 +29,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Pre-test security, PII/secret & trust-boundary inspection (Phase 0)
+        shell: bash
+        run: |
+          python scripts/verify_behavior.py --pretest-only
+
       - name: Determine verification tier
         id: tier
         shell: bash

@@ -111,6 +111,211 @@ def select_auto_mode(changed_files: list[str]) -> tuple[str, str]:
     return "standard", f"ロジック/テスト/CI 変更検出 ({len(changed_files)}件) -> Tier 1 (standard) を自動選択"
 
 
+def _collect_scan_files(scan_root: Path) -> list[Path]:
+    git_dir = scan_root / ".git"
+    if git_dir.exists():
+        rc, ls_out = _run(
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+            cwd=scan_root,
+        )
+        if rc == 0:
+            files: list[Path] = []
+            for raw_rel in ls_out.split("\x00"):
+                if not raw_rel:
+                    continue
+                p = scan_root / raw_rel
+                if p.is_file():
+                    files.append(p)
+            return sorted(set(files))
+
+    skip_dirs = {".git", "target", "dist", "__pycache__", "artifacts", ".smoke-userdata"}
+    collected: list[Path] = []
+    for p in scan_root.rglob("*"):
+        if not p.is_file():
+            continue
+        rel_parts = p.relative_to(scan_root).parts
+        if any(part in skip_dirs or part.startswith(".smoke-userdata") for part in rel_parts):
+            continue
+        collected.append(p)
+    return sorted(collected)
+
+
+def check_phase0_pretest_security(scan_root: Path) -> list[dict[str, Any]]:
+    """Phase 0 pre-test gate: must pass BEFORE cargo test, --smoke-test, or SSH sync."""
+    files = _collect_scan_files(scan_root)
+
+    # --- SPEC-SEC-01: PII / API keys / credentials / private keys zero-tolerance ---
+    sec01_hits: list[str] = []
+    forbidden_exact_names = {
+        ".env",
+        "credentials.json",
+        "client_secret.json",
+        "service_account.json",
+        ".npmrc",
+        ".pypirc",
+        ".netrc",
+    }
+    forbidden_exts = {".pem", ".key", ".p12", ".pfx", ".keystore", ".jks", ".kdbx"}
+    forbidden_name_res = [
+        re.compile(r"^\.env\..+", re.I),
+        re.compile(r"^credentials.*\.json$", re.I),
+        re.compile(r"^client_secret.*\.json$", re.I),
+        re.compile(r"^service[_-]account.*\.json$", re.I),
+        re.compile(r"^token.*\.json$", re.I),
+        re.compile(r"^id_(?:rsa|ed25519|ecdsa|dsa)(?:\.pub)?$", re.I),
+    ]
+
+    priv_key_re = re.compile("-----BEGIN " + r"(?:[A-Z0-9 ]* )?PRIVATE KEY-----")
+    api_secret_res = [
+        ("google_api_key", re.compile("AI" + r"za[0-9A-Za-z_-]{35}")),
+        ("anthropic_key", re.compile("sk-" + r"ant-[0-9A-Za-z_-]{20,}")),
+        ("openai_proj_key", re.compile("sk-" + r"proj-[0-9A-Za-z_-]{20,}")),
+        ("sk_secret_key", re.compile(r"\bsk" + r"-[0-9A-Za-z]{20,}\b")),
+        ("github_token", re.compile(r"\bgh" + r"[pousr]_[0-9A-Za-z]{30,}\b")),
+        ("github_pat", re.compile("github_" + r"pat_[0-9A-Za-z_]{20,}")),
+        ("aws_access_key", re.compile("AK" + r"IA[0-9A-Z]{16}")),
+        ("slack_token", re.compile(r"\bxox" + r"[baprs]-[0-9A-Za-z-]{10,}\b")),
+        ("google_oauth", re.compile("ya" + r"29\.[0-9A-Za-z_-]{20,}")),
+        ("discord_webhook", re.compile("https://(?:ptb\\.|canary\\.)?discord" + r"\.com/api/webhooks/\d+/[A-Za-z0-9_-]+")),
+        ("slack_webhook", re.compile("https://hooks\\.slack" + r"\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]+")),
+        ("bearer_token", re.compile(r"Authorization:\s*Bearer\s+[A-Za-z0-9._-]{20,}", re.I)),
+        ("hardcoded_secret_assign", re.compile(r"""(?:api_key|client_secret|access_token|secret_key|password)\s*[:=]\s*["'][A-Za-z0-9_./+=-]{16,}["']""", re.I)),
+    ]
+
+    home_name = Path.home().name
+    local_home_re = (
+        re.compile(r"(?:" + "/" + "Users/|" + "/" + r"home/|\\{1,2}Users\\{1,2})" + re.escape(home_name) + r"(?:[/\\]|$)", re.I)
+        if home_name
+        else None
+    )
+    generic_home_re = re.compile(r"(?:" + "/" + "Users/|" + "/" + r"home/|C:\\{1,2}Users\\{1,2})([A-Za-z0-9._-]{2,})(?:[/\\]|$)")
+    allowed_home_placeholders = {"user", "username", "yourname", "you", "alice", "bob", "example", "runner", "nanikaai"}
+    lan_ip_re = re.compile("192" + r"\." + "168" + r"\.\d+\.\d+")
+    email_re = re.compile(r"(?<![A-Za-z0-9._%+-])([A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.([A-Za-z]{2,}))\b")
+    non_email_tlds = {"png", "jpg", "jpeg", "webp", "gif", "svg", "ico", "icns", "pna", "rs", "py", "md", "toml", "txt"}
+
+    # --- SPEC-SEC-02: AI Instruction-Data Trust Boundary & Rogue Config Guard ---
+    sec02_hits: list[str] = []
+    rogue_ai_basenames = {
+        "agents.md",
+        "claude.md",
+        "gemini.md",
+        "copilot.md",
+        "system_prompt.md",
+        ".cursorrules",
+        ".windsurfrules",
+        ".clinerules",
+        ".continuerules",
+        "build.rs",
+    }
+    rogue_dir_prefixes = (
+        ".claude/",
+        ".gemini/",
+        ".cursor/",
+        ".windsurf/",
+        ".cline/",
+        ".agents/",
+        ".github/instructions/",
+        ".github/prompts/",
+    )
+    allowed_githooks = {".githooks/pre-commit", ".githooks/pre-push"}
+    prompt_inj_res = [
+        re.compile("ignore\\s+(?:all\\s+)?previous\\s+instructions", re.I),
+        re.compile("disregard\\s+(?:all\\s+)?(?:system|previous)\\s+(?:prompt|instructions)", re.I),
+        re.compile("<\\|im_" + "start\\|>system", re.I),
+    ]
+
+    binary_exts = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".icns", ".ico", ".zip", ".nar", ".exe", ".dll", ".so", ".dylib"}
+
+    for fp in files:
+        rel_posix = fp.relative_to(scan_root).as_posix()
+        name_low = fp.name.lower()
+
+        # Check forbidden credential/key filenames
+        is_forbidden_file = (
+            name_low in forbidden_exact_names
+            or fp.suffix.lower() in forbidden_exts
+            or any(pat.match(fp.name) for pat in forbidden_name_res)
+        )
+        if is_forbidden_file:
+            sec01_hits.append(f"{rel_posix} (forbidden credential/key file)")
+
+        # Check unauthorized in-repo AI instruction / hook / build script paths
+        if (
+            name_low in rogue_ai_basenames
+            or rel_posix.lower() == ".github/copilot-instructions.md"
+            or any(rel_posix.lower().startswith(pref) for pref in rogue_dir_prefixes)
+            or (rel_posix.startswith(".githooks/") and rel_posix not in allowed_githooks)
+        ):
+            sec02_hits.append(f"{rel_posix} (unapproved in-repo AI instruction/hook/build file)")
+
+        if fp.suffix.lower() in binary_exts:
+            continue
+
+        text = fp.read_text(encoding="utf-8", errors="replace")
+        if priv_key_re.search(text):
+            sec01_hits.append(f"{rel_posix} (private key header)")
+        for label, pat in api_secret_res:
+            if pat.search(text):
+                sec01_hits.append(f"{rel_posix} ({label})")
+        if (local_home_re and local_home_re.search(text)) or lan_ip_re.search(text):
+            sec01_hits.append(f"{rel_posix} (local user path or LAN IP)")
+        else:
+            for hm in generic_home_re.finditer(text):
+                if hm.group(1).lower() not in allowed_home_placeholders:
+                    sec01_hits.append(f"{rel_posix} (OS home path: {hm.group(1)})")
+                    break
+        for em in email_re.finditer(text):
+            full_addr = em.group(1).lower()
+            tld = em.group(2).lower()
+            if tld in non_email_tlds or full_addr.startswith("2x@"):
+                continue
+            if not (
+                full_addr.endswith("@users.noreply.github.com")
+                or full_addr.endswith("@example.com")
+                or full_addr.endswith("@example.org")
+                or full_addr.endswith("@example.net")
+            ):
+                sec01_hits.append(f"{rel_posix} (email: {full_addr})")
+                break
+
+        for pinj in prompt_inj_res:
+            if pinj.search(text):
+                sec02_hits.append(f"{rel_posix} (prompt-injection directive pattern)")
+                break
+
+    if (scan_root / ".git").exists():
+        log_rc, log_out = _run(["git", "log", "--format=%H %ae"], cwd=scan_root)
+        if log_rc == 0:
+            for line in log_out.splitlines():
+                parts = line.strip().split(None, 1)
+                if len(parts) != 2:
+                    continue
+                sha, email = parts[0][:8], parts[1].strip().lower()
+                if not (
+                    email.endswith("@users.noreply.github.com")
+                    or email.endswith("@example.com")
+                    or email.endswith("@example.org")
+                ):
+                    sec01_hits.append(f"commit {sha} ({email})")
+                    break
+
+    return [
+        {
+            "spec": "SPEC-SEC-01",
+            "name": "Phase 0 事前機密・個人情報・秘密鍵コード検査",
+            "status": "PASS" if not sec01_hits else "FAIL",
+            "detail": f"走査 {len(files)}ファイル / 個人情報・APIキー・認証情報・秘密鍵=0" if not sec01_hits else f"遮断: {', '.join(sec01_hits[:5])}",
+        },
+        {
+            "spec": "SPEC-SEC-02",
+            "name": "Phase 0 AI指示配置境界・データ扱い分離検査",
+            "status": "PASS" if not sec02_hits else "FAIL",
+            "detail": f"走査 {len(files)}ファイル / 未承認AI指示・フック・注入文言=0" if not sec02_hits else f"遮断: {', '.join(sec02_hits[:5])}",
+        },
+    ]
+
+
 def check_tier0_static() -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
 
@@ -237,6 +442,8 @@ def check_tier1_cargo_tests() -> tuple[list[dict[str, Any]], str]:
         ("SPEC-DLG-01/02/03", "spec_dlg_01_02_03_sakura_script_and_tag_sanitization", "Sakura Script・タグ浄化・履歴保護"),
         ("SPEC-AI-01/02/03", "spec_ai_01_02_03_model_guard_ollama_prefs_and_config_persistence", "制限LLM拒否・Ollama候補・設定保存"),
         ("SPEC-SRV-01/02/03", "spec_srv_01_02_03_dual_http_and_sstp_tcp_contract", "HTTP API 全9系統・TCP SSTP/1.4"),
+        ("SPEC-SEC-01", "spec_sec_01_pretest_scanner_blocks_secrets_pii_and_private_keys", "テスト前機密・個人情報遮断"),
+        ("SPEC-SEC-02", "spec_sec_02_instruction_data_trust_boundary_and_rogue_config_block", "AI指示境界・データ隔離防御"),
     ]
     for spec_id, test_fn, label in expected_groups:
         ok = spec_cases.get(test_fn, False)
@@ -590,47 +797,79 @@ def main() -> int:
         default=os.environ.get("NANIKAAI_TEST_WIN_HOST", ""),
         help="Optional SSH target for real Windows hardware verification",
     )
+    parser.add_argument(
+        "--pretest-only",
+        action="store_true",
+        help="Run Phase 0 pre-test secret/PII/trust-boundary inspection only (no Rust build or tests)",
+    )
+    parser.add_argument(
+        "--scan-root",
+        help="Optional root directory for Phase 0 inspection (defaults to repository root)",
+    )
     parser.add_argument("--report-md", help="Optional path to write Markdown report")
     parser.add_argument("--report-json", help="Optional path to write JSON report")
     parser.add_argument("--quiet", action="store_true", help="Suppress stdout Markdown summary")
     args = parser.parse_args()
 
     started = time.time()
-    changed_files = detect_changed_files()
-    if args.mode == "auto":
+    scan_root = Path(args.scan_root).resolve() if args.scan_root else ROOT_DIR
+    changed_files = detect_changed_files() if scan_root == ROOT_DIR else []
+    if args.pretest_only:
+        effective_mode = "pretest"
+        reason = "Phase 0 事前コード検査（`--pretest-only`）を実行"
+    elif args.mode == "auto":
         effective_mode, reason = select_auto_mode(changed_files)
     else:
         effective_mode = args.mode
         reason = f"明示指定 `--mode {args.mode}` により実行"
 
-    checks: list[dict[str, Any]] = []
-    checks.extend(check_tier0_static())
+    # Phase 0 MUST run before any cargo test, --smoke-test, or remote SSH tarball transfer.
+    phase0_checks = check_phase0_pretest_security(scan_root)
+    checks: list[dict[str, Any]] = list(phase0_checks)
+    phase0_failed = any(c["status"] == "FAIL" for c in phase0_checks)
 
-    if effective_mode in ("standard", "full") and not args.binary:
-        t1_checks, _ = check_tier1_cargo_tests()
-        checks.extend(t1_checks)
-    else:
+    if phase0_failed:
+        checks.append({
+            "spec": "PRETEST-ABORT",
+            "name": "Phase 0 事前コード検査不合格によるテスト/転送遮断",
+            "status": "SKIP",
+            "detail": "Phase 0（機密/個人情報またはAI指示境界違反）を検出したため、cargo test・--smoke-test・リモート転送を実行せず即時停止しました",
+        })
+    elif args.pretest_only:
         checks.append({
             "spec": "CARGO-TEST",
             "name": "単体テスト＋仕様統合テスト実行 (`cargo test`)",
             "status": "SKIP",
-            "detail": "--binary 指定または fast モードのため省略" if args.binary else "fast モード（文書のみ変更）のため省略",
+            "detail": "--pretest-only 指定のため事前コード検査のみ完了",
         })
-
-    if effective_mode == "full":
-        checks.extend(check_tier2_full(custom_binary=args.binary))
     else:
-        checks.append({
-            "spec": "SPEC-UI-01",
-            "name": "実ウィンドウ / GPU スモーク検証 (`--smoke-test`)",
-            "status": "SKIP",
-            "detail": f"{effective_mode} モードのため省略",
-        })
+        checks.extend(check_tier0_static())
 
-    if args.remote_linux:
-        checks.append(check_remote_linux(args.remote_linux))
-    if args.remote_win:
-        checks.append(check_remote_win(args.remote_win))
+        if effective_mode in ("standard", "full") and not args.binary:
+            t1_checks, _ = check_tier1_cargo_tests()
+            checks.extend(t1_checks)
+        else:
+            checks.append({
+                "spec": "CARGO-TEST",
+                "name": "単体テスト＋仕様統合テスト実行 (`cargo test`)",
+                "status": "SKIP",
+                "detail": "--binary 指定または fast モードのため省略" if args.binary else "fast モード（文書のみ変更）のため省略",
+            })
+
+        if effective_mode == "full":
+            checks.extend(check_tier2_full(custom_binary=args.binary))
+        else:
+            checks.append({
+                "spec": "SPEC-UI-01",
+                "name": "実ウィンドウ / GPU スモーク検証 (`--smoke-test`)",
+                "status": "SKIP",
+                "detail": f"{effective_mode} モードのため省略",
+            })
+
+        if args.remote_linux:
+            checks.append(check_remote_linux(args.remote_linux))
+        if args.remote_win:
+            checks.append(check_remote_win(args.remote_win))
 
     counts = {
         "PASS": sum(1 for c in checks if c["status"] == "PASS"),
