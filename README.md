@@ -95,10 +95,14 @@ open "dist/NanikaAi.app"
 bash scripts/build_linux.sh
 ./dist/nanikaai-linux/nanikaai
 
-# 単体テストおよびスモーク検証
+# 単体・仕様テストおよびスモーク検証・結果レポート
 cargo test
-cargo run --release -- --smoke-test
+python3 scripts/verify_behavior.py --mode auto   # 変更規模別に自動判定してレポート出力
+python3 scripts/verify_behavior.py --mode full   # GPU スモーク含む完全検証＋レポート
+bash scripts/install_hooks.sh                    # git push 前の自動動作チェックを有効化
 ```
+
+- 動作仕様と合否基準: [docs/BEHAVIOR_SPEC.md](docs/BEHAVIOR_SPEC.md)（軽量・文書のみの変更時は `fast` モードで再ビルドを省略するティア設計）
 
 ```bat
 REM Windows
@@ -224,10 +228,14 @@ open "dist/NanikaAi.app"
 bash scripts/build_linux.sh
 ./dist/nanikaai-linux/nanikaai
 
-# Unit tests & smoke verification
+# Unit / Spec tests & automated verification report
 cargo test
-cargo run --release -- --smoke-test
+python3 scripts/verify_behavior.py --mode auto   # Auto-selects tier & prints report
+python3 scripts/verify_behavior.py --mode full   # Full cargo test + GPU smoke report
+bash scripts/install_hooks.sh                    # Enable automatic pre-push checks
 ```
+
+- Specification & pass criteria: [docs/BEHAVIOR_SPEC.md](docs/BEHAVIOR_SPEC.md) (trivial doc-only edits automatically run the fast static tier without recompiling Rust)
 
 ```bat
 REM Windows

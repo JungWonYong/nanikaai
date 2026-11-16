@@ -91,10 +91,14 @@ open "dist/NanikaAi.app"
 bash scripts/build_linux.sh
 ./dist/nanikaai-linux/nanikaai
 
-# 단위 테스트 및 스모크 검증
+# 단위/동작 사양 테스트 및 자동 검증·결과 리포트
 cargo test
-cargo run --release -- --smoke-test
+python3 scripts/verify_behavior.py --mode auto   # 변경 범위에 따라 티어 자동 선택 및 리포트
+python3 scripts/verify_behavior.py --mode full   # 전체 테스트 + GPU 스모크 검증 및 리포트
+bash scripts/install_hooks.sh                    # git push 전 자동 점검 훅 활성화
 ```
+
+- 동작 사양 및 판정 기준: [docs/BEHAVIOR_SPEC.md](docs/BEHAVIOR_SPEC.md) (단순 문서 수정 시에는 `fast` 모드로 불필요한 재빌드 생략)
 
 ```bat
 REM Windows
