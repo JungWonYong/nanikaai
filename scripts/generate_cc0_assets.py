@@ -575,13 +575,17 @@ def _build_neo_shell_from_raw(raw_dir: Path) -> None:
         "charset,UTF-8\n"
         "type,shell\n"
         "name,Neo Sakura & Unyu (CC0 Default)\n"
-        "sakura.name,사쿠라\n"
-        "kero.name,우뉴\n"
+        "sakura.name,さくら · Sakura\n"
+        "kero.name,うにゅう · Unyu\n"
         "display.scale,2\n"
         "sakura.balloon.offsetx,38\n"
         "sakura.balloon.offsety,68\n"
         "kero.balloon.offsetx,20\n"
-        "kero.balloon.offsety,28\n",
+        "kero.balloon.offsety,28\n"
+        "sakura.bindgroup50.name,アクセ,スター髪飾り · Star Hair Clip\n"
+        "sakura.bindgroup50.default,0\n"
+        "kero.bindgroup51.name,アクセ,ミニクラウン · Mini Crown\n"
+        "kero.bindgroup51.default,0\n",
         encoding="utf-8",
     )
     (SHELL_DIR / "surfaces.txt").write_text(
@@ -630,9 +634,87 @@ def _build_neo_shell_from_raw(raw_dir: Path) -> None:
         "animation1.interval,talk\n"
         "animation1.pattern0,overlay,113,115,0,0\n"
         "animation1.pattern1,overlay,-1,115,0,0\n"
+        "}\n\n"
+        "surface0,1,2,3,4,5,6,7,8\n{\n"
+        "animation50.interval,bind\n"
+        "animation50.pattern0,overlay,200,0,0,0\n"
+        "}\n\n"
+        "surface10,11,12\n{\n"
+        "animation51.interval,bind\n"
+        "animation51.pattern0,overlay,210,0,0,0\n"
         "}\n",
         encoding="utf-8",
     )
+
+
+def _graft_sakura_shoes(shoes_raw_path: Path, base_raw_path: Path | None = None) -> None:
+    """Pixel-lock graft cute frilly socks & feminine Mary Jane dress shoes onto surface0..8."""
+    s0_path = SHELL_DIR / "surface0.png"
+    s0_cur = Image.open(s0_path).convert("RGBA")
+    shoes_raw = Image.open(shoes_raw_path).convert("RGB")
+    shoes_rgba = _extract_chroma_rgba(shoes_raw)
+    if base_raw_path is not None and base_raw_path.exists():
+        base_rgba = _extract_chroma_rgba(Image.open(base_raw_path).convert("RGB"))
+        bbox = base_rgba.getbbox()
+    else:
+        bbox = shoes_rgba.getbbox()
+    if bbox is None:
+        raise RuntimeError("Empty alpha on shoes raw asset")
+
+    shoes_canvas, _, _ = _frame_to_canvas(
+        shoes_rgba, bbox, SAKURA_CANVAS, target_h=SAKURA_TARGET_H, bottom_pad=SAKURA_BOTTOM_PAD
+    )
+
+    # Align fine (dx, dy) against current surface0 knee region (y=915..985)
+    kbox = (240, 915, 415, 985)
+    ref_crop = s0_cur.convert("RGB").crop(kbox)
+    shoes_rgb_c = shoes_canvas.convert("RGB")
+    best_dx, best_dy = 0, 0
+    best_err = 1 << 60
+    for dx in range(-4, 5):
+        for dy in range(-4, 5):
+            cand = shoes_rgb_c.crop((kbox[0] + dx, kbox[1] + dy, kbox[2] + dx, kbox[3] + dy))
+            err = sum(ImageChops.difference(ref_crop, cand).tobytes())
+            if err < best_err:
+                best_err = err
+                best_dx, best_dy = dx, dy
+    if best_dx != 0 or best_dy != 0:
+        shoes_canvas = shoes_canvas.transform(
+            SAKURA_CANVAS,
+            Image.Transform.AFFINE,
+            (1, 0, best_dx, 0, 1, best_dy),
+            Image.Resampling.BILINEAR,
+        )
+
+    matched_upper_rgb = _match_skin_patch(
+        shoes_canvas.convert("RGB"), s0_cur.convert("RGB"), (246, 920, 410, 986)
+    )
+    shoes_rgb_final = shoes_canvas.convert("RGB")
+    shoes_rgb_final.paste(matched_upper_rgb.crop((0, 0, SAKURA_CANVAS[0], 1030)), (0, 0))
+    shoes_matched = Image.merge("RGBA", (*shoes_rgb_final.split(), shoes_canvas.getchannel("A")))
+
+    # Smooth transition mask over bare knees y=972..992; full replacement y>=992
+    cw, ch = SAKURA_CANVAS
+    mask = Image.new("L", SAKURA_CANVAS, 0)
+    md = ImageDraw.Draw(mask)
+    y_start, y_full = 972, 992
+    for y in range(y_start, y_full):
+        v = int(round(255.0 * (y - y_start) / float(y_full - y_start)))
+        md.line([(0, y), (cw - 1, y)], fill=v)
+    md.rectangle([0, y_full, cw - 1, ch - 1], fill=255)
+
+    for idx in range(9):
+        spath = SHELL_DIR / f"surface{idx}.png"
+        if not spath.exists():
+            continue
+        cur = Image.open(spath).convert("RGBA")
+        out_r = Image.composite(shoes_matched.getchannel("R"), cur.getchannel("R"), mask)
+        out_g = Image.composite(shoes_matched.getchannel("G"), cur.getchannel("G"), mask)
+        out_b = Image.composite(shoes_matched.getchannel("B"), cur.getchannel("B"), mask)
+        out_a = Image.composite(shoes_matched.getchannel("A"), cur.getchannel("A"), mask)
+        merged = Image.merge("RGBA", (out_r, out_g, out_b, out_a))
+        merged.save(spath)
+    print(f"Grafted new socks/shoes onto surface0..8 with offset ({best_dx}, {best_dy})")
 
 
 def _draw_frosted_balloon(
@@ -830,11 +912,26 @@ def main(argv: Iterable[str] | None = None) -> None:
         default=None,
         help="Optional directory containing raw chroma-keyed Sakura & Unyu base/expression renders.",
     )
+    parser.add_argument(
+        "--shoes-raw",
+        type=Path,
+        default=None,
+        help="Optional chroma-keyed image to graft new cute socks & feminine dress shoes onto surface0..8.",
+    )
+    parser.add_argument(
+        "--base-raw",
+        type=Path,
+        default=None,
+        help="Optional base raw reference image for exact bounding-box alignment with --shoes-raw.",
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     if args.raw_dir is not None:
         _build_neo_shell_from_raw(args.raw_dir)
-    _generate_balloons()
+    if args.shoes_raw is not None:
+        _graft_sakura_shoes(args.shoes_raw, args.base_raw)
+    if args.raw_dir is not None or args.shoes_raw is None:
+        _generate_balloons()
     _generate_app_icon()
     print(f"Generated CC0 assets cleanly in {SHELL_DIR} and {BALLOON_DIR}")
 

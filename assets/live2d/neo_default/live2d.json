@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "name": "neo_default Multi-Layer Live2D Rig (CC0-1.0)",
+  "name": "neo_default Multi-Layer Anatomical Live2D Rig (CC0-1.0)",
   "sakura": {
     "canvas_size": [
       660,
@@ -8,13 +8,69 @@
     ],
     "parts": [
       {
-        "id": "legs_boots",
-        "parent": null,
-        "texture": "parts/sakura_legs_boots.png",
-        "z": 10,
+        "id": "hair_back_l",
+        "parent": "head_base",
+        "texture": "parts/sakura_hair_back_l.png",
+        "z": 14,
         "pivot_px": [
-          335.0,
-          1295.0
+          286.0,
+          252.0
+        ],
+        "role": "hair_back",
+        "parallax": [
+          -0.35,
+          -0.15
+        ],
+        "rot_deg": 2.4,
+        "bend_px": 5.5,
+        "breath_px": [
+          0.0,
+          0.6
+        ],
+        "scale_breath": [
+          0.0,
+          0.0
+        ],
+        "spring_omega": 8.4,
+        "spring_zeta": 0.4,
+        "phase_offset": 0.2
+      },
+      {
+        "id": "hair_back_r",
+        "parent": "head_base",
+        "texture": "parts/sakura_hair_back_r.png",
+        "z": 16,
+        "pivot_px": [
+          374.0,
+          252.0
+        ],
+        "role": "hair_back",
+        "parallax": [
+          -0.35,
+          -0.15
+        ],
+        "rot_deg": 2.6,
+        "bend_px": 5.5,
+        "breath_px": [
+          0.0,
+          0.6
+        ],
+        "scale_breath": [
+          0.0,
+          0.0
+        ],
+        "spring_omega": 8.8,
+        "spring_zeta": 0.4,
+        "phase_offset": 0.65
+      },
+      {
+        "id": "leg_l",
+        "parent": null,
+        "texture": "parts/sakura_leg_l.png",
+        "z": 18,
+        "pivot_px": [
+          305.0,
+          1308.0
         ],
         "role": "planted",
         "parallax": [
@@ -33,52 +89,132 @@
         ]
       },
       {
-        "id": "hair_back",
-        "parent": "torso",
-        "texture": "parts/sakura_hair_back.png",
-        "z": 20,
+        "id": "leg_r",
+        "parent": null,
+        "texture": "parts/sakura_leg_r.png",
+        "z": 19,
         "pivot_px": [
-          330.0,
-          240.0
+          428.0,
+          1298.0
         ],
-        "role": "hair_back",
+        "role": "planted",
         "parallax": [
-          -0.28,
-          -0.15
+          0.0,
+          0.0
         ],
-        "rot_deg": 1.6,
-        "bend_px": 5.5,
+        "rot_deg": 0.0,
+        "bend_px": 0.0,
         "breath_px": [
           0.0,
-          1.0
+          0.0
+        ],
+        "scale_breath": [
+          0.002,
+          -0.002
+        ]
+      },
+      {
+        "id": "collar_back",
+        "parent": "upper_torso",
+        "texture": "parts/sakura_collar_back.png",
+        "z": 24,
+        "pivot_px": [
+          442.0,
+          424.0
+        ],
+        "role": "collar",
+        "parallax": [
+          0.2,
+          0.1
+        ],
+        "rot_deg": 2.6,
+        "bend_px": 3.0,
+        "breath_px": [
+          0.0,
+          -0.6
         ],
         "scale_breath": [
           0.0,
           0.0
         ],
-        "spring_omega": 8.4,
-        "spring_zeta": 0.42,
-        "phase_offset": 0.35
+        "spring_omega": 9.2,
+        "spring_zeta": 0.38,
+        "phase_offset": 0.4
       },
       {
         "id": "skirt",
-        "parent": "torso",
+        "parent": "upper_torso",
         "texture": "parts/sakura_skirt.png",
-        "z": 30,
+        "z": 28,
         "pivot_px": [
-          326.0,
-          678.0
+          324.0,
+          658.0
         ],
         "role": "skirt",
+        "parallax": [
+          0.24,
+          0.0
+        ],
+        "rot_deg": 2.8,
+        "bend_px": 8.0,
+        "breath_px": [
+          0.0,
+          0.4
+        ],
+        "scale_breath": [
+          0.005,
+          0.0
+        ],
+        "spring_omega": 6.6,
+        "spring_zeta": 0.42
+      },
+      {
+        "id": "coat_flap_r",
+        "parent": "upper_torso",
+        "texture": "parts/sakura_coat_flap_r.png",
+        "z": 34,
+        "pivot_px": [
+          374.0,
+          615.0
+        ],
+        "role": "coat_hem",
         "parallax": [
           0.22,
           0.0
         ],
-        "rot_deg": 2.4,
+        "rot_deg": 3.0,
         "bend_px": 7.5,
         "breath_px": [
           0.0,
-          0.4
+          0.2
+        ],
+        "scale_breath": [
+          0.004,
+          0.0
+        ],
+        "spring_omega": 7.0,
+        "spring_zeta": 0.44,
+        "phase_offset": 0.28
+      },
+      {
+        "id": "coat_flap_l",
+        "parent": "upper_torso",
+        "texture": "parts/sakura_coat_flap_l.png",
+        "z": 36,
+        "pivot_px": [
+          305.0,
+          615.0
+        ],
+        "role": "coat_hem",
+        "parallax": [
+          0.22,
+          0.0
+        ],
+        "rot_deg": 2.8,
+        "bend_px": 7.2,
+        "breath_px": [
+          0.0,
+          0.2
         ],
         "scale_breath": [
           0.004,
@@ -88,24 +224,49 @@
         "spring_zeta": 0.44
       },
       {
-        "id": "torso",
-        "parent": null,
-        "texture": "parts/sakura_torso.png",
-        "z": 40,
+        "id": "neck",
+        "parent": "upper_torso",
+        "texture": "parts/sakura_neck.png",
+        "z": 38,
         "pivot_px": [
-          322.0,
-          825.0
+          338.0,
+          416.0
         ],
-        "role": "torso",
+        "role": "neck",
         "parallax": [
-          0.25,
-          0.14
+          0.15,
+          0.0
         ],
-        "rot_deg": 1.1,
+        "rot_deg": 1.6,
         "bend_px": 0.0,
         "breath_px": [
           0.0,
-          -3.2
+          0.0
+        ],
+        "scale_breath": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "id": "upper_torso",
+        "parent": null,
+        "texture": "parts/sakura_upper_torso.png",
+        "z": 40,
+        "pivot_px": [
+          322.0,
+          622.0
+        ],
+        "role": "torso",
+        "parallax": [
+          0.2,
+          0.12
+        ],
+        "rot_deg": 1.4,
+        "bend_px": 0.0,
+        "breath_px": [
+          0.0,
+          -2.6
         ],
         "scale_breath": [
           0.011,
@@ -113,21 +274,49 @@
         ]
       },
       {
+        "id": "arm_r",
+        "parent": "upper_torso",
+        "texture": "parts/sakura_arm_r.png",
+        "z": 44,
+        "pivot_px": [
+          414.0,
+          434.0
+        ],
+        "role": "arm",
+        "parallax": [
+          0.18,
+          0.1
+        ],
+        "rot_deg": 2.8,
+        "bend_px": 4.2,
+        "breath_px": [
+          0.0,
+          -0.8
+        ],
+        "scale_breath": [
+          0.0,
+          0.0
+        ],
+        "spring_omega": 7.4,
+        "spring_zeta": 0.42,
+        "phase_offset": 0.55
+      },
+      {
         "id": "chest_bow",
-        "parent": "torso",
+        "parent": "upper_torso",
         "texture": "parts/sakura_chest_bow.png",
         "z": 50,
         "pivot_px": [
-          300.0,
-          488.0
+          298.0,
+          476.0
         ],
         "role": "ribbon",
         "parallax": [
           0.35,
-          -0.2
+          -0.18
         ],
-        "rot_deg": 2.2,
-        "bend_px": 3.5,
+        "rot_deg": 2.4,
+        "bend_px": 3.8,
         "breath_px": [
           0.0,
           -1.6
@@ -137,87 +326,52 @@
           0.0
         ],
         "spring_omega": 9.8,
-        "spring_zeta": 0.38,
+        "spring_zeta": 0.36,
         "phase_offset": 0.25
       },
       {
         "id": "waist_bow",
-        "parent": "torso",
+        "parent": "coat_flap_r",
         "texture": "parts/sakura_waist_bow.png",
-        "z": 55,
+        "z": 54,
         "pivot_px": [
           374.0,
-          608.0
+          604.0
         ],
         "role": "ribbon",
         "parallax": [
           0.32,
           0.1
         ],
-        "rot_deg": 2.8,
-        "bend_px": 4.5,
+        "rot_deg": 3.0,
+        "bend_px": 4.8,
         "breath_px": [
           0.0,
-          -0.8
+          -0.6
         ],
         "scale_breath": [
           0.0,
           0.0
         ],
-        "spring_omega": 8.2,
-        "spring_zeta": 0.4,
+        "spring_omega": 8.4,
+        "spring_zeta": 0.38,
         "phase_offset": 0.85
       },
       {
-        "id": "head",
-        "parent": "torso",
-        "texture": "parts/sakura_head.png",
-        "z": 60,
+        "id": "hair_curl_l",
+        "parent": "head_base",
+        "texture": "parts/sakura_hair_curl_l.png",
+        "z": 56,
         "pivot_px": [
-          328.0,
-          382.0
-        ],
-        "role": "head",
-        "parallax": [
-          0.85,
-          0.48
-        ],
-        "rot_deg": 2.8,
-        "bend_px": 0.0,
-        "breath_px": [
-          0.0,
-          -1.2
-        ],
-        "scale_breath": [
-          0.0,
-          0.0
-        ],
-        "dynamic_patch": {
-          "rect_px": [
-            200,
-            130,
-            438,
-            394
-          ],
-          "mode": "masked_copy",
-          "mask_texture": "parts/sakura_head_mask.png"
-        }
-      },
-      {
-        "id": "hair_side_l",
-        "parent": "head",
-        "texture": "parts/sakura_hair_side_l.png",
-        "z": 70,
-        "pivot_px": [
-          228.0,
-          248.0
+          232.0,
+          242.0
         ],
         "role": "hair_side_l",
         "parallax": [
-          0.42,
-          0.22
+          0.4,
+          0.2
         ],
-        "rot_deg": 4.2,
+        "rot_deg": 4.4,
         "bend_px": 7.5,
         "breath_px": [
           0.0,
@@ -227,25 +381,86 @@
           0.0,
           0.0
         ],
-        "spring_omega": 9.4,
-        "spring_zeta": 0.35,
+        "spring_omega": 9.2,
+        "spring_zeta": 0.34,
         "phase_offset": 0.12
       },
       {
-        "id": "hair_side_r",
-        "parent": "head",
-        "texture": "parts/sakura_hair_side_r.png",
-        "z": 72,
+        "id": "head_base",
+        "parent": "neck",
+        "texture": "parts/sakura_head_base.png",
+        "z": 58,
         "pivot_px": [
-          424.0,
-          244.0
+          334.0,
+          354.0
+        ],
+        "role": "head",
+        "parallax": [
+          0.35,
+          0.25
+        ],
+        "rot_deg": 4.2,
+        "bend_px": 0.0,
+        "breath_px": [
+          0.0,
+          0.0
+        ],
+        "scale_breath": [
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "id": "face_features",
+        "parent": "head_base",
+        "texture": "parts/sakura_face_features.png",
+        "z": 60,
+        "pivot_px": [
+          322.0,
+          286.0
+        ],
+        "role": "face_features",
+        "parallax": [
+          0.8,
+          0.65
+        ],
+        "rot_deg": 0.0,
+        "bend_px": 0.0,
+        "breath_px": [
+          0.0,
+          0.0
+        ],
+        "scale_breath": [
+          0.0,
+          0.0
+        ],
+        "dynamic_patch": {
+          "rect_px": [
+            232,
+            198,
+            412,
+            366
+          ],
+          "mode": "alpha_mask",
+          "mask_texture": "parts/sakura_face_mask.png",
+          "exclude_mask_texture": "parts/sakura_bang_center_excl.png"
+        }
+      },
+      {
+        "id": "hair_curl_r",
+        "parent": "head_base",
+        "texture": "parts/sakura_hair_curl_r.png",
+        "z": 64,
+        "pivot_px": [
+          420.0,
+          236.0
         ],
         "role": "hair_side_r",
         "parallax": [
-          0.42,
-          0.22
+          0.4,
+          0.2
         ],
-        "rot_deg": 4.4,
+        "rot_deg": 4.6,
         "bend_px": 7.8,
         "breath_px": [
           0.0,
@@ -255,26 +470,145 @@
           0.0,
           0.0
         ],
-        "spring_omega": 9.9,
+        "spring_omega": 9.8,
         "spring_zeta": 0.34,
         "phase_offset": 0.72
       },
       {
+        "id": "hair_wing_l",
+        "parent": "head_base",
+        "texture": "parts/sakura_hair_wing_l.png",
+        "z": 66,
+        "pivot_px": [
+          232.0,
+          162.0
+        ],
+        "role": "hair_bangs",
+        "parallax": [
+          0.5,
+          0.3
+        ],
+        "rot_deg": 3.4,
+        "bend_px": 5.0,
+        "breath_px": [
+          0.0,
+          0.0
+        ],
+        "scale_breath": [
+          0.0,
+          0.0
+        ],
+        "spring_omega": 10.6,
+        "spring_zeta": 0.34,
+        "phase_offset": 0.18
+      },
+      {
+        "id": "hair_wing_r",
+        "parent": "head_base",
+        "texture": "parts/sakura_hair_wing_r.png",
+        "z": 67,
+        "pivot_px": [
+          426.0,
+          168.0
+        ],
+        "role": "hair_bangs",
+        "parallax": [
+          0.5,
+          0.3
+        ],
+        "rot_deg": 3.4,
+        "bend_px": 5.2,
+        "breath_px": [
+          0.0,
+          0.0
+        ],
+        "scale_breath": [
+          0.0,
+          0.0
+        ],
+        "spring_omega": 10.9,
+        "spring_zeta": 0.34,
+        "phase_offset": 0.58
+      },
+      {
+        "id": "hair_bangs_center",
+        "parent": "head_base",
+        "texture": "parts/sakura_hair_bangs_center.png",
+        "z": 69,
+        "pivot_px": [
+          314.0,
+          148.0
+        ],
+        "role": "hair_bangs",
+        "parallax": [
+          0.9,
+          0.65
+        ],
+        "rot_deg": 3.6,
+        "bend_px": 4.2,
+        "breath_px": [
+          0.0,
+          0.0
+        ],
+        "scale_breath": [
+          0.0,
+          0.0
+        ],
+        "spring_omega": 11.4,
+        "spring_zeta": 0.32
+      },
+      {
+        "id": "star_hairpin",
+        "parent": "head_base",
+        "texture": "parts/sakura_hairpin_slot.png",
+        "z": 75,
+        "pivot_px": [
+          242.0,
+          165.0
+        ],
+        "role": "accessory",
+        "parallax": [
+          0.75,
+          0.55
+        ],
+        "rot_deg": 2.2,
+        "bend_px": 0.0,
+        "breath_px": [
+          0.0,
+          0.0
+        ],
+        "scale_breath": [
+          0.0,
+          0.0
+        ],
+        "dynamic_patch": {
+          "rect_px": [
+            200,
+            130,
+            282,
+            200
+          ],
+          "mode": "diff_overlay",
+          "ref_texture": "parts/sakura_hairpin_ref.png",
+          "threshold": 18
+        }
+      },
+      {
         "id": "ahoge",
-        "parent": "head",
+        "parent": "head_base",
         "texture": "parts/sakura_ahoge.png",
         "z": 80,
         "pivot_px": [
           314.0,
-          128.0
+          125.0
         ],
         "role": "ahoge",
         "parallax": [
           0.22,
           -0.18
         ],
-        "rot_deg": 6.8,
-        "bend_px": 10.5,
+        "rot_deg": 7.0,
+        "bend_px": 10.8,
         "breath_px": [
           0.0,
           0.0
@@ -293,6 +627,11 @@
       380,
       420
     ],
+    "surface_overrides": {
+      "10": "parts/unyu_clean_s10.png",
+      "11": "parts/unyu_clean_s11.png",
+      "12": "parts/unyu_clean_s12.png"
+    },
     "parts": [
       {
         "id": "mochi_body",
@@ -308,7 +647,7 @@
           0.35,
           0.14
         ],
-        "rot_deg": 1.6,
+        "rot_deg": 1.8,
         "bend_px": 0.0,
         "breath_px": [
           0.0,
@@ -333,8 +672,8 @@
           0.22,
           -0.18
         ],
-        "rot_deg": 5.5,
-        "bend_px": 7.5,
+        "rot_deg": 6.2,
+        "bend_px": 8.0,
         "breath_px": [
           0.0,
           0.0
@@ -378,7 +717,7 @@
             68
           ],
           "mode": "diff_overlay",
-          "ref_texture": "parts/unyu_crown_ref.png",
+          "ref_texture": "parts/unyu_clean_s10.png",
           "threshold": 18
         }
       },
@@ -408,15 +747,14 @@
         ],
         "dynamic_patch": {
           "rect_px": [
-            118,
-            108,
-            316,
-            258
+            106,
+            106,
+            332,
+            260
           ],
           "mode": "diff_overlay",
           "ref_texture": "parts/unyu_body.png",
-          "exclude_mask_texture": "parts/unyu_glasses_mask.png",
-          "threshold": 24
+          "threshold": 16
         }
       },
       {
@@ -425,26 +763,26 @@
         "texture": "parts/unyu_paw_l.png",
         "z": 40,
         "pivot_px": [
-          146.0,
-          262.0
+          138.0,
+          256.0
         ],
         "role": "mochi_paws",
         "parallax": [
-          0.25,
-          0.2
+          0.32,
+          0.24
         ],
-        "rot_deg": 4.2,
-        "bend_px": 3.0,
+        "rot_deg": 9.5,
+        "bend_px": 3.5,
         "breath_px": [
           0.0,
-          -1.0
+          -1.4
         ],
         "scale_breath": [
           0.0,
           0.0
         ],
-        "spring_omega": 10.5,
-        "spring_zeta": 0.35,
+        "spring_omega": 11.2,
+        "spring_zeta": 0.32,
         "phase_offset": 0.0
       },
       {
@@ -453,27 +791,27 @@
         "texture": "parts/unyu_paw_r.png",
         "z": 42,
         "pivot_px": [
-          306.0,
-          258.0
+          314.0,
+          252.0
         ],
         "role": "mochi_paws",
         "parallax": [
-          0.25,
-          0.2
+          0.32,
+          0.24
         ],
-        "rot_deg": -4.2,
-        "bend_px": 3.0,
+        "rot_deg": -9.5,
+        "bend_px": 3.5,
         "breath_px": [
           0.0,
-          -1.0
+          -1.4
         ],
         "scale_breath": [
           0.0,
           0.0
         ],
-        "spring_omega": 10.8,
-        "spring_zeta": 0.35,
-        "phase_offset": 1.1
+        "spring_omega": 11.5,
+        "spring_zeta": 0.32,
+        "phase_offset": 0.85
       },
       {
         "id": "mochi_glasses",
@@ -482,14 +820,15 @@
         "z": 50,
         "pivot_px": [
           228.0,
-          192.0
+          194.0
         ],
         "role": "mochi_glasses",
+        "opacity": 1.0,
         "parallax": [
-          0.16,
-          0.12
+          0.48,
+          0.36
         ],
-        "rot_deg": 1.2,
+        "rot_deg": 4.6,
         "bend_px": 0.0,
         "breath_px": [
           0.0,
@@ -500,7 +839,7 @@
           0.0
         ],
         "spring_omega": 14.0,
-        "spring_zeta": 0.42
+        "spring_zeta": 0.4
       }
     ]
   }

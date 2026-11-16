@@ -19,11 +19,17 @@ pub enum PartMotionRole {
     Planted,
     Skirt,
     Torso,
+    Neck,
     Ribbon,
     Head,
+    FaceFeatures,
     HairBack,
     HairSideL,
     HairSideR,
+    HairBangs,
+    CoatHem,
+    Arm,
+    Collar,
     Ahoge,
     MochiBody,
     MochiTuft,
@@ -42,6 +48,7 @@ pub enum PatchMode {
     #[default]
     MaskedCopy,
     DiffOverlay,
+    AlphaMask,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -61,6 +68,10 @@ pub struct DynamicPatchSpec {
 
 fn default_two_zero() -> [f32; 2] {
     [0.0, 0.0]
+}
+
+fn default_one() -> f32 {
+    1.0
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -89,6 +100,8 @@ pub struct PartLayerSpec {
     pub pivot_px: [f32; 2],
     #[serde(default)]
     pub role: PartMotionRole,
+    #[serde(default = "default_one")]
+    pub opacity: f32,
     #[serde(default = "default_two_zero")]
     pub parallax: [f32; 2],
     #[serde(default)]
@@ -114,6 +127,8 @@ pub struct CharacterRigSpec {
     pub canvas_size: [u32; 2],
     #[serde(default)]
     pub uv_rig: Option<UvRigTuning>,
+    #[serde(default)]
+    pub surface_overrides: HashMap<String, String>,
     #[serde(default)]
     pub parts: Vec<PartLayerSpec>,
 }
@@ -250,6 +265,7 @@ pub struct LoadedCharacterRig {
     pub sidecar_dir: PathBuf,
     pub canvas_size: [u32; 2],
     pub uv_rig: Option<UvRigTuning>,
+    pub surface_overrides: HashMap<i32, RgbaBitmap>,
     pub parts: Vec<LoadedPartLayer>,
 }
 
@@ -478,6 +494,8 @@ pub fn load_character_rig(
             None
         };
 
+        let mut uniform = PartGpuUniform::identity(cw as f32, ch as f32);
+        uniform.meta[1] = p.opacity.clamp(0.0, 1.0);
         layers.push(LoadedPartLayer {
             spec: p,
             parent_idx: parent_indices[idx],
@@ -486,15 +504,26 @@ pub fn load_character_rig(
             patch,
             spring_x: PartSpring1D::default(),
             spring_y: PartSpring1D::default(),
-            uniform: PartGpuUniform::identity(cw as f32, ch as f32),
+            uniform,
             dirty_gpu: true,
         });
+    }
+
+    let mut surface_overrides = HashMap::new();
+    for (sid_str, rel_path) in &spec.surface_overrides {
+        let sid = sid_str
+            .trim()
+            .parse::<i32>()
+            .map_err(|_| format!("Invalid surface_overrides key '{sid_str}' in sidecar"))?;
+        let abs = validate_safe_rel_asset_path(sidecar_dir, rel_path)?;
+        surface_overrides.insert(sid, load_rgba_file(&abs)?);
     }
 
     Ok(Some(LoadedCharacterRig {
         sidecar_dir: sidecar_dir.to_path_buf(),
         canvas_size: [cw, ch],
         uv_rig: spec.uv_rig,
+        surface_overrides,
         parts: layers,
     }))
 }
@@ -595,6 +624,31 @@ impl LoadedCharacterRig {
             part.spring_x.reset();
             part.spring_y.reset();
             part.uniform = PartGpuUniform::identity(cw, ch);
+            part.uniform.meta[1] = part.spec.opacity.clamp(0.0, 1.0);
+        }
+    }
+
+    /// Synchronizes dynamic patches from the current surface ID + overlays, using any matching
+    /// clean `surface_overrides` base bitmap (so e.g. Unyu's expressions load unbroken without
+    /// painted-on sunglasses while SERIKO overlays and bind accessories still apply cleanly).
+    pub fn sync_from_surface_state<'a>(
+        &mut self,
+        surface_id: i32,
+        overlays: impl IntoIterator<Item = (i32, i32, bool, &'a RgbaBitmap)>,
+        fallback_composited: &RgbaBitmap,
+    ) -> Vec<usize> {
+        if let Some(clean_base) = self.surface_overrides.get(&surface_id) {
+            let mut comp = clean_base.clone();
+            for (ox, oy, replace, ov) in overlays {
+                if replace {
+                    comp.replace_rect(ov, ox, oy);
+                } else {
+                    comp.alpha_composite(ov, ox, oy);
+                }
+            }
+            self.sync_from_composited(&comp)
+        } else {
+            self.sync_from_composited(fallback_composited)
         }
     }
 
@@ -640,6 +694,44 @@ impl LoadedCharacterRig {
                             } else {
                                 dst.data[b_idx..b_idx + 4]
                                     .copy_from_slice(&base.data[b_idx..b_idx + 4]);
+                            }
+                        }
+                        PatchMode::AlphaMask => {
+                            let m_alpha = dp
+                                .mask_alpha
+                                .as_ref()
+                                .and_then(|ma| {
+                                    let (mw, mh) = dp.mask_size;
+                                    if x < mw && y < mh {
+                                        ma.get((y * mw + x) as usize).copied()
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .unwrap_or(255) as u32;
+                            let e_alpha = dp
+                                .exclude_alpha
+                                .as_ref()
+                                .and_then(|ea| {
+                                    let (ew, eh) = dp.exclude_size;
+                                    if x < ew && y < eh {
+                                        ea.get((y * ew + x) as usize).copied()
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .unwrap_or(0) as u32;
+                            let comp_a = composited.data[c_idx + 3] as u32;
+                            let out_a = ((comp_a * m_alpha * (255 - e_alpha) + 32_512)
+                                / (255 * 255))
+                                .min(255) as u8;
+                            if out_a > 0 {
+                                dst.data[b_idx] = composited.data[c_idx];
+                                dst.data[b_idx + 1] = composited.data[c_idx + 1];
+                                dst.data[b_idx + 2] = composited.data[c_idx + 2];
+                                dst.data[b_idx + 3] = out_a;
+                            } else {
+                                dst.data[b_idx..b_idx + 4].copy_from_slice(&[0, 0, 0, 0]);
                             }
                         }
                         PatchMode::DiffOverlay => {
@@ -711,14 +803,23 @@ impl LoadedCharacterRig {
             let ph = sp.phase_offset;
             let omega = sp.spring_omega.unwrap_or(match sp.role {
                 PartMotionRole::Ahoge | PartMotionRole::MochiTuft => 14.5,
-                PartMotionRole::Skirt => 6.8,
+                PartMotionRole::Skirt | PartMotionRole::CoatHem => 6.8,
+                PartMotionRole::Arm => 7.4,
+                PartMotionRole::Collar => 9.0,
                 PartMotionRole::Ribbon => 9.5,
+                PartMotionRole::HairBangs => 10.6,
                 PartMotionRole::HairSideL | PartMotionRole::HairSideR => 9.6,
+                PartMotionRole::MochiPaws => 11.2,
+                PartMotionRole::MochiGlasses => 14.0,
                 _ => 8.8,
             });
             let zeta = sp.spring_zeta.unwrap_or(match sp.role {
                 PartMotionRole::Ahoge | PartMotionRole::MochiTuft => 0.25,
-                PartMotionRole::Skirt => 0.44,
+                PartMotionRole::Skirt | PartMotionRole::CoatHem => 0.44,
+                PartMotionRole::Arm => 0.42,
+                PartMotionRole::HairBangs => 0.34,
+                PartMotionRole::MochiPaws => 0.32,
+                PartMotionRole::MochiGlasses => 0.40,
                 _ => 0.38,
             });
 
@@ -734,23 +835,50 @@ impl LoadedCharacterRig {
                     (-inp.body_sway * 0.44 - inp.vel_x * 0.14 + (inp.time_s * 1.05 + ph).sin() * 0.24)
                         .clamp(-1.5, 1.5)
                 }
-                PartMotionRole::Ribbon | PartMotionRole::MochiPaws => {
+                PartMotionRole::CoatHem | PartMotionRole::Collar => {
+                    (-inp.body_sway * 0.48 - inp.vel_x * 0.18 + breeze * 1.15).clamp(-1.6, 1.6)
+                }
+                PartMotionRole::Arm => {
+                    (-inp.body_sway * 0.38 - inp.vel_x * 0.14 + (inp.time_s * 1.1 + ph).sin() * 0.22)
+                        .clamp(-1.5, 1.5)
+                }
+                PartMotionRole::Ribbon => {
                     (-inp.vel_x * 0.18 - inp.body_sway * 0.24 + (inp.time_s * 1.6 + ph).sin() * 0.28)
                         .clamp(-1.5, 1.5)
+                }
+                PartMotionRole::MochiPaws => {
+                    ((inp.time_s * 2.35 + ph).sin() * 0.62
+                        - inp.vel_x * 0.22
+                        + inp.talk_bob * 0.85
+                        + inp.squish * 18.0)
+                        .clamp(-1.8, 1.8)
+                }
+                PartMotionRole::HairBangs => {
+                    (-inp.vel_x * 0.20 - inp.body_sway * 0.14 + breeze * 0.90).clamp(-1.5, 1.5)
                 }
                 PartMotionRole::HairBack
                 | PartMotionRole::HairSideL
                 | PartMotionRole::HairSideR => {
                     (-inp.vel_x * 0.22 - inp.body_sway * 0.18 + breeze).clamp(-1.6, 1.6)
                 }
-                PartMotionRole::MochiGlasses => (-inp.vel_x * 0.08).clamp(-0.6, 0.6),
+                PartMotionRole::MochiGlasses => {
+                    (-inp.vel_x * 0.25 + (inp.time_s * 1.45 + ph).sin() * 0.18).clamp(-1.2, 1.2)
+                }
                 _ => 0.0,
             };
-            let target_y = (-inp.vel_y * 0.15
-                + inp.breath * 0.22
-                + inp.talk_bob * 0.55
-                + inp.squish * 24.0)
-                .clamp(-1.6, 1.6);
+            let target_y = if sp.role == PartMotionRole::MochiGlasses {
+                (-inp.vel_y * 0.25
+                    + inp.talk_bob * 0.95
+                    + inp.squish * 30.0
+                    + (inp.breath - 0.5) * 0.35)
+                    .clamp(-1.6, 1.6)
+            } else {
+                (-inp.vel_y * 0.15
+                    + inp.breath * 0.22
+                    + inp.talk_bob * 0.55
+                    + inp.squish * 24.0)
+                    .clamp(-1.6, 1.6)
+            };
 
             part.spring_x.step(target_x, omega, zeta, inp.dt);
             part.spring_y.step(target_y, omega * 1.12, zeta, inp.dt);
@@ -766,7 +894,20 @@ impl LoadedCharacterRig {
                     120.0,
                     0.0,
                 ),
-                PartMotionRole::Torso | PartMotionRole::MochiBody => (
+                PartMotionRole::Torso => (
+                    sp.parallax[0] * inp.body_sway * 2.5 + sp.breath_px[0] * inp.breath,
+                    sp.parallax[1] * inp.angle_y * 2.2
+                        + sp.breath_px[1] * inp.breath
+                        + inp.talk_bob * 1.2
+                        - inp.squish * 110.0,
+                    (sp.rot_deg.to_radians() * 0.65) * (inp.body_sway * 0.65 + inp.angle_x * 0.35),
+                    1.0 + sp.scale_breath[0] * (inp.breath - 0.5) + inp.squish * 1.1,
+                    1.0 + sp.scale_breath[1] * (inp.breath - 0.5) - inp.squish * 0.7,
+                    1.0,
+                    180.0,
+                    0.0,
+                ),
+                PartMotionRole::MochiBody => (
                     sp.parallax[0] * inp.body_sway * 7.5 + sp.breath_px[0] * inp.breath,
                     sp.parallax[1] * inp.angle_y * 4.5
                         + sp.breath_px[1] * inp.breath
@@ -779,7 +920,38 @@ impl LoadedCharacterRig {
                     180.0,
                     0.0,
                 ),
-                PartMotionRole::Head | PartMotionRole::MochiFace => (
+                PartMotionRole::Neck => (
+                    sp.parallax[0] * inp.angle_x * 0.8,
+                    0.0,
+                    inp.angle_z * 0.35 + sp.rot_deg.to_radians() * 0.25 * inp.angle_x,
+                    1.0,
+                    1.0,
+                    1.0,
+                    80.0,
+                    0.0,
+                ),
+                PartMotionRole::Head => (
+                    sp.parallax[0] * inp.angle_x * 1.4,
+                    sp.parallax[1] * inp.angle_y * 1.1,
+                    inp.angle_z * 1.05
+                        + sp.rot_deg.to_radians() * (0.50 * inp.angle_x + 0.16 * inp.talk_bob),
+                    1.0,
+                    1.0,
+                    1.0,
+                    120.0,
+                    0.0,
+                ),
+                PartMotionRole::FaceFeatures => (
+                    sp.parallax[0] * inp.angle_x * 4.0,
+                    sp.parallax[1] * inp.angle_y * 2.8,
+                    0.0,
+                    1.0,
+                    1.0,
+                    1.0,
+                    100.0,
+                    0.0,
+                ),
+                PartMotionRole::MochiFace => (
                     sp.parallax[0] * inp.angle_x * 8.5 + sp.breath_px[0] * inp.breath,
                     sp.parallax[1] * inp.angle_y * 6.0
                         + sp.breath_px[1] * inp.breath
@@ -790,6 +962,16 @@ impl LoadedCharacterRig {
                     1.0,
                     120.0,
                     0.0,
+                ),
+                PartMotionRole::HairBangs => (
+                    sp.parallax[0] * inp.angle_x * 4.8 + part.spring_x.pos * 1.1,
+                    sp.parallax[1] * inp.angle_y * 3.0 + part.spring_y.pos * 0.6,
+                    sp.rot_deg.to_radians() * (part.spring_x.pos * 0.72),
+                    1.0,
+                    1.0,
+                    1.0,
+                    110.0,
+                    sp.bend_px * part.spring_x.pos,
                 ),
                 PartMotionRole::Ahoge | PartMotionRole::MochiTuft => (
                     sp.parallax[0] * inp.angle_x * 4.0 + part.spring_x.pos * 1.4,
@@ -811,6 +993,37 @@ impl LoadedCharacterRig {
                     175.0,
                     sp.bend_px * part.spring_x.pos,
                 ),
+                PartMotionRole::CoatHem => (
+                    sp.parallax[0] * (inp.body_sway * 2.4 + part.spring_x.pos * 2.6),
+                    sp.breath_px[1] * inp.breath + part.spring_y.pos * 0.7,
+                    sp.rot_deg.to_radians() * (part.spring_x.pos * 0.75),
+                    1.0 + sp.scale_breath[0] * (inp.breath - 0.5),
+                    1.0,
+                    1.0,
+                    175.0,
+                    sp.bend_px * part.spring_x.pos,
+                ),
+                PartMotionRole::Collar => (
+                    sp.parallax[0] * inp.angle_x * 1.8 + part.spring_x.pos * 1.0,
+                    sp.breath_px[1] * inp.breath + part.spring_y.pos * 0.5,
+                    sp.rot_deg.to_radians() * (part.spring_x.pos * 0.75),
+                    1.0 + sp.scale_breath[0] * (inp.breath - 0.5),
+                    1.0,
+                    1.0,
+                    85.0,
+                    sp.bend_px * part.spring_x.pos,
+                ),
+                PartMotionRole::Arm => (
+                    sp.parallax[0] * inp.angle_x * 1.6 + part.spring_x.pos * 1.1,
+                    sp.breath_px[1] * inp.breath + part.spring_y.pos * 0.8,
+                    sp.rot_deg.to_radians()
+                        * (part.spring_x.pos * 0.85 + (inp.breath - 0.5) * 0.25),
+                    1.0,
+                    1.0,
+                    1.0,
+                    260.0,
+                    sp.bend_px * part.spring_x.pos,
+                ),
                 PartMotionRole::HairBack
                 | PartMotionRole::HairSideL
                 | PartMotionRole::HairSideR => (
@@ -823,7 +1036,7 @@ impl LoadedCharacterRig {
                     145.0,
                     sp.bend_px * part.spring_x.pos,
                 ),
-                PartMotionRole::Ribbon | PartMotionRole::MochiPaws => (
+                PartMotionRole::Ribbon => (
                     sp.parallax[0] * inp.angle_x * 2.5 + part.spring_x.pos * 1.2,
                     sp.parallax[1] * inp.angle_y * 2.2
                         + sp.breath_px[1] * inp.breath
@@ -836,10 +1049,21 @@ impl LoadedCharacterRig {
                     90.0,
                     sp.bend_px * part.spring_x.pos,
                 ),
+                PartMotionRole::MochiPaws => (
+                    sp.parallax[0] * inp.angle_x * 2.5 + part.spring_x.pos * 2.8,
+                    -2.2 * inp.breath - inp.talk_bob * 4.2 + part.spring_y.pos * 1.6,
+                    sp.rot_deg.to_radians()
+                        * (part.spring_x.pos * 0.95 + inp.talk_bob * 0.55),
+                    1.0 + sp.scale_breath[0] * (inp.breath - 0.5),
+                    1.0,
+                    1.0,
+                    90.0,
+                    sp.bend_px * part.spring_x.pos,
+                ),
                 PartMotionRole::MochiGlasses => (
-                    sp.parallax[0] * inp.angle_x * 5.0 + part.spring_x.pos * 1.5,
-                    sp.parallax[1] * inp.angle_y * 4.5 + sp.breath_px[1] * inp.breath + inp.talk_bob * 0.8,
-                    sp.rot_deg.to_radians() * (inp.angle_x * 0.45 + part.spring_x.pos * 0.4),
+                    sp.parallax[0] * inp.angle_x * 6.5 + part.spring_x.pos * 1.6,
+                    sp.parallax[1] * inp.angle_y * 5.0 + part.spring_y.pos * 2.6,
+                    sp.rot_deg.to_radians() * (inp.angle_x * 0.55 + part.spring_x.pos * 0.65),
                     1.0,
                     1.0,
                     1.0,
@@ -911,7 +1135,7 @@ impl LoadedCharacterRig {
                 inv_row0: [inv.a, inv.b, inv.c, cw],
                 inv_row1: [inv.d, inv.e, inv.f, ch],
                 deform: [world_py, bdir, bspan, bdx],
-                meta: [1.0, 1.0, 0.0, 0.0],
+                meta: [1.0, part.spec.opacity.clamp(0.0, 1.0), 0.0, 0.0],
             };
         }
     }
@@ -924,6 +1148,13 @@ impl LoadedCharacterRig {
         let mut pm_acc = vec![0.0_f32; (w as usize) * (h as usize) * 4];
 
         for part in &self.parts {
+            if part.uniform.meta[0] < 0.5 {
+                continue;
+            }
+            let part_alpha = part.uniform.meta[1].clamp(0.0, 1.0);
+            if part_alpha <= 0.0005 {
+                continue;
+            }
             let bmp = &part.current_bitmap;
             let bw = bmp.width as f32;
             let bh = bmp.height as f32;
@@ -973,7 +1204,7 @@ impl LoadedCharacterRig {
                     for c in 0..4 {
                         let top = p00[c] + (p10[c] - p00[c]) * fr_x;
                         let bot = p01[c] + (p11[c] - p01[c]) * fr_x;
-                        src_pm[c] = top + (bot - top) * fr_y;
+                        src_pm[c] = (top + (bot - top) * fr_y) * part_alpha;
                     }
                     if src_pm[3] <= 0.0005 {
                         continue;
@@ -1021,7 +1252,7 @@ mod tests {
         let mut sak_rig =
             discover_and_load_rig("neo_default", &shell_dir, &tmp_user, &assets, Scope::Sakura)
                 .expect("Sakura rig should load");
-        assert!(sak_rig.parts.len() >= 9);
+        assert!(sak_rig.parts.len() >= 18);
         let unyu_rig =
             discover_and_load_rig("neo_default", &shell_dir, &tmp_user, &assets, Scope::Kero)
                 .expect("Unyu rig should load");

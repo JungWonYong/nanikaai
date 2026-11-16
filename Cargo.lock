@@ -2273,7 +2273,7 @@ dependencies = [
 
 [[package]]
 name = "nanikaai"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "arboard",
  "axum",

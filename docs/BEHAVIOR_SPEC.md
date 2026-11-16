@@ -1,7 +1,7 @@
 # 何か藍 (`NanikaAi`) — 現行動作仕様および自動検証基準 (`BEHAVIOR_SPEC`)
 
-- **Document Version**: `v1.6.0`
-- **Target Software**: `nanikaai` `v0.1.6+`
+- **Document Version**: `v1.7.0`
+- **Target Software**: `nanikaai` `v0.1.7+`
 - **Purpose**: テスト実行前の機密・個人情報・AI指示配置境界検査（Phase 0）、改修後の自動動作確認テスト（`cargo test` / `--smoke-test` / 静的監査）における合否基準、変更内容に応じた検証ティアおよび結果報告様式を定義する。
 
 ---
@@ -55,7 +55,7 @@
 | `SPEC-COMP-02` | ファイル D&D 反応 | `.nar`/`.zip` 以外の汎用ファイル（文章・コード・画像・URL ショートカット・フォルダ）のドロップ内容を受理し要約反応する | `.env`/秘密鍵/資格情報ファイルを読込前に即拒否し、安全ファイル内容のみ `<untrusted_data>` で囲んで抽出すること | `behavior_spec` / `companion_extras` |
 | `SPEC-COMP-03` | 音声読み上げ・更新確認 | 既定 OFF の AivisSpeech (`:10101`) / VOICEVOX (`:50021`)＋OS TTS フォールバックおよび GitHub Releases 更新確認を提供する | `\0`/`\1` バッチ発話抽出および SemVer 版数比較が正確に機能し、スモーク検証時は外部起動・音声ブロックを発生させないこと | `behavior_spec` / `companion_extras` |
 | `SPEC-COMP-04` | ヘッドレス音声自動起動 | 導入済み `AivisSpeech Engine` / `VOICEVOX vv-engine` を手動起動不要で自動検出・無画面起動/終了し、`/speakers` から `\0`/`\1` 話者選択をシェル別保存する | `/speakers` の 32bit/整数スタイルID解析と既定 `\0`/`\1` ペア選出およびシェル別 `sakura_speaker_id`/`kero_speaker_id` 永続化が一致すること | `behavior_spec` / `companion_extras` |
-| `SPEC-L2D-01` | 外付けサイドカー Live2D マルチパーツ | 既存 `.nar` を無改変のまま外付け `live2d.json`＋パーツ PNG 階層を読み込み、ユーザー配置優先で動的表情・SERIKO・着せ替え・階層ボーン/減衰バネを CPU/GPU で駆動する | `neo_default` で `\0`(9層以上)と `\1`(6層以上)が読込まれ、表情/着せ替え差分反映・物理変位描画および `<user_data>/live2d` 優先上書きが通過すること | `behavior_spec` / `--smoke-test` |
+| `SPEC-L2D-01` | 外付けサイドカー Live2D マルチパーツ | 既存 `.nar` を無改変のまま外付け `live2d.json`＋パーツ PNG 階層を読み込み、ユーザー配置優先で解剖学的関節（首/C1 頭部/顔視差/多層髪/衣装裾・リボン/腕）・`surface_overrides` 無欠損表情・`AlphaMask` 合成・層別 `opacity`（40%半透明サングラス）・階層ボーン/減衰バネを CPU/GPU で駆動する | `neo_default` で `\0`(18層以上: 解剖学的首/C1/髪/衣装/フリル靴下＆メリージェーン靴)と `\1`(6層以上: 無欠損 `surface11` 目元・alpha 40%レンズ)が読込まれ、表情/着せ替え差分反映・物理変位描画および `<user_data>/live2d` 優先上書きが通過すること | `behavior_spec` / `--smoke-test` |
 | `SPEC-L2D-02` | サイドカー信頼境界＆オフラインスタジオ | `live2d.json` を純粋データとして検証し、パストラバーサル・機密参照・循環ボーンを遮断するとともにオフライン専用編集 UI を同梱する | `../`・`.env`・絶対パス・循環親参照が拒否され、`tools/live2d_studio.html` に外部 CDN URL が `0` 件であること | `behavior_spec` / `live2d_rig` |
 
 ---

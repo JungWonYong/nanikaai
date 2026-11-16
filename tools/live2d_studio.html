@@ -179,18 +179,24 @@
         <select id="fRole">
           <option value="planted">planted (足元固定)</option>
           <option value="skirt">skirt (スカート)</option>
+          <option value="coat_hem">coat_hem (コート裾・衣装揺れ)</option>
+          <option value="collar">collar (襟・背面セーラー)</option>
+          <option value="arm">arm (腕・袖揺れ)</option>
           <option value="torso">torso (胴体・呼吸)</option>
+          <option value="neck">neck (首柱・頸部関節)</option>
           <option value="ribbon">ribbon (リボン・小物)</option>
-          <option value="head">head (頭部・顔)</option>
+          <option value="head">head (頭部C1関節・輪郭)</option>
+          <option value="face_features">face_features (目・眉・口 2.5D視差)</option>
           <option value="hair_back">hair_back (後ろ髪)</option>
           <option value="hair_side_l">hair_side_l (左横髪)</option>
           <option value="hair_side_r">hair_side_r (右横髪)</option>
+          <option value="hair_bangs">hair_bangs (前髪・サイド束)</option>
           <option value="ahoge">ahoge (アホ毛)</option>
           <option value="mochi_body">mochi_body (もち胴体)</option>
           <option value="mochi_tuft">mochi_tuft (もちトサカ)</option>
           <option value="mochi_face">mochi_face (もち表情)</option>
           <option value="mochi_paws">mochi_paws (もち手足)</option>
-          <option value="mochi_glasses">mochi_glasses (メガネ)</option>
+          <option value="mochi_glasses">mochi_glasses (メガネ・半透明)</option>
           <option value="accessory">accessory (装飾品)</option>
         </select>
       </div>
@@ -234,6 +240,10 @@
       <div class="slider-row">
         <div class="slider-head"><span>バネ減衰率 (spring_zeta)</span><span id="vZeta">0.36</span></div>
         <input id="fZeta" type="range" min="0.12" max="1.0" step="0.02" value="0.36">
+      </div>
+      <div class="slider-row">
+        <div class="slider-head"><span>不透明度 (opacity)</span><span id="vOpacity">1.00</span></div>
+        <input id="fOpacity" type="range" min="0.05" max="1.0" step="0.05" value="1.0">
       </div>
       <div class="field-row">
         <label>呼吸移動 / 伸縮</label>
@@ -396,6 +406,9 @@
     document.getElementById("vOmega").textContent = Number(om).toFixed(1);
     document.getElementById("fZeta").value = ze;
     document.getElementById("vZeta").textContent = Number(ze).toFixed(2);
+    const op = p.opacity ?? 1.0;
+    document.getElementById("fOpacity").value = op;
+    document.getElementById("vOpacity").textContent = Number(op).toFixed(2);
     document.getElementById("fBreathY").value = p.breath_px ? p.breath_px[1] : 0;
     document.getElementById("fScaleX").value = p.scale_breath ? p.scale_breath[0] : 0;
   }
@@ -425,6 +438,7 @@
   bindField("fBend", (p, v) => { p.bend_px = parseFloat(v) || 0; });
   bindField("fOmega", (p, v) => { p.spring_omega = parseFloat(v) || 9.5; });
   bindField("fZeta", (p, v) => { p.spring_zeta = parseFloat(v) || 0.36; });
+  bindField("fOpacity", (p, v) => { p.opacity = Math.max(0.05, Math.min(1.0, parseFloat(v) || 1.0)); });
   bindField("fBreathY", (p, v) => { p.breath_px[1] = parseFloat(v) || 0; });
   bindField("fScaleX", (p, v) => { p.scale_breath[0] = parseFloat(v) || 0; });
 
@@ -440,16 +454,22 @@
 
   function guessRoleFromName(name) {
     const lo = name.toLowerCase();
-    if (lo.includes("leg") || lo.includes("boot")) return ["legs_boots", 10, null, "planted"];
-    if (lo.includes("hair_back")) return ["hair_back", 20, "torso", "hair_back"];
-    if (lo.includes("skirt")) return ["skirt", 30, "torso", "skirt"];
-    if (lo.includes("torso") || lo.includes("body")) return ["torso", 40, null, lo.includes("mochi") ? "mochi_body" : "torso"];
-    if (lo.includes("chest")) return ["chest_bow", 50, "torso", "ribbon"];
-    if (lo.includes("waist")) return ["waist_bow", 55, "torso", "ribbon"];
-    if (lo.includes("head") || lo.includes("face")) return [lo.includes("face") ? "mochi_face" : "head", 60, "torso", lo.includes("face") ? "mochi_face" : "head"];
-    if (lo.includes("side_l")) return ["hair_side_l", 70, "head", "hair_side_l"];
-    if (lo.includes("side_r")) return ["hair_side_r", 72, "head", "hair_side_r"];
-    if (lo.includes("ahoge")) return ["ahoge", 80, "head", "ahoge"];
+    if (lo.includes("leg") || lo.includes("boot")) return ["legs", 18, null, "planted"];
+    if (lo.includes("hair_back")) return ["hair_back", 14, "head_base", "hair_back"];
+    if (lo.includes("collar")) return ["collar_back", 24, "upper_torso", "collar"];
+    if (lo.includes("skirt")) return ["skirt", 28, "upper_torso", "skirt"];
+    if (lo.includes("coat_flap")) return ["coat_flap", 34, "upper_torso", "coat_hem"];
+    if (lo.includes("neck")) return ["neck", 38, "upper_torso", "neck"];
+    if (lo.includes("torso") || lo.includes("body")) return ["upper_torso", 40, null, lo.includes("mochi") ? "mochi_body" : "torso"];
+    if (lo.includes("arm")) return ["arm_r", 44, "upper_torso", "arm"];
+    if (lo.includes("chest")) return ["chest_bow", 50, "upper_torso", "ribbon"];
+    if (lo.includes("waist")) return ["waist_bow", 54, "coat_flap_r", "ribbon"];
+    if (lo.includes("face_feat")) return ["face_features", 60, "head_base", "face_features"];
+    if (lo.includes("head") || lo.includes("face")) return [lo.includes("face") ? "mochi_face" : "head_base", 58, lo.includes("face") ? "mochi_body" : "neck", lo.includes("face") ? "mochi_face" : "head"];
+    if (lo.includes("curl_l") || lo.includes("side_l")) return ["hair_curl_l", 63, "head_base", "hair_side_l"];
+    if (lo.includes("curl_r") || lo.includes("side_r")) return ["hair_curl_r", 64, "head_base", "hair_side_r"];
+    if (lo.includes("bang") || lo.includes("wing")) return ["hair_bangs", 68, "head_base", "hair_bangs"];
+    if (lo.includes("ahoge")) return ["ahoge", 80, "head_base", "ahoge"];
     if (lo.includes("tuft")) return ["mochi_tuft", 20, "mochi_body", "mochi_tuft"];
     if (lo.includes("glasses")) return ["mochi_glasses", 50, "mochi_face", "mochi_glasses"];
     if (lo.includes("paw")) return [lo.includes("_r") ? "mochi_paw_r" : "mochi_paw_l", 40, "mochi_body", "mochi_paws"];
@@ -651,15 +671,38 @@
       const om = p.spring_omega ?? 9.5;
       const ze = p.spring_zeta ?? 0.36;
       const breeze = Math.sin(t * 1.35 + ph) * 0.24 + state.gustImpulse;
-      stepSpring(sp, -g.vx * 0.24 - bodySway * 0.2 + breeze, om, ze, dt);
+      let targetX = -g.vx * 0.24 - bodySway * 0.2 + breeze;
+      if (p.role === "mochi_paws") targetX = Math.sin(t * 2.35 + ph) * 0.62 - g.vx * 0.22 + talkBob * 0.85 + state.gustImpulse;
+      else if (p.role === "mochi_glasses") targetX = -g.vx * 0.25 + Math.sin(t * 1.45 + ph) * 0.18;
+      else if (p.role === "coat_hem" || p.role === "collar") targetX = -bodySway * 0.48 - g.vx * 0.18 + breeze * 1.15;
+      else if (p.role === "arm") targetX = -bodySway * 0.38 - g.vx * 0.14 + Math.sin(t * 1.1 + ph) * 0.22;
+      stepSpring(sp, targetX, om, ze, dt);
 
       const deg2rad = Math.PI / 180;
-      let tx = p.parallax[0] * g.x * 6.5 + sp.pos * (p.role === "ahoge" || p.role === "mochi_tuft" ? 1.8 : 1.1);
-      let ty = p.parallax[1] * g.y * 4.5 + (p.breath_px ? p.breath_px[1] * breath : 0) - (p.role === "mochi_paws" ? talkBob * 3.6 : 0);
-      let rot = (p.role === "head" || p.role === "mochi_face" ? g.z : 0) + (p.rot_deg * deg2rad) * (p.role === "planted" ? 0 : 0.65 * sp.pos + 0.35 * g.x);
+      const pax = p.parallax ? p.parallax[0] : 0;
+      const pay = p.parallax ? p.parallax[1] : 0;
+      const bx = p.breath_px ? p.breath_px[0] : 0;
+      const by = p.breath_px ? p.breath_px[1] : 0;
+      let tx = pax * g.x * 4.5 + sp.pos * 1.1;
+      let ty = pay * g.y * 3.0 + by * breath;
+      let rot = (p.rot_deg * deg2rad) * (0.65 * sp.pos + 0.35 * g.x);
       let sx = 1 + (p.scale_breath ? p.scale_breath[0] * (breath - 0.5) : 0);
       let sy = 1 + (p.scale_breath ? p.scale_breath[1] * (breath - 0.5) : 0);
+
       if (p.role === "planted") { tx = 0; ty = 0; rot = 0; }
+      else if (p.role === "torso") { tx = pax * bodySway * 2.5 + bx * breath; ty = pay * g.y * 2.2 + by * breath + talkBob * 1.2; rot = p.rot_deg * deg2rad * 0.65 * (bodySway * 0.65 + g.x * 0.35); }
+      else if (p.role === "neck") { tx = pax * g.x * 0.8; ty = 0; rot = g.z * 0.35 + p.rot_deg * deg2rad * 0.25 * g.x; }
+      else if (p.role === "head") { tx = pax * g.x * 1.4; ty = pay * g.y * 1.1; rot = g.z * 1.05 + p.rot_deg * deg2rad * (0.50 * g.x + 0.16 * talkBob); }
+      else if (p.role === "face_features") { tx = pax * g.x * 4.0; ty = pay * g.y * 2.8; rot = 0; }
+      else if (p.role === "hair_bangs") { tx = pax * g.x * 4.8 + sp.pos * 1.1; ty = pay * g.y * 3.0; rot = p.rot_deg * deg2rad * sp.pos * 0.72; }
+      else if (p.role === "coat_hem") { tx = pax * (bodySway * 2.4 + sp.pos * 2.6); ty = by * breath; rot = p.rot_deg * deg2rad * sp.pos * 0.75; }
+      else if (p.role === "collar") { tx = pax * g.x * 1.8 + sp.pos; ty = by * breath; rot = p.rot_deg * deg2rad * sp.pos * 0.75; }
+      else if (p.role === "arm") { tx = pax * g.x * 1.6 + sp.pos * 1.1; ty = by * breath; rot = p.rot_deg * deg2rad * (sp.pos * 0.85 + (breath - 0.5) * 0.25); }
+      else if (p.role === "mochi_body") { tx = pax * bodySway * 7.5 + bx * breath; ty = pay * g.y * 4.5 + by * breath + talkBob * 2.2; rot = p.rot_deg * deg2rad * 0.55 * (bodySway * 0.65 + g.x * 0.35); }
+      else if (p.role === "mochi_face") { tx = pax * g.x * 8.5; ty = pay * g.y * 6.0 + by * breath + talkBob * 1.8; rot = g.z + p.rot_deg * deg2rad * 0.45 * g.x; }
+      else if (p.role === "mochi_paws") { tx = pax * g.x * 2.5 + sp.pos * 2.8; ty = -2.2 * breath - talkBob * 4.2; rot = p.rot_deg * deg2rad * (sp.pos * 0.95 + talkBob * 0.55); }
+      else if (p.role === "mochi_glasses") { tx = pax * g.x * 6.5 + sp.pos * 1.6; ty = pay * g.y * 5.0 + talkBob * 2.0; rot = p.rot_deg * deg2rad * (g.x * 0.55 + sp.pos * 0.65); }
+      else if (p.role === "ahoge" || p.role === "mochi_tuft") { tx = pax * g.x * 4.0 + sp.pos * 1.4; ty = pay * g.y * 3.0; rot = p.rot_deg * deg2rad * sp.pos * 0.85; }
       localMats.set(p.id, matAroundPivot(p.pivot_px[0], p.pivot_px[1], tx, ty, rot, sx, sy));
     }
 
@@ -684,6 +727,7 @@
       if (!img) return;
       const m = getWorld(p.id);
       ctx.save();
+      ctx.globalAlpha = p.opacity ?? 1.0;
       ctx.transform(m[0], m[3], m[1], m[4], m[2], m[5]);
       ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
       ctx.restore();

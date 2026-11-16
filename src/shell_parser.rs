@@ -1165,13 +1165,13 @@ impl ShellManifest {
         ids
     }
 
-    pub fn compose_surface_rgba(&self, sid: i32, active_binds: &[i32]) -> Option<RgbaBitmap> {
-        let mut canvas = self.compose_base_rgba(sid)?;
+    pub fn collect_bind_overlays(&self, sid: i32, active_binds: &[i32]) -> Vec<(i32, i32, RgbaBitmap)> {
+        let mut out = Vec::new();
         if active_binds.is_empty() {
-            return Some(canvas);
+            return out;
         }
         let Some(sdef) = self.surfaces.get(&sid) else {
-            return Some(canvas);
+            return out;
         };
         let mut bind_anims: Vec<&SerikoAnimation> = sdef
             .animations
@@ -1201,19 +1201,27 @@ impl ShellManifest {
                     continue;
                 }
                 if let Some(layer) = self.compose_base_rgba(pat.surface_id) {
-                    let need_w = (pat.offset_x.max(0) as u32 + layer.width).max(canvas.width);
-                    let need_h = (pat.offset_y.max(0) as u32 + layer.height).max(canvas.height);
-                    if need_w > canvas.width || need_h > canvas.height {
-                        let mut expanded = RgbaBitmap::new_transparent(need_w, need_h);
-                        expanded.alpha_composite(&canvas, 0, 0);
-                        canvas = expanded;
-                    }
-                    canvas.alpha_composite(&layer, pat.offset_x, pat.offset_y);
+                    out.push((pat.offset_x, pat.offset_y, layer));
                 }
                 if !has_zero_delay {
                     break;
                 }
             }
+        }
+        out
+    }
+
+    pub fn compose_surface_rgba(&self, sid: i32, active_binds: &[i32]) -> Option<RgbaBitmap> {
+        let mut canvas = self.compose_base_rgba(sid)?;
+        for (ox, oy, layer) in self.collect_bind_overlays(sid, active_binds) {
+            let need_w = (ox.max(0) as u32 + layer.width).max(canvas.width);
+            let need_h = (oy.max(0) as u32 + layer.height).max(canvas.height);
+            if need_w > canvas.width || need_h > canvas.height {
+                let mut expanded = RgbaBitmap::new_transparent(need_w, need_h);
+                expanded.alpha_composite(&canvas, 0, 0);
+                canvas = expanded;
+            }
+            canvas.alpha_composite(&layer, ox, oy);
         }
         Some(canvas)
     }

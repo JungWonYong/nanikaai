@@ -1501,11 +1501,31 @@ struct CharacterWindowState {
     rig: Live2dRigState,
     rig_parts: Option<LoadedCharacterRig>,
     active_binds: Vec<i32>,
+    bind_overlays: Vec<(i32, i32, RgbaBitmap)>,
     was_speaking: bool,
     visible: bool,
 }
 
 impl CharacterWindowState {
+    fn sync_rig_with_current_surface(&mut self, gpu: &GpuContext) {
+        if let Some(ref mut rig) = self.rig_parts {
+            let mut keys: Vec<i32> = self.overlays.keys().copied().collect();
+            keys.sort_unstable();
+            let combined = self
+                .bind_overlays
+                .iter()
+                .map(|(ox, oy, bmp)| (*ox, *oy, false, bmp))
+                .chain(
+                    keys.iter()
+                        .filter_map(|k| self.overlays.get(k).map(|(ox, oy, rep, ov)| (*ox, *oy, *rep, ov))),
+                );
+            let _ = rig.sync_from_surface_state(self.surface_id, combined, &self.composited);
+            self.ws.sync_part_rig(gpu, Some(rig));
+        } else {
+            self.ws.sync_part_rig(gpu, None);
+        }
+    }
+
     fn reload_sidecar_rig(
         &mut self,
         manifest: &ShellManifest,
@@ -1520,12 +1540,7 @@ impl CharacterWindowState {
             assets_dir,
             self.scope,
         );
-        if let Some(ref mut rig) = self.rig_parts {
-            let _ = rig.sync_from_composited(&self.composited);
-            self.ws.sync_part_rig(gpu, Some(rig));
-        } else {
-            self.ws.sync_part_rig(gpu, None);
-        }
+        self.sync_rig_with_current_surface(gpu);
     }
     fn sync_pos_from_window(&mut self) {
         if let Ok(pos) = self.ws.window.outer_position() {
@@ -1578,6 +1593,7 @@ impl CharacterWindowState {
         self.is_neo_default = manifest.shell_id == "neo_default";
         self.display_scale = manifest.descript.display_scale.clamp(0.5, 4.0);
         let resolved = manifest.resolve_surface_id(self.scope, requested_id);
+        self.bind_overlays = manifest.collect_bind_overlays(resolved, &self.active_binds);
         let base = manifest
             .compose_surface_rgba(resolved, &self.active_binds)
             .unwrap_or_else(|| RgbaBitmap::from_solid(180, 260, 120, 140, 200, 220));
@@ -1853,11 +1869,8 @@ impl CharacterWindowState {
         let phys = self.ws.window.inner_size();
         self.ws.resize(gpu, phys);
         self.ws.upload_rgba(gpu, &comp);
-        if let Some(ref mut rig) = self.rig_parts {
-            let _ = rig.sync_from_composited(&comp);
-            self.ws.sync_part_rig(gpu, Some(rig));
-        }
         self.composited = comp;
+        self.sync_rig_with_current_surface(gpu);
         self.ws.window.request_redraw();
     }
 
@@ -5737,7 +5750,7 @@ impl AppRuntime {
                     }
                     let sak_part_cnt = sak_win.rig_parts.as_ref().map(|r| r.parts.len()).unwrap_or(0);
                     let ker_part_cnt = ker_win.rig_parts.as_ref().map(|r| r.parts.len()).unwrap_or(0);
-                    if sak_part_cnt < 9 || ker_part_cnt < 6 {
+                    if sak_part_cnt < 18 || ker_part_cnt < 6 {
                         return Err(format!(
                             "neo_default Live2D sidecar part count mismatch: sak={sak_part_cnt}, ker={ker_part_cnt}"
                         ));
@@ -5752,6 +5765,13 @@ impl AppRuntime {
                     if let Some(ref rig) = ker_win.rig_parts {
                         rig.render_cpu_rgba().save_png(&proof_dir.join("proof-live2d-unyu.png"))?;
                     }
+                    ker_win.set_surface(&mut manifest, gpu, 11, true);
+                    ker_win.tick_live2d(gpu, true, Some((220.0, 160.0)), true);
+                    ker_win.ws.render(gpu);
+                    if let Some(ref rig) = ker_win.rig_parts {
+                        rig.render_cpu_rgba().save_png(&proof_dir.join("proof-live2d-unyu-s11.png"))?;
+                    }
+                    ker_win.set_surface(&mut manifest, gpu, 10, true);
                     sak_win.composited.save_png(&proof_dir.join("neo-sakura.png"))?;
                     ker_win.composited.save_png(&proof_dir.join("neo-unyu.png"))?;
                     exported_neo = true;
@@ -5811,7 +5831,7 @@ impl AppRuntime {
                 sb.utterance_min_w = 0;
                 sb.large = false;
             }
-            let short_script = "\\0\\s[0]안녕! 何か藍(NanikaAi) v0.1.6!\\e";
+            let short_script = "\\0\\s[0]안녕! 何か藍(NanikaAi) v0.1.7!\\e";
             self.playback.enqueue(parse_dialogue(short_script));
             let _ = self.playback.fast_forward();
             self.sync_balloons_to_playback();
@@ -5837,7 +5857,7 @@ impl AppRuntime {
                 sb.utterance_min_w = 0;
                 sb.large = false;
             }
-            let demo_script = "\\0\\s[0]안녕! 100% Safe Rust 何か藍(NanikaAi) v0.1.6 テスト完了だよ！\\n\\n長い文章では吹き出しが内容に合わせて滑らかに広がり、最大サイズに達すると自動的にスクロールバーとトラックが表示されて、マウスホイールで快適に読み進められます。\\n\\n1行目: 外付けサイドカー Live2D マルチパーツ物理揺れを有効化。\\n2行目: うにゅうの体型専用マルチレイヤー（ふさ毛・メガネ・前足・表情）を保持。\\n3行目: Gemma/SentencePieceのバイトフォールバック文字も完全復元。\\w3\\1\\s[10]サングラスの上からもバッチリ見えてるぜ。\\e";
+            let demo_script = "\\0\\s[0]안녕! 100% Safe Rust 何か藍(NanikaAi) v0.1.7 テスト完了だよ！\\n\\n長い文章では吹き出しが内容に合わせて滑らかに広がり、最大サイズに達すると自動的にスクロールバーとトラックが表示されて、マウスホイールで快適に読み進められます。\\n\\n1行目: 外付けサイドカー Live2D 解剖学的関節・多層髪・衣装揺れ有効化。\\n2行目: うにゅうの40%半透明サングラスと無欠損表情レイヤーを保持。\\n3行目: Gemma/SentencePieceのバイトフォールバック文字も完全復元。\\w3\\1\\s[10]40%半透明サングラスの上からもバッチリ見えてるぜ。\\e";
             self.playback.enqueue(parse_dialogue(demo_script));
             let _ = self.playback.fast_forward();
             self.sync_balloons_to_playback();
@@ -6382,6 +6402,7 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
             rig: Live2dRigState::new(),
             rig_parts: None,
             active_binds: init_binds.clone(),
+            bind_overlays: Vec::new(),
             is_neo_default: cfg.active_shell_id == "neo_default",
         });
 
@@ -6422,6 +6443,7 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                 rig: Live2dRigState::new(),
                 rig_parts: None,
                 active_binds: init_binds,
+                bind_overlays: Vec::new(),
                 is_neo_default: cfg.active_shell_id == "neo_default",
             });
         }

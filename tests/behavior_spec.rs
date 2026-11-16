@@ -1127,38 +1127,74 @@ fn spec_l2d_01_02_external_sidecar_parts_and_path_safety() {
     let mut unyu_rig =
         discover_and_load_rig("neo_default", &shell_dir, &user_dir, &assets, Scope::Kero)
             .expect("bundled neo_default Unyu sidecar rig");
-    assert!(sak_rig.parts.len() >= 9, "expected >=9 Sakura parts");
+    assert!(sak_rig.parts.len() >= 18, "expected >=18 anatomical Sakura parts");
     assert!(unyu_rig.parts.len() >= 6, "expected >=6 Unyu parts");
+    for required_id in [
+        "neck",
+        "head_base",
+        "face_features",
+        "hair_bangs_center",
+        "hair_wing_l",
+        "hair_wing_r",
+        "coat_flap_l",
+        "coat_flap_r",
+        "skirt",
+        "arm_r",
+        "chest_bow",
+        "waist_bow",
+        "leg_l",
+        "leg_r",
+        "star_hairpin",
+    ] {
+        assert!(
+            sak_rig.parts.iter().any(|p| p.spec.id == required_id),
+            "missing anatomical Sakura part: {required_id}"
+        );
+    }
 
-    // Verify dynamic expression + dress-up patching works on separated head/accessory layers
+    // Verify dynamic expression + dress-up patching works on separated anatomical + accessory layers
     let mgr = ShellManager::new(vec![assets.join("shells")]);
-    let mut manifest = mgr.load_shell("neo_default").unwrap();
+    let manifest = mgr.load_shell("neo_default").unwrap();
     let sak_plain = manifest.compose_surface_rgba(0, &[]).unwrap();
     let sak_clip = manifest.compose_surface_rgba(0, &[50]).unwrap();
-    let dirty0 = sak_rig.sync_from_composited(&sak_plain);
-    assert!(!dirty0.is_empty());
-    let head_plain_px = sak_rig
+    let _ = sak_rig.sync_from_surface_state(0, std::iter::empty(), &sak_plain);
+    let star_plain_px = sak_rig
         .parts
         .iter()
-        .find(|p| p.spec.id == "head")
+        .find(|p| p.spec.id == "star_hairpin")
         .unwrap()
         .current_bitmap
         .count_opaque_pixels();
-    let _ = sak_rig.sync_from_composited(&sak_clip);
-    let head_clip_px = sak_rig
+    assert_eq!(star_plain_px, 0, "star_hairpin must be empty when bindgroup50 is off");
+    let sak_ovs = manifest.collect_bind_overlays(0, &[50]);
+    let _ = sak_rig.sync_from_surface_state(
+        0,
+        sak_ovs.iter().map(|(ox, oy, bmp)| (*ox, *oy, false, bmp)),
+        &sak_clip,
+    );
+    let star_clip_px = sak_rig
         .parts
         .iter()
-        .find(|p| p.spec.id == "head")
+        .find(|p| p.spec.id == "star_hairpin")
         .unwrap()
         .current_bitmap
         .count_opaque_pixels();
     assert!(
-        head_clip_px > head_plain_px,
-        "star hair-clip bindgroup50 must expand head layer opaque pixels"
+        star_clip_px > 200,
+        "star hair-clip bindgroup50 must populate star_hairpin layer (got {star_clip_px}px)"
     );
 
+    assert!(
+        unyu_rig.surface_overrides.contains_key(&11),
+        "Unyu rig must provide clean glasses-free surface_overrides for surface11"
+    );
     let unyu_surprised = manifest.compose_surface_rgba(11, &[51]).unwrap();
-    let unyu_dirty = unyu_rig.sync_from_composited(&unyu_surprised);
+    let unyu_ovs = manifest.collect_bind_overlays(11, &[51]);
+    let unyu_dirty = unyu_rig.sync_from_surface_state(
+        11,
+        unyu_ovs.iter().map(|(ox, oy, bmp)| (*ox, *oy, false, bmp)),
+        &unyu_surprised,
+    );
     assert!(unyu_dirty.len() >= 2, "expected face + crown patches");
     let crown_px = unyu_rig
         .parts
@@ -1168,6 +1204,40 @@ fn spec_l2d_01_02_external_sidecar_parts_and_path_safety() {
         .current_bitmap
         .count_opaque_pixels();
     assert!(crown_px > 400, "Unyu bindgroup51 crown must populate accessory slot");
+
+    let unyu_face_bmp = &unyu_rig
+        .parts
+        .iter()
+        .find(|p| p.spec.id == "mochi_face")
+        .unwrap()
+        .current_bitmap;
+    let sclera_idx = ((153 * unyu_face_bmp.width + 168) * 4) as usize;
+    let (sr, sg, sb, sa) = (
+        unyu_face_bmp.data[sclera_idx],
+        unyu_face_bmp.data[sclera_idx + 1],
+        unyu_face_bmp.data[sclera_idx + 2],
+        unyu_face_bmp.data[sclera_idx + 3],
+    );
+    assert!(
+        sr >= 240 && sg >= 240 && sb >= 240 && sa >= 240,
+        "Unyu surface11 sclera at (168,153) must be unbroken bright white, got ({sr},{sg},{sb},{sa})"
+    );
+
+    let glasses_bmp =
+        load_ukagaka_rgba(&assets.join("live2d/neo_default/parts/unyu_glasses.png"), None)
+            .expect("unyu_glasses.png must load");
+    let lens_idx = ((212 * glasses_bmp.width + 180) * 4) as usize;
+    let lens_a = glasses_bmp.data[lens_idx + 3];
+    let rim_idx = ((174 * glasses_bmp.width + 180) * 4) as usize;
+    let rim_a = glasses_bmp.data[rim_idx + 3];
+    assert!(
+        (90..=118).contains(&lens_a),
+        "Unyu sunglasses lens interior must stay ~40% translucent (alpha 90..=118), got {lens_a}"
+    );
+    assert!(
+        rim_a >= 235,
+        "Unyu sunglasses outer rim must stay opaque (>=235), got {rim_a}"
+    );
 
     let motion = Live2dMotionInputs {
         dt: 0.033,
