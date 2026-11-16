@@ -1,6 +1,6 @@
 # 何か藍 (`NanikaAi`) — 現行動作仕様および自動検証基準 (`BEHAVIOR_SPEC`)
 
-- **Document Version**: `v1.0.0`
+- **Document Version**: `v1.1.0`
 - **Target Software**: `nanikaai` `v0.1.3+`
 - **Purpose**: 改修後の自動動作確認テスト（`cargo test` / `--smoke-test` / 静的監査）における合否基準と、変更内容に応じた検証ティア・結果報告様式を定義する。
 
@@ -42,6 +42,7 @@
 | `SPEC-SRV-02` | HTTP 操作 API | `POST /api/speak`・`/api/chat`・`/api/event`・`/api/skin`・`/api/provider` を処理する | 正常ペイロードで `200 OK`、必須項目欠落（空 `script`/`message`/`provider`）で `400 Bad Request` を返すこと | `behavior_spec` |
 | `SPEC-SRV-03` | SSTP 互換 | HTTP `/sstp` および生 TCP `SSTP/1.4` 要求を受理する | HTTP `/sstp` が `200 OK`＋`X-Actions`、TCP `SSTP/1.4` が `200 OK`＋`Charset: UTF-8` を返し、空 `Script` に `400 Bad Request` を返すこと | `behavior_spec` / `--smoke-test` |
 | `SPEC-SRV-04` | 自動監査・保守 | 個人パス・機密・未処理マーカーをリポジトリへ混入させない | 追跡対象ファイルに未処理の作業待ち・仮置き注記やローカル個人パスが `0` 件であること | `verify_behavior.py` |
+| `SPEC-OS-01` | マルチ OS 実機互換 | macOS / Linux / Windows の各実機環境で動作検証可能であること | ローカル（macOS）に加え、Linux 実機での `cargo test`＋`--smoke-test`、および Windows 実機での配布バイナリ `--smoke-test`（`[SMOKE PASS] unsafe=0`）が通過すること | `verify_behavior.py --remote-linux/--remote-win` / CI |
 
 ---
 
@@ -54,6 +55,12 @@
 
   # 強制フル検証 ＋ レポートファイル保存
   python3 scripts/verify_behavior.py --mode full --report-md artifacts/verify_report.md --report-json artifacts/verify_report.json
+
+  # 3 OS 実機横断検証（ローカル macOS + SSH 経由 Linux + SSH 経由 Windows 実機）
+  python3 scripts/verify_behavior.py --mode full --remote-linux <linux_ssh_host> --remote-win <win_ssh_host>
+
+  # 配布バイナリ単体スモーク検証（ビルド環境のない端末向け）
+  python3 scripts/verify_behavior.py --mode full --binary <path_to_nanikaai_exe>
   ```
 - **ローカル自動実行（Git `pre-push` フック）**:
   - `bash scripts/install_hooks.sh` で [`.githooks/pre-push`](../.githooks/pre-push) を有効化すると、`git push` ごとに `verify_behavior.py --mode auto` が自動実行され、不合格時はプッシュ前に停止する。

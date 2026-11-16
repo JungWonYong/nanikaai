@@ -14,13 +14,17 @@ Modes:
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime
+import io
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -259,29 +263,48 @@ def release_binary_needs_build(bin_path: Path) -> bool:
     return False
 
 
-def check_tier2_full() -> list[dict[str, Any]]:
+def check_tier2_full(custom_binary: str | None = None) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
-    bin_name = "nanikaai.exe" if os.name == "nt" else "nanikaai"
-    bin_path = ROOT_DIR / "target" / "release" / bin_name
-
-    if release_binary_needs_build(bin_path):
-        b_rc, b_out = _run(["cargo", "build", "--release"])
-        if b_rc != 0:
-            tail = "\n".join(b_out.splitlines()[-15:])
+    if custom_binary:
+        bin_path = Path(custom_binary)
+        if not bin_path.is_file():
             results.append({
                 "spec": "SPEC-UI-01",
                 "name": "実ウィンドウ / GPU スモーク検証 (`--smoke-test`)",
                 "status": "FAIL",
-                "detail": f"release build failed (exit={b_rc}): {tail}",
+                "detail": f"指定バイナリが存在しません: {bin_path}",
             })
             return results
+    else:
+        bin_name = "nanikaai.exe" if os.name == "nt" else "nanikaai"
+        bin_path = ROOT_DIR / "target" / "release" / bin_name
 
-    artifacts_existed = (ROOT_DIR / "artifacts").exists()
-    s_rc, s_out = _run([str(bin_path), "--smoke-test"])
-    if not artifacts_existed and (ROOT_DIR / "artifacts").exists():
-        shutil.rmtree(ROOT_DIR / "artifacts", ignore_errors=True)
+        if release_binary_needs_build(bin_path):
+            b_rc, b_out = _run(["cargo", "build", "--release"])
+            if b_rc != 0:
+                tail = "\n".join(b_out.splitlines()[-15:])
+                results.append({
+                    "spec": "SPEC-UI-01",
+                    "name": "実ウィンドウ / GPU スモーク検証 (`--smoke-test`)",
+                    "status": "FAIL",
+                    "detail": f"release build failed (exit={b_rc}): {tail}",
+                })
+                return results
 
-    smoke_line = next((ln for ln in s_out.splitlines() if "[SMOKE PASS]" in ln), "")
+    with tempfile.TemporaryDirectory(prefix="nanikaai_smoke_") as tmp_dir:
+        smoke_log = Path(tmp_dir) / "smoke.log"
+        proof_dir = Path(tmp_dir) / "artifacts"
+        s_rc, s_out = _run(
+            [str(bin_path), "--smoke-test"],
+            env={
+                "NANIKAAI_SMOKE_LOG": str(smoke_log),
+                "NANIKAAI_SMOKE_PROOF_DIR": str(proof_dir),
+            },
+        )
+        log_txt = smoke_log.read_text(encoding="utf-8", errors="replace") if smoke_log.is_file() else ""
+
+    combined_out = f"{s_out}\n{log_txt}"
+    smoke_line = next((ln for ln in combined_out.splitlines() if "[SMOKE PASS]" in ln), "")
     smoke_ok = (s_rc == 0) and bool(smoke_line) and ("unsafe=0" in smoke_line)
     results.append({
         "spec": "SPEC-UI-01",
@@ -310,6 +333,217 @@ def check_tier2_full() -> list[dict[str, Any]]:
         })
 
     return results
+
+
+def _build_source_tarball() -> bytes:
+    proc = subprocess.run(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+        cwd=str(ROOT_DIR),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
+    )
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for raw_rel in proc.stdout.split(b"\x00"):
+            if not raw_rel:
+                continue
+            rel = raw_rel.decode("utf-8", errors="surrogateescape")
+            fp = ROOT_DIR / rel
+            if fp.is_file():
+                tf.add(fp, arcname=rel)
+    return buf.getvalue()
+
+
+def check_remote_linux(host: str) -> dict[str, Any]:
+    name = f"Linux 実機検証 ({host})"
+    try:
+        tar_bytes = _build_source_tarball()
+    except Exception as exc:
+        return {"spec": "MULTI-OS-LINUX", "name": name, "status": "FAIL", "detail": f"ソース梱包失敗: {exc}"}
+
+    sync_proc = subprocess.run(
+        [
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            host,
+            "mkdir -p ~/.cache/nanikaai-verify && tar -xzf - -C ~/.cache/nanikaai-verify",
+        ],
+        input=tar_bytes,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    if sync_proc.returncode != 0:
+        out_txt = sync_proc.stdout.decode("utf-8", errors="replace").strip()
+        return {"spec": "MULTI-OS-LINUX", "name": name, "status": "FAIL", "detail": f"SSH転送失敗: {out_txt[-200:]}"}
+
+    remote_script = r"""set -euo pipefail
+export PATH="$HOME/.cargo/bin:$PATH"
+cd "$HOME/.cache/nanikaai-verify"
+rm -f /tmp/nanikaai_verify_linux.json
+if [[ -S /tmp/.X11-unix/X0 ]]; then
+  export DISPLAY=":0"
+  if [[ -r "/run/user/$(id -u)/gdm/Xauthority" ]]; then
+    export XAUTHORITY="/run/user/$(id -u)/gdm/Xauthority"
+  elif [[ -f "$HOME/.Xauthority" ]]; then
+    export XAUTHORITY="$HOME/.Xauthority"
+  fi
+fi
+set +e
+python3 scripts/verify_behavior.py --mode full --quiet --report-json /tmp/nanikaai_verify_linux.json
+RC=$?
+if [[ $RC -ne 0 ]] && command -v xvfb-run >/dev/null 2>&1; then
+  xvfb-run -a -s "-screen 0 1920x1080x24" python3 scripts/verify_behavior.py --mode full --quiet --report-json /tmp/nanikaai_verify_linux.json
+  RC=$?
+fi
+echo "===LINUX_VERIFY_JSON==="
+cat /tmp/nanikaai_verify_linux.json 2>/dev/null || echo '{"overall":"FAIL","counts":{"PASS":0,"FAIL":1,"SKIP":0},"checks":[]}'
+rm -f /tmp/nanikaai_verify_linux.json
+exit $RC
+"""
+    run_proc = subprocess.run(
+        ["ssh", "-o", "BatchMode=yes", host, "bash -s"],
+        input=remote_script,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    marker = "===LINUX_VERIFY_JSON==="
+    raw_out = run_proc.stdout
+    if marker not in raw_out:
+        return {
+            "spec": "MULTI-OS-LINUX",
+            "name": name,
+            "status": "FAIL",
+            "detail": f"exit={run_proc.returncode}, 出力欠損: {' | '.join(raw_out.splitlines()[-8:])}",
+        }
+    json_str = raw_out.split(marker, 1)[1].strip()
+    try:
+        rep = json.loads(json_str)
+    except ValueError as exc:
+        return {"spec": "MULTI-OS-LINUX", "name": name, "status": "FAIL", "detail": f"JSON解析失敗: {exc}"}
+
+    checks_map = {c.get("spec"): c for c in rep.get("checks", [])}
+    cargo_det = checks_map.get("CARGO-TEST", {}).get("detail", "")
+    smoke_det = checks_map.get("SPEC-UI-01", {}).get("detail", "")
+    smoke_short = smoke_det.split(" scale=")[0] if " scale=" in smoke_det else smoke_det
+    ok = (run_proc.returncode == 0) and (rep.get("overall") == "PASS")
+    return {
+        "spec": "MULTI-OS-LINUX",
+        "name": name,
+        "status": "PASS" if ok else "FAIL",
+        "detail": f"{rep.get('counts')} | {cargo_det} | {smoke_short}",
+    }
+
+
+def check_remote_win(host: str) -> dict[str, Any]:
+    name = f"Windows 実機検証 ({host})"
+    zip_url = os.environ.get(
+        "NANIKAAI_WIN_ZIP_URL",
+        "https://github.com/JungWonYong/nanikaai/releases/latest/download/NanikaAi-windows-x64.zip",
+    )
+    ps_script = rf"""
+$ErrorActionPreference = 'Stop'
+[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+$work = Join-Path $env:TEMP 'nanikaai-verify'
+$unpack = Join-Path $work 'unpacked'
+$zip = Join-Path $work 'NanikaAi-windows-x64.zip'
+$smokeLog = Join-Path $work 'smoke.log'
+$proofDir = Join-Path $work 'proof'
+New-Item -ItemType Directory -Force -Path $work, $proofDir | Out-Null
+if (Test-Path $unpack) {{ Remove-Item -Recurse -Force $unpack }}
+if (Test-Path $smokeLog) {{ Remove-Item -Force $smokeLog }}
+Invoke-WebRequest -UseBasicParsing -Uri '{zip_url}' -OutFile $zip
+Expand-Archive -Path $zip -DestinationPath $unpack -Force
+$exeObj = Get-ChildItem -Path $unpack -Filter 'nanikaai.exe' -Recurse | Select-Object -First 1
+if (-not $exeObj) {{ throw 'nanikaai.exe not found in archive' }}
+$exe = $exeObj.FullName
+$modeUsed = 'direct'
+$rc = 1
+$env:NANIKAAI_SMOKE_LOG = $smokeLog
+$env:NANIKAAI_SMOKE_PROOF_DIR = $proofDir
+$proc = Start-Process -FilePath $exe -ArgumentList '--smoke-test' -Wait -PassThru
+$rc = $proc.ExitCode
+$smokeLine = ''
+if (Test-Path $smokeLog) {{ $smokeLine = (Get-Content -Raw -Encoding UTF8 $smokeLog).Trim() }}
+if ($rc -ne 0 -or -not ($smokeLine -match '\[SMOKE PASS\]')) {{
+  $modeUsed = 'schtasks-interactive'
+  $taskRc = Join-Path $work 'smoke.rc'
+  if (Test-Path $taskRc) {{ Remove-Item -Force $taskRc }}
+  if (Test-Path $smokeLog) {{ Remove-Item -Force $smokeLog }}
+  $runnerPs = Join-Path $work 'run_smoke_it.ps1'
+  $scriptBody = @"
+`$env:NANIKAAI_SMOKE_LOG = '$smokeLog'
+`$env:NANIKAAI_SMOKE_PROOF_DIR = '$proofDir'
+`$p = Start-Process -FilePath '$exe' -ArgumentList '--smoke-test' -Wait -PassThru
+`$p.ExitCode | Out-File -Encoding ascii '$taskRc'
+"@
+  Set-Content -Path $runnerPs -Value $scriptBody -Encoding UTF8
+  schtasks /Create /F /SC ONCE /ST 23:59 /TN 'NanikaAiSmokeVerify' /IT /RL LIMITED /TR "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$runnerPs`"" | Out-Null
+  schtasks /Run /TN 'NanikaAiSmokeVerify' | Out-Null
+  for ($i = 0; $i -lt 50; $i++) {{
+    if (Test-Path $taskRc) {{ break }}
+    Start-Sleep -Milliseconds 500
+  }}
+  schtasks /Delete /F /TN 'NanikaAiSmokeVerify' 2>$null | Out-Null
+  if (Test-Path $taskRc) {{ $rc = [int]((Get-Content -Raw $taskRc).Trim()) }}
+  if (Test-Path $smokeLog) {{ $smokeLine = (Get-Content -Raw -Encoding UTF8 $smokeLog).Trim() }}
+}}
+$gpu = ((Get-CimInstance Win32_VideoController | Where-Object {{ $_.Name -notmatch 'Virtual' }} | Select-Object -First 1 -ExpandProperty Name) -as [string])
+if (-not $gpu) {{ $gpu = (Get-CimInstance Win32_VideoController | Select-Object -First 1 -ExpandProperty Name) }}
+$osVer = [System.Environment]::OSVersion.Version.ToString()
+$obj = @{{
+  os = "Windows $osVer"
+  gpu = $gpu
+  mode = $modeUsed
+  exit_code = $rc
+  smoke_line = $smokeLine
+}}
+$b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes(($obj | ConvertTo-Json -Compress)))
+Write-Output "===WIN_VERIFY_B64==="
+Write-Output $b64
+"""
+    encoded = base64.b64encode(ps_script.encode("utf-16le")).decode("ascii")
+    proc = subprocess.run(
+        [
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            host,
+            f"powershell -NoProfile -NonInteractive -EncodedCommand {encoded}",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    marker = "===WIN_VERIFY_B64==="
+    if marker not in proc.stdout:
+        return {
+            "spec": "MULTI-OS-WIN",
+            "name": name,
+            "status": "FAIL",
+            "detail": f"exit={proc.returncode}, 出力欠損: {' | '.join(proc.stdout.splitlines()[-6:])}",
+        }
+    b64_line = proc.stdout.split(marker, 1)[1].strip().splitlines()[0].strip()
+    try:
+        info = json.loads(base64.b64decode(b64_line).decode("utf-8", errors="replace"))
+    except Exception as exc:
+        return {"spec": "MULTI-OS-WIN", "name": name, "status": "FAIL", "detail": f"デコード失敗: {exc}"}
+
+    smoke_line = str(info.get("smoke_line", ""))
+    smoke_short = smoke_line.split(" scale=")[0] if " scale=" in smoke_line else smoke_line
+    ok = (info.get("exit_code") == 0) and ("[SMOKE PASS]" in smoke_line) and ("unsafe=0" in smoke_line)
+    return {
+        "spec": "MULTI-OS-WIN",
+        "name": name,
+        "status": "PASS" if ok else "FAIL",
+        "detail": f"{info.get('os')} / {info.get('gpu')} ({info.get('mode')}) | {smoke_short or 'exit=' + str(info.get('exit_code'))}",
+    }
 
 
 def render_markdown_report(report: dict[str, Any]) -> str:
@@ -345,6 +579,17 @@ def main() -> int:
         default="full",
         help="Verification tier (default: full)",
     )
+    parser.add_argument("--binary", help="Optional prebuilt binary path to run --smoke-test directly")
+    parser.add_argument(
+        "--remote-linux",
+        default=os.environ.get("NANIKAAI_TEST_LINUX_HOST", ""),
+        help="Optional SSH target for real Linux hardware verification",
+    )
+    parser.add_argument(
+        "--remote-win",
+        default=os.environ.get("NANIKAAI_TEST_WIN_HOST", ""),
+        help="Optional SSH target for real Windows hardware verification",
+    )
     parser.add_argument("--report-md", help="Optional path to write Markdown report")
     parser.add_argument("--report-json", help="Optional path to write JSON report")
     parser.add_argument("--quiet", action="store_true", help="Suppress stdout Markdown summary")
@@ -361,7 +606,7 @@ def main() -> int:
     checks: list[dict[str, Any]] = []
     checks.extend(check_tier0_static())
 
-    if effective_mode in ("standard", "full"):
+    if effective_mode in ("standard", "full") and not args.binary:
         t1_checks, _ = check_tier1_cargo_tests()
         checks.extend(t1_checks)
     else:
@@ -369,11 +614,11 @@ def main() -> int:
             "spec": "CARGO-TEST",
             "name": "単体テスト＋仕様統合テスト実行 (`cargo test`)",
             "status": "SKIP",
-            "detail": "fast モード（文書のみ変更）のため省略",
+            "detail": "--binary 指定または fast モードのため省略" if args.binary else "fast モード（文書のみ変更）のため省略",
         })
 
     if effective_mode == "full":
-        checks.extend(check_tier2_full())
+        checks.extend(check_tier2_full(custom_binary=args.binary))
     else:
         checks.append({
             "spec": "SPEC-UI-01",
@@ -381,6 +626,11 @@ def main() -> int:
             "status": "SKIP",
             "detail": f"{effective_mode} モードのため省略",
         })
+
+    if args.remote_linux:
+        checks.append(check_remote_linux(args.remote_linux))
+    if args.remote_win:
+        checks.append(check_remote_win(args.remote_win))
 
     counts = {
         "PASS": sum(1 for c in checks if c["status"] == "PASS"),

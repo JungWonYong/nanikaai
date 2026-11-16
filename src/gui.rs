@@ -3898,7 +3898,10 @@ impl AppRuntime {
                 ));
             }
 
-            let proof_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("artifacts");
+            let proof_dir = std::env::var_os("NANIKAAI_SMOKE_PROOF_DIR")
+                .map(PathBuf::from)
+                .or_else(|| self.smoke_user_dir.as_ref().map(|d| d.join("artifacts")))
+                .unwrap_or_else(|| std::env::temp_dir().join("nanikaai-smoke-artifacts"));
             let _ = std::fs::create_dir_all(&proof_dir);
 
             let mut exported_neo = false;
@@ -4129,12 +4132,18 @@ impl AppRuntime {
         match result {
             Ok(summary) => {
                 println!("{summary}");
+                if let Some(p) = std::env::var_os("NANIKAAI_SMOKE_LOG") {
+                    let _ = std::fs::write(p, format!("{summary}\n"));
+                }
                 if let Ok(mut g) = self.smoke_passed.lock() {
                     *g = true;
                 }
             }
             Err(err) => {
                 eprintln!("[SMOKE FAIL] {err}");
+                if let Some(p) = std::env::var_os("NANIKAAI_SMOKE_LOG") {
+                    let _ = std::fs::write(p, format!("[SMOKE FAIL] {err}\n"));
+                }
             }
         }
         event_loop.exit();
@@ -5239,7 +5248,7 @@ pub fn run(smoke_test: bool) -> Result<(), String> {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or(0);
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(".smoke-userdata-{ts}"));
+        let dir = std::env::temp_dir().join(format!("nanikaai-smoke-userdata-{ts}"));
         let store = ConfigStore::new(Some(dir.clone()));
         store.update(ConfigPatch {
             provider: Some("local_ollama".to_string()),
