@@ -155,6 +155,36 @@ pub fn tools_schema() -> Value {
                 "description": "Check reachable Ollama models on the configured endpoint.",
                 "parameters": {"type": "object", "properties": {}, "required": []}
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "set_reminder",
+                "description": "Schedule a desktop reminder/timer so the Ghost notifies the user after delay_minutes (or delay_seconds).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "message": {"type": "string", "description": "Reminder message to display when triggered"},
+                        "delay_minutes": {"type": "integer", "description": "Minutes from now (default 5)"},
+                        "delay_seconds": {"type": "integer", "description": "Seconds from now (overrides delay_minutes if set)"}
+                    },
+                    "required": ["message"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_reminders",
+                "description": "List pending scheduled desktop reminders.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "include_done": {"type": "boolean", "description": "Include already triggered reminders"}
+                    },
+                    "required": []
+                }
+            }
         }
     ])
 }
@@ -696,6 +726,8 @@ impl BuiltinToolRunner {
             "memory_save" => self.memory_save(&str_arg("title"), &str_arg("content")),
             "memory_search" => self.memory_search(&str_arg("keyword")),
             "check_ollama_models" => self.check_ollama_models(),
+            "set_reminder" => self.set_reminder(args),
+            "list_reminders" => self.list_reminders(args),
             _ => json!({"ok": false, "error": format!("Unknown tool: {name}")}).to_string(),
         }
     }
@@ -1005,6 +1037,49 @@ impl BuiltinToolRunner {
     fn memory_search(&self, keyword: &str) -> String {
         let items = self.config_store.search_memories(keyword);
         json!({"ok": true, "count": items.len(), "items": items}).to_string()
+    }
+
+    fn set_reminder(&self, args: &Value) -> String {
+        let message = args
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if message.is_empty() {
+            return json!({"ok": false, "error": "message is required."}).to_string();
+        }
+        let delay_secs = if let Some(sec) = args.get("delay_seconds").and_then(|v| v.as_i64()) {
+            sec.clamp(1, 86_400 * 30)
+        } else {
+            let mins = args
+                .get("delay_minutes")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(5)
+                .clamp(1, 43_200);
+            mins * 60
+        };
+        let now_utc = chrono::Utc::now();
+        let fire_at_unix = now_utc.timestamp() + delay_secs;
+        let saved = self.config_store.add_reminder(message, fire_at_unix, None);
+        let fire_local = (Local::now() + chrono::Duration::seconds(delay_secs))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+        json!({
+            "ok": true,
+            "reminder": saved,
+            "fire_at_local": fire_local,
+            "delay_seconds": delay_secs
+        })
+        .to_string()
+    }
+
+    fn list_reminders(&self, args: &Value) -> String {
+        let include_done = args
+            .get("include_done")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let items = self.config_store.list_reminders(include_done);
+        json!({"ok": true, "count": items.len(), "reminders": items}).to_string()
     }
 
     fn check_ollama_models(&self) -> String {

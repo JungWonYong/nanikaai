@@ -4,6 +4,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use arboard::Clipboard;
+use chrono::{Datelike, Local, Timelike, Utc};
 use cosmic_text::{
     Attrs, Buffer, Color as TextColor, Family, FontSystem, Metrics, Shaping, SwashCache, Wrap,
 };
@@ -940,6 +941,7 @@ struct CharacterWindowState {
     center_u: f32,
     aspect_hw: f32,
     rig: Live2dRigState,
+    active_binds: Vec<i32>,
     was_speaking: bool,
     visible: bool,
 }
@@ -997,7 +999,7 @@ impl CharacterWindowState {
         self.display_scale = manifest.descript.display_scale.clamp(0.5, 4.0);
         let resolved = manifest.resolve_surface_id(self.scope, requested_id);
         let base = manifest
-            .compose_base_rgba(resolved)
+            .compose_surface_rgba(resolved, &self.active_binds)
             .unwrap_or_else(|| RgbaBitmap::from_solid(180, 260, 120, 140, 200, 220));
         self.surface_id = resolved;
         self.base_bmp = Some(base);
@@ -1114,7 +1116,7 @@ impl CharacterWindowState {
                             } else {
                                 self.surface_id
                             };
-                            if let Some(new_base) = manifest.compose_base_rgba(target_sid) {
+                            if let Some(new_base) = manifest.compose_surface_rgba(target_sid, &self.active_binds) {
                                 self.base_bmp = Some(new_base);
                                 dirty = true;
                             }
@@ -1430,6 +1432,7 @@ impl CharacterWindowState {
 struct ChoiceItem {
     label: String,
     choice_id: String,
+    is_url: bool,
     rect: (f64, f64, f64, f64), // logical coords inside balloon window
 }
 
@@ -1493,7 +1496,8 @@ impl BalloonWindowState {
                 widest_pt = widest_pt.max(lw);
             }
             for ch in &self.choices {
-                let cw = text_renderer.measure_inline_width(&format!("▸ {}", ch.label), font_pt * scale) / scale + 24.0;
+                let prefix = if ch.is_url { "🔗" } else { "▸" };
+                let cw = text_renderer.measure_inline_width(&format!("{prefix} {}", ch.label), font_pt * scale) / scale + 24.0;
                 widest_pt = widest_pt.max(cw);
             }
             let desired_w = (left_out + right_out + pad_x * 2.0 + widest_pt + 16.0)
@@ -1679,9 +1683,10 @@ impl BalloonWindowState {
                             [0, 0, 0, 0],
                             90,
                         );
+                        let prefix = if ch.is_url { "🔗" } else { "▸" };
                         text_renderer.draw_text(
                             &mut canvas,
-                            &format!("▸ {}", ch.label),
+                            &format!("{prefix} {}", ch.label),
                             (content_left + 8.0 * scale).round() as i32,
                             (y_cursor + 4.5 * scale).round() as i32,
                             (usable_w - 14.0 * scale).max(20.0),
@@ -1857,9 +1862,10 @@ impl BalloonWindowState {
                         skin.anchor_rgb.2.max(185),
                     )
                 };
+                let prefix = if ch.is_url { "🔗" } else { "▸" };
                 text_renderer.draw_text(
                     &mut canvas,
-                    &format!("▸ {}", ch.label),
+                    &format!("{prefix} {}", ch.label),
                     left.round() as i32,
                     y_cursor.round() as i32,
                     usable_w,
@@ -2227,6 +2233,10 @@ enum MenuCommand {
     ToggleKero,
     ToggleAlwaysOnTop,
     ToggleLive2dMotion,
+    ToggleBind(i32),
+    ToggleHourlyChime,
+    ToggleVoiceTts,
+    CheckUpdates,
     InstallNarDialog,
     ResetPositions,
     ClearHistory,
@@ -2420,6 +2430,7 @@ struct PlaybackQueue {
     active_speaker: Scope,
     last_char_spoken: Option<(Scope, Instant)>,
     auto_hide_at: Option<Instant>,
+    quick_mode: bool,
     sakura_buf: String,
     kero_buf: String,
     sakura_choices: Vec<ChoiceItem>,
@@ -2439,6 +2450,7 @@ impl PlaybackQueue {
             active_speaker: Scope::Sakura,
             last_char_spoken: None,
             auto_hide_at: None,
+            quick_mode: false,
             sakura_buf: String::new(),
             kero_buf: String::new(),
             sakura_choices: Vec::new(),
@@ -2459,6 +2471,7 @@ impl PlaybackQueue {
         self.steps.clear();
         self.paused_until = None;
         self.auto_hide_at = None;
+        self.quick_mode = false;
         self.active_speaker = Scope::Sakura;
         self.last_char_spoken = None;
         self.sakura_buf.clear();
@@ -2510,21 +2523,30 @@ impl PlaybackQueue {
                             self.sakura_dirty = true;
                         }
                     }
-                    ActionKind::Choice => {
+                    ActionKind::Choice | ActionKind::Link => {
+                        let is_url = act.kind == ActionKind::Link;
                         let item = ChoiceItem {
                             label: act.label,
                             choice_id: act.choice_id,
+                            is_url,
                             rect: (0.0, 0.0, 0.0, 0.0),
                         };
                         if self.active_speaker == Scope::Kero {
-                            self.kero_choices.push(item);
+                            if !is_url || !self.kero_choices.iter().any(|c| c.choice_id == item.choice_id) {
+                                self.kero_choices.push(item);
+                            }
                             self.kero_show = true;
                             self.kero_dirty = true;
                         } else {
-                            self.sakura_choices.push(item);
+                            if !is_url || !self.sakura_choices.iter().any(|c| c.choice_id == item.choice_id) {
+                                self.sakura_choices.push(item);
+                            }
                             self.sakura_show = true;
                             self.sakura_dirty = true;
                         }
+                    }
+                    ActionKind::QuickToggle => {
+                        self.quick_mode = !self.quick_mode;
                     }
                     ActionKind::Pause => {}
                     ActionKind::Surface | ActionKind::BalloonSize => imm_actions.push(act),
@@ -2789,6 +2811,9 @@ struct AppRuntime {
     server: Option<ServerHandle>,
     modifiers: ModifiersState,
     auto_talk_last: Instant,
+    last_chime_key: Option<(i32, u32)>,
+    reminder_poll_last: Instant,
+    closing_at: Option<Instant>,
     os_insets: DesktopInsets,
     initialized: bool,
 }
@@ -3104,10 +3129,14 @@ impl AppRuntime {
 
     fn apply_skin_switch(&mut self, shell_id: Option<String>, balloon_id: Option<String>) -> Result<Value, String> {
         let mut cfg = self.config_store.get();
+        let prev_shell_id = cfg.active_shell_id.clone();
         let switched_shell = shell_id.is_some();
         if let Some(ref sid) = shell_id {
             let loaded = self.shell_manager.load_shell(sid)?;
             let new_ds = loaded.descript.display_scale.clamp(0.5, 4.0);
+            let next_binds = self
+                .config_store
+                .get_active_binds(sid, &loaded.default_bind_ids());
             *self.manifest.lock().expect("manifest mutex poisoned") = loaded;
             cfg = self.config_store.update(ConfigPatch {
                 active_shell_id: Some(sid.clone()),
@@ -3116,12 +3145,14 @@ impl AppRuntime {
             if let (Some(ref gpu), Some(ref mut sak)) = (&self.gpu, &mut self.sakura) {
                 let mut m = self.manifest.lock().expect("manifest mutex poisoned");
                 sak.display_scale = new_ds;
+                sak.active_binds = next_binds.clone();
                 sak.anim_next.clear();
                 sak.set_surface(&mut m, gpu, 0, true);
             }
             if let (Some(ref gpu), Some(ref mut ker)) = (&self.gpu, &mut self.kero) {
                 let mut m = self.manifest.lock().expect("manifest mutex poisoned");
                 ker.display_scale = new_ds;
+                ker.active_binds = next_binds;
                 ker.anim_next.clear();
                 ker.set_surface(&mut m, gpu, 10, true);
             }
@@ -3151,6 +3182,14 @@ impl AppRuntime {
             self.reposition_balloon(Scope::Kero);
         }
         self.rebuild_tray_menu();
+        if switched_shell && !self.smoke_mode && shell_id.as_deref() != Some(prev_shell_id.as_str()) {
+            let greet = self
+                .engine
+                .build_skin_switch_greeting(&prev_shell_id, &cfg.active_shell_id);
+            let _ = self
+                .proxy
+                .send_event(UserEvent::PlayActions(parse_dialogue(&greet)));
+        }
         let active_name = self.manifest.lock().map(|m| m.descript.name.clone()).unwrap_or_default();
         Ok(json!({
             "shell": cfg.active_shell_id,
@@ -3225,6 +3264,24 @@ impl AppRuntime {
                 cmd: MenuCommand::ToggleLive2dMotion,
             },
             MenuRow {
+                label: if cfg.hourly_chime {
+                    "✓ 🕒 時報 (毎時00分) · Hourly Chime"
+                } else {
+                    "   🕒 時報 (毎時00分) · Hourly Chime"
+                }
+                .to_string(),
+                cmd: MenuCommand::ToggleHourlyChime,
+            },
+            MenuRow {
+                label: if cfg.voice_tts {
+                    "✓ 🔊 音声読み上げ · Voice (TTS)"
+                } else {
+                    "   🔊 音声読み上げ · Voice (TTS)"
+                }
+                .to_string(),
+                cmd: MenuCommand::ToggleVoiceTts,
+            },
+            MenuRow {
                 label: String::new(),
                 cmd: MenuCommand::Separator,
             },
@@ -3267,9 +3324,40 @@ impl AppRuntime {
             });
         }
 
+        let (bind_groups, active_binds) = {
+            let m = self.manifest.lock().expect("manifest mutex poisoned");
+            let groups = m.effective_bind_groups();
+            let active = self
+                .config_store
+                .get_active_binds(&cfg.active_shell_id, &m.default_bind_ids());
+            (groups, active)
+        };
+        if !bind_groups.is_empty() {
+            rows.push(MenuRow {
+                label: "[着せ替え · Dress-up]".to_string(),
+                cmd: MenuCommand::Separator,
+            });
+            for bg in bind_groups {
+                let mark = if active_binds.contains(&bg.bind_id) {
+                    "✓"
+                } else {
+                    " "
+                };
+                let target_tag = if bg.scope == 1 { "\\1" } else { "\\0" };
+                rows.push(MenuRow {
+                    label: format!("{mark} ({target_tag}) {} / {}", bg.category, bg.name),
+                    cmd: MenuCommand::ToggleBind(bg.bind_id),
+                });
+            }
+        }
+
         rows.push(MenuRow {
             label: String::new(),
             cmd: MenuCommand::Separator,
+        });
+        rows.push(MenuRow {
+            label: "🔄 更新確認 · Check Updates".to_string(),
+            cmd: MenuCommand::CheckUpdates,
         });
         rows.push(MenuRow {
             label: "🧭 位置リセット · Reset Positions".to_string(),
@@ -3343,6 +3431,30 @@ impl AppRuntime {
         map.insert(live2d_item.id().clone(), MenuCommand::ToggleLive2dMotion);
         let _ = menu.append(&live2d_item);
 
+        let chime_item = MenuItem::new(
+            if cfg.hourly_chime {
+                "✓ 🕒 時報 (毎時00分) · Hourly Chime"
+            } else {
+                "🕒 時報 (毎時00分) · Hourly Chime"
+            },
+            true,
+            None,
+        );
+        map.insert(chime_item.id().clone(), MenuCommand::ToggleHourlyChime);
+        let _ = menu.append(&chime_item);
+
+        let tts_item = MenuItem::new(
+            if cfg.voice_tts {
+                "✓ 🔊 音声読み上げ · Voice (TTS)"
+            } else {
+                "🔊 音声読み上げ · Voice (TTS)"
+            },
+            true,
+            None,
+        );
+        map.insert(tts_item.id().clone(), MenuCommand::ToggleVoiceTts);
+        let _ = menu.append(&tts_item);
+
         let _ = menu.append(&PredefinedMenuItem::separator());
 
         let mut add_item = |target: &Submenu, label: &str, cmd: MenuCommand| {
@@ -3376,7 +3488,37 @@ impl AppRuntime {
         }
         let _ = menu.append(&prov_sub);
 
+        let (bind_groups, active_binds) = {
+            let m = self.manifest.lock().expect("manifest mutex poisoned");
+            let groups = m.effective_bind_groups();
+            let active = self
+                .config_store
+                .get_active_binds(&cfg.active_shell_id, &m.default_bind_ids());
+            (groups, active)
+        };
+        if !bind_groups.is_empty() {
+            let bind_sub = Submenu::new("着せ替え · Dress-up", true);
+            for bg in bind_groups {
+                let mark = if active_binds.contains(&bg.bind_id) {
+                    "✓ "
+                } else {
+                    "   "
+                };
+                let target_tag = if bg.scope == 1 { "\\1" } else { "\\0" };
+                add_item(
+                    &bind_sub,
+                    &format!("{mark}({target_tag}) {} / {}", bg.category, bg.name),
+                    MenuCommand::ToggleBind(bg.bind_id),
+                );
+            }
+            let _ = menu.append(&bind_sub);
+        }
+
         let _ = menu.append(&PredefinedMenuItem::separator());
+
+        let update_item = MenuItem::new("🔄 更新確認 · Check Updates", true, None);
+        map.insert(update_item.id().clone(), MenuCommand::CheckUpdates);
+        let _ = menu.append(&update_item);
 
         let reset_item = MenuItem::new("🧭 位置リセット · Reset", true, None);
         map.insert(reset_item.id().clone(), MenuCommand::ResetPositions);
@@ -3475,6 +3617,99 @@ impl AppRuntime {
                 }
                 self.rebuild_tray_menu();
             }
+            MenuCommand::ToggleBind(bind_id) => {
+                let shell_id = self.config_store.get().active_shell_id;
+                let (next_binds, enabled, label) = {
+                    let m = self.manifest.lock().expect("manifest mutex poisoned");
+                    let defs = m.effective_bind_groups();
+                    let label = defs
+                        .iter()
+                        .find(|b| b.bind_id == bind_id)
+                        .map(|b| b.name.clone())
+                        .unwrap_or_else(|| format!("Dress-up #{bind_id}"));
+                    let (binds, enabled) =
+                        self.config_store
+                            .toggle_shell_bind(&shell_id, bind_id, &m.default_bind_ids());
+                    (binds, enabled, label)
+                };
+                if let Some(ref gpu) = self.gpu {
+                    let mut m = self.manifest.lock().expect("manifest mutex poisoned");
+                    if let Some(ref mut s) = self.sakura {
+                        s.active_binds = next_binds.clone();
+                        let cur = s.surface_id;
+                        s.set_surface(&mut m, gpu, cur, false);
+                    }
+                    if let Some(ref mut k) = self.kero {
+                        k.active_binds = next_binds;
+                        let cur = k.surface_id;
+                        k.set_surface(&mut m, gpu, cur, false);
+                    }
+                }
+                self.rebuild_tray_menu();
+                if !self.smoke_mode {
+                    let state_str = if enabled { "装着" } else { "外し" };
+                    let msg = format!("\\0\\s[5]「{label}」を{state_str}たよ！\\e");
+                    let _ = self
+                        .proxy
+                        .send_event(UserEvent::PlayActions(parse_dialogue(&msg)));
+                }
+            }
+            MenuCommand::ToggleHourlyChime => {
+                let cur = self.config_store.get().hourly_chime;
+                let updated = self.config_store.update(ConfigPatch {
+                    hourly_chime: Some(!cur),
+                    ..Default::default()
+                });
+                self.rebuild_tray_menu();
+                if !self.smoke_mode {
+                    let st = if updated.hourly_chime { "ON" } else { "OFF" };
+                    let _ = self.proxy.send_event(UserEvent::PlayActions(parse_dialogue(&format!(
+                        "\\0\\s[5]毎時00分の時報を {st} にしたよ！\\e"
+                    ))));
+                }
+            }
+            MenuCommand::ToggleVoiceTts => {
+                let cur = self.config_store.get().voice_tts;
+                let updated = self.config_store.update(ConfigPatch {
+                    voice_tts: Some(!cur),
+                    ..Default::default()
+                });
+                self.rebuild_tray_menu();
+                if !self.smoke_mode {
+                    let st = if updated.voice_tts { "ON" } else { "OFF" };
+                    let _ = self.proxy.send_event(UserEvent::PlayActions(parse_dialogue(&format!(
+                        "\\0\\s[5]音声読み上げ（VOICEVOX / OS TTS）を {st} にしたよ！\\e"
+                    ))));
+                }
+            }
+            MenuCommand::CheckUpdates => {
+                self.apply_status_feedback("GitHub リリース確認中…".to_string());
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let msg = match crate::companion_extras::check_github_release_update(
+                        env!("CARGO_PKG_VERSION"),
+                    ) {
+                        Ok(info) if info.has_update => {
+                            format!(
+                                "\\0\\s[5]新しいバージョン v{} が公開されてるよ！（現在 v{}）\\n\\_a[{}]GitHub Releases を開く\\_a\\e",
+                                info.latest_version, info.current_version, info.release_url
+                            )
+                        }
+                        Ok(info) => {
+                            format!(
+                                "\\0\\s[0]現在最新の v{} を利用中だよ！（Release: v{}）\\e",
+                                info.current_version, info.latest_version
+                            )
+                        }
+                        Err(e) => {
+                            format!(
+                                "\\0\\s[3]更新確認できなかったよ。（{e}）\\e"
+                            )
+                        }
+                    };
+                    let _ = proxy.send_event(UserEvent::PlayActions(parse_dialogue(&msg)));
+                });
+            }
             MenuCommand::InstallNarDialog => {
                 if let Some(path) = rfd::FileDialog::new()
                     .add_filter("Ukagaka Archive", &["nar", "zip"])
@@ -3493,10 +3728,76 @@ impl AppRuntime {
                 )));
             }
             MenuCommand::Quit => {
-                if let Some(mut srv) = self.server.take() {
-                    srv.stop();
+                self.begin_graceful_quit(event_loop);
+            }
+        }
+    }
+
+    fn begin_graceful_quit(&mut self, event_loop: &ActiveEventLoop) {
+        if self.smoke_mode || self.closing_at.is_some() {
+            if let Some(mut srv) = self.server.take() {
+                srv.stop();
+            }
+            event_loop.exit();
+            return;
+        }
+        let farewell = self.engine.build_farewell_script();
+        let actions = parse_dialogue(&farewell);
+        self.maybe_speak_actions(&actions);
+        self.playback.enqueue(actions);
+        let imm = self.playback.fast_forward();
+        self.apply_immediate_surface_actions(imm);
+        self.sync_balloons_to_playback();
+        self.closing_at = Some(Instant::now() + Duration::from_millis(1350));
+    }
+
+    fn apply_immediate_surface_actions(&mut self, imm: Vec<DialogueAction>) {
+        for act in imm {
+            if act.kind == ActionKind::Surface {
+                if let Some(ref gpu) = self.gpu {
+                    let mut m = self.manifest.lock().expect("manifest mutex poisoned");
+                    if act.scope == Scope::Kero {
+                        if let Some(ref mut k) = self.kero {
+                            k.set_surface(&mut m, gpu, act.surface_id, false);
+                        }
+                    } else if let Some(ref mut s) = self.sakura {
+                        s.set_surface(&mut m, gpu, act.surface_id, false);
+                    }
                 }
-                event_loop.exit();
+            }
+        }
+    }
+
+    fn maybe_speak_actions(&self, actions: &[DialogueAction]) {
+        if self.smoke_mode {
+            return;
+        }
+        let cfg = self.config_store.get();
+        if !cfg.voice_tts {
+            return;
+        }
+        for (scope_id, seg) in
+            crate::companion_extras::extract_speech_segments_from_actions(actions)
+        {
+            crate::companion_extras::speak_utterance_async(scope_id, &seg, &cfg.voicevox_url);
+        }
+    }
+
+    fn spawn_dropped_file_inspection(&mut self, path: &Path) {
+        match crate::companion_extras::inspect_dropped_path(path) {
+            Ok(payload) => {
+                self.apply_status_feedback(format!("「{}」確認中…", payload.file_name));
+                let eng = self.engine.clone();
+                let proxy = self.proxy.clone();
+                std::thread::spawn(move || {
+                    let reply = eng.handle_dropped_payload(&payload);
+                    let _ = proxy.send_event(UserEvent::PlayActions(reply.actions));
+                });
+            }
+            Err(err_msg) => {
+                let _ = self.proxy.send_event(UserEvent::PlayActions(parse_dialogue(&format!(
+                    "\\0\\s[4]{err_msg}\\e"
+                ))));
             }
         }
     }
@@ -3936,9 +4237,10 @@ impl AppRuntime {
             },
             Some(UiWindowTarget::Balloon(sb)) => {
                 if button == MouseButton::Left && state == ElementState::Pressed {
-                    let mut picked_choice: Option<(String, String)> = None;
+                    let mut picked_choice: Option<(String, String, bool)> = None;
                     let mut should_ff = false;
                     let mut should_hide = false;
+                    let mut link_status: Option<String> = None;
                     if let Some(b) = if sb == Scope::Sakura {
                         self.sakura_balloon.as_mut()
                     } else {
@@ -3946,7 +4248,8 @@ impl AppRuntime {
                     } {
                         if let Some(idx) = b.hovered_choice {
                             if let Some(ch) = b.choices.get(idx) {
-                                picked_choice = Some((ch.label.clone(), ch.choice_id.clone()));
+                                picked_choice =
+                                    Some((ch.label.clone(), ch.choice_id.clone(), ch.is_url));
                             }
                         } else if !self.playback.steps.is_empty() {
                             should_ff = true;
@@ -3956,32 +4259,51 @@ impl AppRuntime {
                             b.ws.window.set_visible(false);
                         }
                     }
-                    if let Some((lbl, cid)) = picked_choice {
-                        self.playback.sakura_choices.clear();
-                        self.playback.kero_choices.clear();
-                        self.spawn_user_chat(format!("[선택지 선택] {lbl} (id={cid})"));
+                    if let Some((lbl, cid, is_url)) = picked_choice {
+                        if is_url {
+                            link_status = Some(
+                                match crate::companion_extras::open_validated_browser_url(
+                                    &cid,
+                                    self.smoke_mode,
+                                ) {
+                                    Ok(url) => format!("🔗 リンクを開きました: {url}"),
+                                    Err(err) => format!("⚠️ URLブロック: {err}"),
+                                },
+                            );
+                        } else {
+                            self.playback.sakura_choices.clear();
+                            self.playback.kero_choices.clear();
+                            self.spawn_user_chat(format!("[선택지 선택] {lbl} (id={cid})"));
+                        }
                     } else if should_ff {
                         let imm = self.playback.fast_forward();
-                        for act in imm {
-                            if act.kind == ActionKind::Surface {
-                                if let Some(ref gpu) = self.gpu {
-                                    let mut m = self.manifest.lock().expect("manifest mutex poisoned");
-                                    if act.scope == Scope::Kero {
-                                        if let Some(ref mut k) = self.kero {
-                                            k.set_surface(&mut m, gpu, act.surface_id, false);
-                                        }
-                                    } else if let Some(ref mut s) = self.sakura {
-                                        s.set_surface(&mut m, gpu, act.surface_id, false);
-                                    }
-                                }
-                            }
-                        }
+                        self.apply_immediate_surface_actions(imm);
                         self.sync_balloons_to_playback();
                     } else if should_hide {
                         if sb == Scope::Sakura {
                             self.playback.sakura_show = false;
                         } else {
                             self.playback.kero_show = false;
+                        }
+                    }
+                    if let Some(st) = link_status {
+                        let sp = self.speaker_name(sb);
+                        if let (Some(ref gpu), Some(b)) = (
+                            &self.gpu,
+                            if sb == Scope::Sakura {
+                                self.sakura_balloon.as_mut()
+                            } else {
+                                self.kero_balloon.as_mut()
+                            },
+                        ) {
+                            b.status_line = st;
+                            b.redraw_content(
+                                &self.balloon_skin,
+                                &sp,
+                                false,
+                                &mut self.text_renderer,
+                                gpu,
+                            );
                         }
                     }
                 }
@@ -4152,13 +4474,13 @@ impl AppRuntime {
         let mut sakura_surface_req = None;
         let mut kero_surface_req = None;
 
-        while processed < 6 {
+        while processed < if self.playback.quick_mode { 2048 } else { 6 } {
             let Some(front) = self.playback.steps.front().cloned() else {
                 break;
             };
             match front {
                 PlaybackStep::Char(ch) => {
-                    if now < self.playback.next_char_at {
+                    if !self.playback.quick_mode && now < self.playback.next_char_at {
                         break;
                     }
                     self.playback.steps.pop_front();
@@ -4177,7 +4499,11 @@ impl AppRuntime {
                     } else {
                         TYPEWRITER_INTERVAL_MS
                     };
-                    self.playback.next_char_at = now + Duration::from_millis(delay);
+                    self.playback.next_char_at = if self.playback.quick_mode {
+                        now
+                    } else {
+                        now + Duration::from_millis(delay)
+                    };
                     processed += 1;
                 }
                 PlaybackStep::Action(act) => {
@@ -4227,21 +4553,42 @@ impl AppRuntime {
                                 }
                             }
                         }
-                        ActionKind::Choice => {
+                        ActionKind::Choice | ActionKind::Link => {
+                            let is_url = act.kind == ActionKind::Link;
                             let item = ChoiceItem {
                                 label: act.label,
                                 choice_id: act.choice_id,
+                                is_url,
                                 rect: (0.0, 0.0, 0.0, 0.0),
                             };
                             if self.playback.active_speaker == Scope::Kero {
-                                self.playback.kero_choices.push(item);
+                                if !is_url
+                                    || !self
+                                        .playback
+                                        .kero_choices
+                                        .iter()
+                                        .any(|c| c.choice_id == item.choice_id)
+                                {
+                                    self.playback.kero_choices.push(item);
+                                }
                                 self.playback.kero_show = true;
                                 self.playback.kero_dirty = true;
                             } else {
-                                self.playback.sakura_choices.push(item);
+                                if !is_url
+                                    || !self
+                                        .playback
+                                        .sakura_choices
+                                        .iter()
+                                        .any(|c| c.choice_id == item.choice_id)
+                                {
+                                    self.playback.sakura_choices.push(item);
+                                }
                                 self.playback.sakura_show = true;
                                 self.playback.sakura_dirty = true;
                             }
+                        }
+                        ActionKind::QuickToggle => {
+                            self.playback.quick_mode = !self.playback.quick_mode;
                         }
                         ActionKind::Pause => {
                             self.playback.paused_until = Some(now + Duration::from_millis(act.ms.max(40)));
@@ -4575,7 +4922,7 @@ impl AppRuntime {
                 sb.utterance_min_w = 0;
                 sb.large = false;
             }
-            let short_script = "\\0\\s[0]안녕! 何か藍(NanikaAi) v0.1.3!\\e";
+            let short_script = "\\0\\s[0]안녕! 何か藍(NanikaAi) v0.1.4!\\e";
             self.playback.enqueue(parse_dialogue(short_script));
             let _ = self.playback.fast_forward();
             self.sync_balloons_to_playback();
@@ -4601,7 +4948,7 @@ impl AppRuntime {
                 sb.utterance_min_w = 0;
                 sb.large = false;
             }
-            let demo_script = "\\0\\s[0]안녕! 100% Safe Rust 何か藍(NanikaAi) v0.1.3 テスト完了だよ！\\n\\n長い文章では吹き出しが内容に合わせて滑らかに広がり、最大サイズに達すると自動的にスクロールバーとトラックが表示されて、マウスホイールで快適に読み進められます。\\n\\n1行目: Live2D骨格・胸部呼吸・髪/アホ毛/スカートの物理揺れを有効化。\\n2行目: うにゅうの体型専用メッシュと自然な色味を保持。\\n3行目: Gemma/SentencePieceのバイトフォールバック文字も完全復元。\\w3\\1\\s[10]サングラスの上からもバッチリ見えてるぜ。\\e";
+            let demo_script = "\\0\\s[0]안녕! 100% Safe Rust 何か藍(NanikaAi) v0.1.4 テスト完了だよ！\\n\\n長い文章では吹き出しが内容に合わせて滑らかに広がり、最大サイズに達すると自動的にスクロールバーとトラックが表示されて、マウスホイールで快適に読み進められます。\\n\\n1行目: Live2D骨格・胸部呼吸・髪/アホ毛/スカートの物理揺れを有効化。\\n2行目: うにゅうの体型専用メッシュと自然な色味を保持。\\n3行目: Gemma/SentencePieceのバイトフォールバック文字も完全復元。\\w3\\1\\s[10]サングラスの上からもバッチリ見えてるぜ。\\e";
             self.playback.enqueue(parse_dialogue(demo_script));
             let _ = self.playback.fast_forward();
             self.sync_balloons_to_playback();
@@ -4885,6 +5232,65 @@ impl AppRuntime {
             if self.sakura_balloon.as_ref().is_some_and(|b| b.visible) {
                 return Err("吹き出しクリック非表示(dismiss)に失敗しました".to_string());
             }
+
+            // E5: Dress-up bindgroup toggle pixel overlay + restore check
+            let count_opaque = |bmp: &RgbaBitmap| -> usize {
+                bmp.data.chunks_exact(4).filter(|px| px[3] >= 16).count()
+            };
+            let before_opaque = count_opaque(
+                &self.sakura.as_ref().ok_or("사쿠라 창 없음")?.composited,
+            );
+            self.execute_menu_command(event_loop, MenuCommand::ToggleBind(50));
+            let after_bmp = &self.sakura.as_ref().ok_or("사쿠라 창 없음")?.composited;
+            let after_opaque = count_opaque(after_bmp);
+            if after_opaque <= before_opaque {
+                return Err(format!(
+                    "着せ替え(bindgroup 50)合成ピクセル増加に失敗: before={before_opaque}, after={after_opaque}"
+                ));
+            }
+            after_bmp.save_png(&proof_dir.join("proof-dressup-sakura.png"))?;
+            self.execute_menu_command(event_loop, MenuCommand::ToggleBind(50));
+            let restored_opaque = count_opaque(
+                &self.sakura.as_ref().ok_or("사쿠라 창 없음")?.composited,
+            );
+            if restored_opaque != before_opaque {
+                return Err(format!(
+                    "着せ替え(bindgroup 50)解除復元失敗: expected={before_opaque}, got={restored_opaque}"
+                ));
+            }
+
+            // E6: Quick mode (\_q) instant drain + clickable \_a[url] dry-run click
+            let link_script = r"\_q\0\s[5]クイックリンク確認: \_a[https://github.com/JungWonYong/nanikaai]公式リポジトリ\_a\_q\e";
+            if let Some(ref mut sb) = self.sakura_balloon {
+                sb.status_line.clear();
+                sb.hovered_choice = None;
+            }
+            self.playback.enqueue(parse_dialogue(link_script));
+            self.tick_playback();
+            if !self.playback.steps.is_empty() {
+                return Err("\\_q 一括即時表示が 1 tick で完了しませんでした".to_string());
+            }
+            let link_center = {
+                let sb = self.sakura_balloon.as_ref().ok_or("사쿠라 말풍선 창 없음")?;
+                if sb.choices.len() != 1 || !sb.choices[0].is_url {
+                    return Err(format!(
+                        "\\_a リンク生成失敗: count={}",
+                        sb.choices.len()
+                    ));
+                }
+                let r = sb.choices[0].rect;
+                ((r.0 + r.2) * 0.5, (r.1 + r.3) * 0.5)
+            };
+            self.handle_pointer_move(sb_id, link_center);
+            self.handle_mouse_button(event_loop, sb_id, MouseButton::Left, ElementState::Pressed);
+            if !self
+                .sakura_balloon
+                .as_ref()
+                .is_some_and(|b| b.status_line.contains("リンクを開きました"))
+            {
+                return Err("リンククリックのブラウザ起動dry-runステータス検証に失敗しました".to_string());
+            }
+
             self.execute_menu_command(event_loop, MenuCommand::ResetPositions);
             self.execute_menu_command(event_loop, MenuCommand::ResetDefaultSkin);
             let ui_ops_ms = check_sla("GUI全操作スイート合計", ui_t0)?;
@@ -4977,25 +5383,20 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
         self.initialized = true;
 
         let cfg = self.config_store.get();
-        let init_ds = self
-            .manifest
-            .lock()
-            .expect("manifest mutex poisoned")
-            .descript
-            .display_scale
-            .clamp(0.5, 4.0);
-        let sak_init = self
-            .manifest
-            .lock()
-            .expect("manifest mutex poisoned")
-            .compose_base_rgba(0)
-            .unwrap_or_else(|| RgbaBitmap::from_solid(560, 960, 120, 150, 220, 220));
-        let kero_init = self
-            .manifest
-            .lock()
-            .expect("manifest mutex poisoned")
-            .compose_base_rgba(10)
-            .unwrap_or_else(|| RgbaBitmap::from_solid(400, 500, 150, 180, 230, 220));
+        let (init_ds, init_binds, sak_init, kero_init) = {
+            let m = self.manifest.lock().expect("manifest mutex poisoned");
+            let ds = m.descript.display_scale.clamp(0.5, 4.0);
+            let binds = self
+                .config_store
+                .get_active_binds(&cfg.active_shell_id, &m.default_bind_ids());
+            let s = m
+                .compose_surface_rgba(0, &binds)
+                .unwrap_or_else(|| RgbaBitmap::from_solid(560, 960, 120, 150, 220, 220));
+            let k = m
+                .compose_surface_rgba(10, &binds)
+                .unwrap_or_else(|| RgbaBitmap::from_solid(400, 500, 150, 180, 230, 220));
+            (ds, binds, s, k)
+        };
         let sak_lw = ((sak_init.width as f64) / init_ds).round().max(40.0) as u32;
         let sak_lh = ((sak_init.height as f64) / init_ds).round().max(40.0) as u32;
         let kero_lw = ((kero_init.width as f64) / init_ds).round().max(40.0) as u32;
@@ -5090,6 +5491,7 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
             center_u: 0.50,
             aspect_hw: 1.5,
             rig: Live2dRigState::new(),
+            active_binds: init_binds.clone(),
             is_neo_default: cfg.active_shell_id == "neo_default",
         });
 
@@ -5128,6 +5530,7 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                 center_u: 0.50,
                 aspect_hw: 1.5,
                 rig: Live2dRigState::new(),
+                active_binds: init_binds,
                 is_neo_default: cfg.active_shell_id == "neo_default",
             });
         }
@@ -5287,6 +5690,7 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                         kb.utterance_min_w = 0;
                     }
                 }
+                self.maybe_speak_actions(&actions);
                 self.playback.enqueue(actions);
             }
             UserEvent::StatusUpdate(msg, _active) => {
@@ -5359,10 +5763,7 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                 } else if is_menu {
                     self.hide_menu();
                 } else {
-                    if let Some(mut srv) = self.server.take() {
-                        srv.stop();
-                    }
-                    event_loop.exit();
+                    self.begin_graceful_quit(event_loop);
                 }
             }
             WindowEvent::ModifiersChanged(mods) => {
@@ -5466,8 +5867,36 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                     .and_then(|e| e.to_str())
                     .map(|e| e.to_ascii_lowercase())
                     .unwrap_or_default();
-                if matches!(ext.as_str(), "nar" | "zip") {
+                if ext == "nar" {
                     self.install_and_activate_nar(&path);
+                } else if ext == "zip" {
+                    let dest_base = self.config_store.config_dir.clone();
+                    match install_nar_archive(
+                        &path,
+                        &dest_base.join("shells"),
+                        &dest_base.join("balloons"),
+                    ) {
+                        Ok(res) => {
+                            let first_shell = res.shells.first().cloned();
+                            let first_balloon = res.balloons.first().cloned();
+                            let _ = self.apply_skin_switch(first_shell, first_balloon);
+                            let msg = format!(
+                                "\\0\\s[5]スキンを導入しました！（シェル {}個、バルーン {}個）\\e",
+                                res.shells.len(),
+                                res.balloons.len()
+                            );
+                            let _ = self.proxy.send_event(UserEvent::PlayActions(parse_dialogue(&msg)));
+                        }
+                        Err(err) if err.to_ascii_lowercase().contains("traversal") => {
+                            let msg = format!("\\0\\s[3]スキンの導入に失敗しました: {err}\\e");
+                            let _ = self.proxy.send_event(UserEvent::PlayActions(parse_dialogue(&msg)));
+                        }
+                        Err(_) => {
+                            self.spawn_dropped_file_inspection(&path);
+                        }
+                    }
+                } else {
+                    self.spawn_dropped_file_inspection(&path);
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -5508,7 +5937,19 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
         let live2d_on = self.config_store.get().live2d_motion;
         let comm_visible = self.communicate.as_ref().is_some_and(|c| c.visible);
         let poll_ms = if live2d_on || comm_visible { 20 } else { POLL_INTERVAL_MS };
-        let next_wakeup = Instant::now() + Duration::from_millis(poll_ms);
+        let mut next_wakeup = Instant::now() + Duration::from_millis(poll_ms);
+        if let Some(deadline) = self.closing_at {
+            if Instant::now() >= deadline {
+                if let Some(mut srv) = self.server.take() {
+                    srv.stop();
+                }
+                event_loop.exit();
+                return;
+            }
+            if deadline < next_wakeup {
+                next_wakeup = deadline;
+            }
+        }
         event_loop.set_control_flow(ControlFlow::WaitUntil(next_wakeup));
 
         if !self.initialized || self.smoke_mode {
@@ -5584,6 +6025,30 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                 if k.visible {
                     k.tick_seriko(&m, gpu, speaking_kero);
                     k.tick_live2d(gpu, live2d_on, global_cursor, speaking_kero);
+                }
+            }
+        }
+
+        // Poll due reminders & hourly chime every second when idle/not closing
+        if self.closing_at.is_none() && self.reminder_poll_last.elapsed() >= Duration::from_secs(1) {
+            self.reminder_poll_last = Instant::now();
+            let due = self.config_store.take_due_reminders(Utc::now().timestamp());
+            if let Some(first) = due.into_iter().next() {
+                let kero_name = self.speaker_name(Scope::Kero);
+                let msg = format!(
+                    "\\0\\s[5]リマインダーの時間だよ！\\n「{}」\\1\\s[10]{kero_name}: お忘れなくやで！\\e",
+                    first.message
+                );
+                let _ = self
+                    .proxy
+                    .send_event(UserEvent::PlayActions(parse_dialogue(&msg)));
+            } else if self.config_store.get().hourly_chime && self.playback.steps.is_empty() {
+                let now_local = Local::now();
+                let key = (now_local.ordinal() as i32, now_local.hour());
+                if now_local.minute() == 0 && self.last_chime_key != Some(key) {
+                    self.last_chime_key = Some(key);
+                    let reply = self.engine.handle_hourly_chime(now_local.hour());
+                    let _ = self.proxy.send_event(UserEvent::PlayActions(reply.actions));
                 }
             }
         }
@@ -5705,6 +6170,16 @@ pub fn run(smoke_test: bool) -> Result<(), String> {
         os_insets: detect_os_insets(),
         modifiers: ModifiersState::empty(),
         auto_talk_last: Instant::now(),
+        last_chime_key: {
+            let now_l = Local::now();
+            if now_l.minute() == 0 {
+                Some((now_l.ordinal() as i32, now_l.hour()))
+            } else {
+                None
+            }
+        },
+        reminder_poll_last: Instant::now(),
+        closing_at: None,
         initialized: false,
     };
 

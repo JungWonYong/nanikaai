@@ -8,3 +8,7 @@ sakura.balloon.offsetx,38
 sakura.balloon.offsety,68
 kero.balloon.offsetx,20
 kero.balloon.offsety,28
+sakura.bindgroup50.name,アクセ,スター髪飾り · Star Hair Clip
+sakura.bindgroup50.default,0
+kero.bindgroup51.name,アクセ,ミニクラウン · Mini Crown
+kero.bindgroup51.default,0

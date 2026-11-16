@@ -26,6 +26,8 @@ pub enum ActionKind {
     BalloonSize,
     Text,
     Choice,
+    Link,
+    QuickToggle,
     Clear,
     Pause,
 }
@@ -118,6 +120,32 @@ impl DialogueAction {
             label: String::new(),
             choice_id: String::new(),
             ms,
+        }
+    }
+
+    fn link(label: String, url: String) -> Self {
+        Self {
+            kind: ActionKind::Link,
+            scope: Scope::Sakura,
+            surface_id: 0,
+            balloon_id: 0,
+            text: String::new(),
+            label,
+            choice_id: url,
+            ms: 0,
+        }
+    }
+
+    fn quick_toggle(scope: Scope) -> Self {
+        Self {
+            kind: ActionKind::QuickToggle,
+            scope,
+            surface_id: 0,
+            balloon_id: 0,
+            text: String::new(),
+            label: String::new(),
+            choice_id: String::new(),
+            ms: 0,
         }
     }
 }
@@ -252,11 +280,23 @@ fn choice_q_re() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"^\\q\[([^\]\r\n]+)\]").unwrap())
 }
 
+fn anchor_link_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^\\_a\[([^\]\r\n]*)\]([\s\S]*?)\\_a").unwrap())
+}
+
+fn bare_url_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"^(https?://[^\s<>\[\]「」『』（）()\x22'\\]+)").unwrap()
+    })
+}
+
 fn benign_tag_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
-            r"^\\(?:_q|_s|_n|_a(?:\[[^\]]*\])?|__q(?:\[[^\]]*\])?|_l\[[^\]]*\]|_b\[[^\]]*\]|_v\[[^\]]*\]|i\[[^\]]*\]|c\[[^\]]*\]|!\[[^\]]*\]|f\[[^\]]*\]|\*|-|[txv45])",
+            r"^\\(?:_s|_n|_a(?:\[[^\]]*\])?|__q(?:\[[^\]]*\])?|_l\[[^\]]*\]|_b\[[^\]]*\]|_v\[[^\]]*\]|i\[[^\]]*\]|c\[[^\]]*\]|!\[[^\]]*\]|f\[[^\]]*\]|\*|-|[txv45])",
         )
         .unwrap()
     })
@@ -538,6 +578,31 @@ pub fn parse_dialogue(raw_input: &str) -> Vec<DialogueAction> {
                 i += m.get(0).unwrap().end();
                 continue;
             }
+            if rest.starts_with(r"\_q") {
+                actions.push(DialogueAction::quick_toggle(scope));
+                i += 3;
+                continue;
+            }
+            if let Some(m) = anchor_link_re().captures(rest) {
+                let target = m[1].trim().to_string();
+                let raw_label = m[2].trim().to_string();
+                let label = if raw_label.is_empty() {
+                    target.clone()
+                } else {
+                    raw_label
+                };
+                if !label.is_empty() {
+                    append_text(&mut actions, scope, &label);
+                }
+                let lower = target.to_ascii_lowercase();
+                if lower.starts_with("http://") || lower.starts_with("https://") {
+                    actions.push(DialogueAction::link(label, target));
+                } else if !target.is_empty() {
+                    actions.push(DialogueAction::choice(label, target));
+                }
+                i += m.get(0).unwrap().end();
+                continue;
+            }
             if let Some(m) = choice_q_re().captures(rest) {
                 let inner = &m[1];
                 if let Some((lbl, cid)) = inner.rsplit_once(',') {
@@ -557,6 +622,22 @@ pub fn parse_dialogue(raw_input: &str) -> Vec<DialogueAction> {
             if let Some(m) = benign_tag_re().find(rest) {
                 i += m.end();
                 continue;
+            }
+        }
+        if rest.starts_with("http://") || rest.starts_with("https://") {
+            if let Some(m) = bare_url_re().find(rest) {
+                let raw = m.as_str();
+                let cleaned = raw
+                    .trim_end_matches(&['.', ',', ';', ':', '。', '、', '！', '？', '!', '?'][..]);
+                if cleaned.len() > "http://a".len() {
+                    append_text(&mut actions, scope, cleaned);
+                    actions.push(DialogueAction::link(
+                        cleaned.to_string(),
+                        cleaned.to_string(),
+                    ));
+                    i += cleaned.len();
+                    continue;
+                }
             }
         }
 

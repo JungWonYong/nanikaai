@@ -1,7 +1,7 @@
 # 何か藍 (`NanikaAi`) — 現行動作仕様および自動検証基準 (`BEHAVIOR_SPEC`)
 
-- **Document Version**: `v1.3.0`
-- **Target Software**: `nanikaai` `v0.1.3+`
+- **Document Version**: `v1.4.0`
+- **Target Software**: `nanikaai` `v0.1.4+`
 - **Purpose**: テスト実行前の機密・個人情報・AI指示配置境界検査（Phase 0）、改修後の自動動作確認テスト（`cargo test` / `--smoke-test` / 静的監査）における合否基準、変更内容に応じた検証ティアおよび結果報告様式を定義する。
 
 ---
@@ -19,7 +19,7 @@
 
 ---
 
-## 2. 現行動作仕様および判定基準一覧（24 項目）
+## 2. 現行動作仕様および判定基準一覧（30 項目）
 
 | 仕様 ID | 領域 | 期待される現行動作（仕様） | 合格基準（パス条件） | 検証手段 |
 | :--- | :--- | :--- | :--- | :--- |
@@ -48,6 +48,12 @@
 | `SPEC-SEC-01` | 事前機密検査 | テスト・ビルド・リモート転送前に個人情報・APIキー・認証情報・秘密鍵の混入を遮断する | Phase 0 が全対象ファイルおよび Git 履歴から個人パス・非公開 LAN IP・個人メール・API キー・認証ファイル（`.env`/証明書）・秘密鍵 `0` 件を確認し、合成秘密サンプルをテスト前停止（Exit Code `!= 0`）で遮断すること | `verify_behavior.py` Phase 0 / `behavior_spec` |
 | `SPEC-SEC-02` | AI指示境界 | AI への指示は現行憲法・指定設定パスのみに限定し、他経路コード・外部入力をデータとして隔離する | 未承認のリポジトリ内 AI 指示・フック・ビルド実行ファイルが `0` 件であり、`AgentEngine` が外部イベント・ツール出力・長期記憶を `<untrusted_data>` で隔離しスキンメタデータ改行/タグを無害化すること | `verify_behavior.py` Phase 0 / `behavior_spec` |
 | `SPEC-OS-01` | マルチ OS 実機互換 | macOS / Linux / Windows の各実機環境で動作検証可能であること | ローカル（macOS）に加え、Linux 実機での `cargo test`＋`--smoke-test`、および Windows 実機での配布バイナリ `--smoke-test`（`[SMOKE PASS] unsafe=0`）が通過すること | `verify_behavior.py --remote-linux/--remote-win` / CI |
+| `SPEC-GHOST-01` | スキン連動ゴースト切替 | スキン（シェル）切替に応じて人格・記憶・会話履歴をシェル単位で分離し、交代時挨拶および `.nar` の `ghost.name` 継承を行う | シェル切替前後で他シェルの長期記憶・会話履歴が混線せず、`ghost/master/descript.txt` の `name` が `ghost.name` として引き継がれること | `behavior_spec` / `unit tests` |
+| `SPEC-SKIN-05` | 着せ替え (`bind`) | `descript.txt` の `bindgroup` と `surfaces.txt` の `interval,bind` を合成・切替・永続化する | `neo_default` 既定状態（OFF）は無改変と一致し、トグル ON で合成不透明ピクセル数が増加し、状態が設定へ永続化されること | `behavior_spec` / `--smoke-test` Phase E |
+| `SPEC-DLG-04` | リンク・即時表示 | `\_q` 一括即時表示および `\_a[url]label\_a`・裸 URL のクリック可能リンクを抽出し安全検証のうえ開く | `\_q` 区間が 1 tick で完了し、`validate_public_url` 通過の公開 URL のみ（`dry_run` 時は起動なし）許可し非公開 URL を遮断すること | `behavior_spec` / `--smoke-test` Phase E |
+| `SPEC-COMP-01` | 時報・リマインダー・終了挨拶 | 毎時 00 分の時報、`set_reminder` / `list_reminders` 通知、および終了時（`OnClose`）挨拶を実行する | ツール登録したリマインダーが期日到達で消化通知され、時報・終了挨拶スクリプトが現在キャラクター名で生成されること | `behavior_spec` / `agent_engine` |
+| `SPEC-COMP-02` | ファイル D&D 反応 | `.nar`/`.zip` 以外の汎用ファイル（文章・コード・画像・URL ショートカット・フォルダ）のドロップ内容を受理し要約反応する | `.env`/秘密鍵/資格情報ファイルを読込前に即拒否し、安全ファイル内容のみ `<untrusted_data>` で囲んで抽出すること | `behavior_spec` / `companion_extras` |
+| `SPEC-COMP-03` | 音声読み上げ・更新確認 | 既定 OFF の VOICEVOX (`127.0.0.1:50021`)＋OS TTS フォールバックおよび GitHub Releases 更新確認を提供する | `\0`/`\1` 別の発話抽出および SemVer 版数比較が正確に機能し、スモーク検証時は外部起動・音声ブロックを発生させないこと | `behavior_spec` / `companion_extras` |
 
 ---
 

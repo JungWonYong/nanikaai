@@ -691,9 +691,19 @@ fn int_safe(val: Option<&str>, default: i32) -> i32 {
     val.and_then(|s| s.trim().parse::<i32>().ok()).unwrap_or(default)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindGroupDef {
+    pub scope: u8,
+    pub bind_id: i32,
+    pub category: String,
+    pub name: String,
+    pub default_on: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct ShellDescript {
     pub name: String,
+    pub ghost_name: String,
     pub sakura_name: String,
     pub kero_name: String,
     pub sakura_balloon_offsetx: i32,
@@ -704,12 +714,14 @@ pub struct ShellDescript {
     pub kero_balloon_alignment: String,
     pub display_scale: f64,
     pub use_self_alpha: Option<bool>,
+    pub bind_groups: Vec<BindGroupDef>,
 }
 
 impl Default for ShellDescript {
     fn default() -> Self {
         Self {
             name: "マスター".to_string(),
+            ghost_name: String::new(),
             sakura_name: "さくら".to_string(),
             kero_name: "うにゅう".to_string(),
             sakura_balloon_offsetx: 10,
@@ -720,6 +732,7 @@ impl Default for ShellDescript {
             kero_balloon_alignment: "none".to_string(),
             display_scale: 1.0,
             use_self_alpha: None,
+            bind_groups: Vec::new(),
         }
     }
 }
@@ -1112,6 +1125,99 @@ impl ShellManifest {
         canvas
     }
 
+    pub fn effective_bind_groups(&self) -> Vec<BindGroupDef> {
+        let mut list = self.descript.bind_groups.clone();
+        let mut known_ids: HashSet<i32> = list.iter().map(|b| b.bind_id).collect();
+        for sdef in self.surfaces.values() {
+            let inferred_scope = if sdef.sid >= 10 && sdef.sid < 100 { 1 } else { 0 };
+            for anim in &sdef.animations {
+                let is_bind = anim
+                    .interval
+                    .split(',')
+                    .next()
+                    .map(|s| s.trim().eq_ignore_ascii_case("bind"))
+                    .unwrap_or(false);
+                if is_bind && known_ids.insert(anim.aid) {
+                    list.push(BindGroupDef {
+                        scope: inferred_scope,
+                        bind_id: anim.aid,
+                        category: "アクセ".to_string(),
+                        name: format!("Dress-up #{}", anim.aid),
+                        default_on: false,
+                    });
+                }
+            }
+        }
+        list.sort_by_key(|b| (b.scope, b.bind_id));
+        list
+    }
+
+    pub fn default_bind_ids(&self) -> Vec<i32> {
+        let mut ids: Vec<i32> = self
+            .descript
+            .bind_groups
+            .iter()
+            .filter(|b| b.default_on)
+            .map(|b| b.bind_id)
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    pub fn compose_surface_rgba(&self, sid: i32, active_binds: &[i32]) -> Option<RgbaBitmap> {
+        let mut canvas = self.compose_base_rgba(sid)?;
+        if active_binds.is_empty() {
+            return Some(canvas);
+        }
+        let Some(sdef) = self.surfaces.get(&sid) else {
+            return Some(canvas);
+        };
+        let mut bind_anims: Vec<&SerikoAnimation> = sdef
+            .animations
+            .iter()
+            .filter(|anim| {
+                let is_bind = anim
+                    .interval
+                    .split(',')
+                    .next()
+                    .map(|s| s.trim().eq_ignore_ascii_case("bind"))
+                    .unwrap_or(false);
+                is_bind && active_binds.contains(&anim.aid)
+            })
+            .collect();
+        bind_anims.sort_by_key(|a| a.aid);
+
+        for anim in bind_anims {
+            let mut pats: Vec<&SerikoPattern> = anim
+                .patterns
+                .iter()
+                .filter(|p| p.surface_id >= 0)
+                .collect();
+            pats.sort_by_key(|p| p.index);
+            let has_zero_delay = pats.iter().any(|p| p.delay_ms == 0);
+            for pat in pats {
+                if has_zero_delay && pat.delay_ms > 0 {
+                    continue;
+                }
+                if let Some(layer) = self.compose_base_rgba(pat.surface_id) {
+                    let need_w = (pat.offset_x.max(0) as u32 + layer.width).max(canvas.width);
+                    let need_h = (pat.offset_y.max(0) as u32 + layer.height).max(canvas.height);
+                    if need_w > canvas.width || need_h > canvas.height {
+                        let mut expanded = RgbaBitmap::new_transparent(need_w, need_h);
+                        expanded.alpha_composite(&canvas, 0, 0);
+                        canvas = expanded;
+                    }
+                    canvas.alpha_composite(&layer, pat.offset_x, pat.offset_y);
+                }
+                if !has_zero_delay {
+                    break;
+                }
+            }
+        }
+        Some(canvas)
+    }
+
     pub fn hit_collision(
         &self,
         sid: i32,
@@ -1259,7 +1365,33 @@ impl StrokeDetector {
     }
 }
 
+fn upsert_bind_entry(
+    list: &mut Vec<BindGroupDef>,
+    scope: u8,
+    bind_id: i32,
+) -> &mut BindGroupDef {
+    if let Some(idx) = list
+        .iter()
+        .position(|b| b.scope == scope && b.bind_id == bind_id)
+    {
+        return &mut list[idx];
+    }
+    list.push(BindGroupDef {
+        scope,
+        bind_id,
+        category: "アクセ".to_string(),
+        name: format!("Dress-up #{bind_id}"),
+        default_on: false,
+    });
+    let idx = list.len() - 1;
+    &mut list[idx]
+}
+
 pub fn parse_descript_txt(text: &str) -> ShellDescript {
+    static BIND_RE: OnceLock<Regex> = OnceLock::new();
+    let bind_re = BIND_RE.get_or_init(|| {
+        Regex::new(r"^(sakura|char0|kero|char1)\.bindgroup(\d+)\.(name|default)$").unwrap()
+    });
     let mut d = ShellDescript::default();
     for raw in text.lines() {
         let line = raw.trim();
@@ -1271,8 +1403,47 @@ pub fn parse_descript_txt(text: &str) -> ShellDescript {
         };
         let key = k.trim().to_ascii_lowercase();
         let val = v.trim();
+        if let Some(caps) = bind_re.captures(&key) {
+            let scope = if matches!(&caps[1], "kero" | "char1") {
+                1
+            } else {
+                0
+            };
+            if let Ok(bind_id) = caps[2].parse::<i32>() {
+                let entry = upsert_bind_entry(&mut d.bind_groups, scope, bind_id);
+                match &caps[3] {
+                    "name" => {
+                        let parts: Vec<&str> = val.split(',').map(|s| s.trim()).collect();
+                        if parts.len() >= 2 {
+                            if !parts[0].is_empty() {
+                                entry.category = parts[0].to_string();
+                            }
+                            if !parts[1].is_empty() {
+                                entry.name = parts[1].to_string();
+                            }
+                            if let Some(opt) = parts.get(2) {
+                                if matches!(*opt, "1" | "true") {
+                                    entry.default_on = true;
+                                } else if matches!(*opt, "0" | "false") {
+                                    entry.default_on = false;
+                                }
+                            }
+                        } else if !val.is_empty() {
+                            entry.name = val.to_string();
+                        }
+                    }
+                    "default" => {
+                        let low = val.to_ascii_lowercase();
+                        entry.default_on = matches!(low.as_str(), "1" | "true" | "yes");
+                    }
+                    _ => {}
+                }
+            }
+            continue;
+        }
         match key.as_str() {
             "name" if !val.is_empty() => d.name = val.to_string(),
+            "ghost.name" if !val.is_empty() => d.ghost_name = val.to_string(),
             "sakura.name" | "char0.name" if !val.is_empty() => d.sakura_name = val.to_string(),
             "kero.name" | "char1.name" if !val.is_empty() => d.kero_name = val.to_string(),
             "sakura.balloon.offsetx" | "char0.balloon.offsetx" => {
@@ -1321,6 +1492,7 @@ pub fn parse_descript_txt(text: &str) -> ShellDescript {
             _ => {}
         }
     }
+    d.bind_groups.sort_by_key(|b| (b.scope, b.bind_id));
     d
 }
 
@@ -2341,6 +2513,11 @@ pub fn install_nar_archive(
                 let raw_desc = decode_ukagaka_bytes(&b);
                 let d_kv = parse_kv_txt(&raw_desc);
                 let mut additions = Vec::new();
+                if !d_kv.contains_key("ghost.name") {
+                    if let Some(v) = ghost_kv.get("name") {
+                        additions.push(format!("ghost.name,{v}"));
+                    }
+                }
                 if !d_kv.contains_key("sakura.name") {
                     if let Some(v) = ghost_kv.get("sakura.name") {
                         additions.push(format!("sakura.name,{v}"));

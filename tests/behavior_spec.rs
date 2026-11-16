@@ -15,10 +15,13 @@ use nanikaai::agent_engine::{
     PREFERRED_MODELS, REMOTE_PREFERRED_MODELS,
 };
 use nanikaai::builtin_tools::{is_sensitive_path, validate_public_url, BuiltinToolRunner};
+use nanikaai::companion_extras::{
+    compare_semver, extract_speech_segments, inspect_dropped_path, open_validated_browser_url,
+};
 use nanikaai::config_store::{ConfigPatch, ConfigStore};
 use nanikaai::dialogue_parser::{parse_dialogue, ActionKind, DialogueAction, Scope};
 use nanikaai::shell_parser::{
-    install_nar_archive, load_ukagaka_rgba, BalloonManager, ShellManager,
+    install_nar_archive, load_ukagaka_rgba, parse_descript_txt, BalloonManager, ShellManager,
 };
 use nanikaai::sstp_server::{start_dual_server, ServerBackend};
 
@@ -815,4 +818,217 @@ fn spec_ui_04_05_control_and_fallback_responsiveness_under_3s() {
     assert!(reply.offline_fallback);
 
     let _ = fs::remove_dir_all(&cfg_dir);
+}
+
+#[test]
+fn spec_ghost_01_and_skin_05_profile_isolation_and_bind_dressup() {
+    let tmp = fresh_temp_dir("nanikaai_spec_ghost_bind");
+    let cfg_dir = tmp.join("cfg");
+    let store = ConfigStore::new(Some(cfg_dir.clone()));
+
+    // SPEC-GHOST-01: Memories & persona & history isolate strictly by active_shell_id
+    store.update(ConfigPatch {
+        active_shell_id: Some("neo_default".to_string()),
+        ..Default::default()
+    });
+    store.upsert_memory("drink", "Matcha Latte");
+    store.update(ConfigPatch {
+        active_shell_id: Some("alt_shell".to_string()),
+        ..Default::default()
+    });
+    assert!(
+        store.search_memories("Matcha").is_empty(),
+        "SPEC-GHOST-01: memories from neo_default must not leak into alt_shell"
+    );
+    store.upsert_memory("drink", "Black Coffee");
+    assert_eq!(store.active_memories().len(), 1);
+    store.update(ConfigPatch {
+        active_shell_id: Some("neo_default".to_string()),
+        ..Default::default()
+    });
+    assert_eq!(store.active_memories()[0].content, "Matcha Latte");
+
+    let assets_root = manifest_dir().join("assets");
+    let manifest = ShellManager::new(vec![assets_root.join("shells")])
+        .load_shell("neo_default")
+        .expect("load neo_default");
+    let runner = BuiltinToolRunner::new(store.clone(), None);
+    let engine = AgentEngine::new(
+        store.clone(),
+        runner,
+        Arc::new(Mutex::new(manifest.clone())),
+        None,
+    );
+    engine.append_history_for_shell("neo_default", "user", "neo-msg");
+    engine.append_history_for_shell("alt_shell", "user", "alt-msg-1");
+    engine.append_history_for_shell("alt_shell", "assistant", "alt-msg-2");
+    assert_eq!(engine.active_history_len(), 1);
+    store.update(ConfigPatch {
+        active_shell_id: Some("alt_shell".to_string()),
+        ..Default::default()
+    });
+    assert_eq!(engine.active_history_len(), 2);
+    engine.clear_history();
+    assert_eq!(engine.history_len_for_shell("alt_shell"), 0);
+    assert_eq!(engine.history_len_for_shell("neo_default"), 1);
+
+    // .nar ghost/master/descript.txt `name` propagates as `ghost.name`
+    let nar_path = tmp.join("ghost_probe.nar");
+    let mut png_bytes = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(4, 4, image::Rgba([0, 0, 0, 255])))
+        .write_to(&mut png_bytes, image::ImageFormat::Png)
+        .unwrap();
+    {
+        let f = fs::File::create(&nar_path).unwrap();
+        let mut zw = zip::ZipWriter::new(f);
+        let opts = zip::write::SimpleFileOptions::default();
+        zw.start_file("ghost/master/descript.txt", opts).unwrap();
+        zw.write_all(b"charset,UTF-8\nname,Test Ghost Alpha\nsakura.name,Alpha0\nkero.name,Beta1\n")
+            .unwrap();
+        zw.start_file("shell/master/descript.txt", opts).unwrap();
+        zw.write_all(b"charset,UTF-8\nname,MasterShell\n").unwrap();
+        zw.start_file("shell/master/surface0.png", opts).unwrap();
+        zw.write_all(png_bytes.get_ref()).unwrap();
+        zw.start_file("shell/master/surface10.png", opts).unwrap();
+        zw.write_all(png_bytes.get_ref()).unwrap();
+        zw.finish().unwrap();
+    }
+    let shells_dest = tmp.join("shells");
+    let balloons_dest = tmp.join("balloons");
+    let installed = install_nar_archive(&nar_path, &shells_dest, &balloons_dest).unwrap();
+    assert_eq!(installed.shells.len(), 1);
+    let installed_desc = fs::read_to_string(shells_dest.join(&installed.shells[0]).join("descript.txt")).unwrap();
+    let parsed_desc = parse_descript_txt(&installed_desc);
+    assert_eq!(parsed_desc.ghost_name, "Test Ghost Alpha");
+    assert_eq!(parsed_desc.sakura_name, "Alpha0");
+
+    // SPEC-SKIN-05: neo_default dress-up bindgroup defaults off and increases pixel count when toggled on
+    let binds_meta = manifest.effective_bind_groups();
+    assert!(binds_meta.iter().any(|b| b.bind_id == 50 && b.scope == 0 && !b.default_on));
+    assert!(binds_meta.iter().any(|b| b.bind_id == 51 && b.scope == 1 && !b.default_on));
+    assert!(manifest.default_bind_ids().is_empty());
+
+    let raw_s0 = manifest.compose_base_rgba(0).expect("raw s0");
+    let default_s0 = manifest
+        .compose_surface_rgba(0, &manifest.default_bind_ids())
+        .expect("default s0");
+    assert_eq!(raw_s0.data, default_s0.data);
+
+    let bound_s0 = manifest.compose_surface_rgba(0, &[50]).expect("bound s0");
+    assert!(
+        bound_s0.count_opaque_pixels() > default_s0.count_opaque_pixels(),
+        "SPEC-SKIN-05: star hair-clip overlay (bind 50) must increase Sakura opaque pixel count"
+    );
+    let (new_list, on) = store.toggle_shell_bind("neo_default", 50, &manifest.default_bind_ids());
+    assert!(on && new_list == vec![50]);
+    let reloaded_store = ConfigStore::new(Some(cfg_dir));
+    assert_eq!(
+        reloaded_store.get_active_binds("neo_default", &manifest.default_bind_ids()),
+        vec![50]
+    );
+
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn spec_comp_01_02_03_dlg_04_reminders_drop_links_and_updates() {
+    let tmp = fresh_temp_dir("nanikaai_spec_comp");
+    let cfg_dir = tmp.join("cfg");
+    let store = ConfigStore::new(Some(cfg_dir.clone()));
+    let runner = BuiltinToolRunner::new(store.clone(), None);
+
+    // SPEC-COMP-01: Reminders tool + hourly chime + farewell + skin switch greeting
+    let rem_res: Value = serde_json::from_str(&runner.execute(
+        "set_reminder",
+        &json!({"message": "Standup Meeting", "delay_seconds": 120}),
+    ))
+    .unwrap();
+    assert_eq!(rem_res.get("ok").and_then(|v| v.as_bool()), Some(true));
+    let listed: Value =
+        serde_json::from_str(&runner.execute("list_reminders", &json!({}))).unwrap();
+    assert_eq!(listed.get("count").and_then(|v| v.as_u64()), Some(1));
+    let due = store.take_due_reminders(chrono::Utc::now().timestamp() + 3600);
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].message, "Standup Meeting");
+    assert!(store.list_reminders(false).is_empty());
+
+    let assets_root = manifest_dir().join("assets");
+    let manifest = ShellManager::new(vec![assets_root.join("shells")])
+        .load_shell("neo_default")
+        .expect("load neo_default");
+    let engine = AgentEngine::new(store.clone(), runner, Arc::new(Mutex::new(manifest)), None);
+    let chime = engine.handle_hourly_chime(15);
+    assert!(chime.raw_reply.contains("15時"));
+    let farewell = engine.build_farewell_script();
+    assert!(farewell.contains("ありがとう") && farewell.contains("また呼んでね"));
+    assert!(engine
+        .build_skin_switch_greeting("neo_default", "other_shell")
+        .contains("交代"));
+
+    // SPEC-COMP-02: Generic file drop + untrusted_data boundary + sensitive path rejection
+    let env_probe = tmp.join(".env");
+    fs::write(&env_probe, "SAMPLE_SETTING=placeholder_value").unwrap();
+    assert!(
+        inspect_dropped_path(&env_probe).is_err(),
+        "SPEC-COMP-02: dropped .env file must be rejected before read"
+    );
+    let _ = fs::remove_file(&env_probe);
+
+    let key_probe = tmp.join("id_rsa");
+    fs::write(&key_probe, "placeholder key body").unwrap();
+    assert!(
+        inspect_dropped_path(&key_probe).is_err(),
+        "SPEC-COMP-02: dropped id_rsa key file must be rejected before read"
+    );
+
+    let note_path = tmp.join("notes.md");
+    fs::write(&note_path, "# Release Plan\nItem 1: Ship v0.1.4\n").unwrap();
+    let note_payload = inspect_dropped_path(&note_path).expect("safe markdown note");
+    assert!(note_payload.wrapped_data.contains("<untrusted_data source=\"dropped_file\">"));
+    assert!(note_payload.offline_summary.contains("notes.md"));
+
+    let url_file = tmp.join("bookmark.url");
+    fs::write(
+        &url_file,
+        "[InternetShortcut]\nURL=https://github.com/JungWonYong/nanikaai\n",
+    )
+    .unwrap();
+    let url_payload = inspect_dropped_path(&url_file).expect("safe url shortcut");
+    assert_eq!(
+        url_payload.extracted_url.as_deref(),
+        Some("https://github.com/JungWonYong/nanikaai")
+    );
+
+    // SPEC-DLG-04: Quick mode (\_q), explicit anchor (\_a[url]label\_a), bare URL, safe dry-run open
+    let actions = parse_dialogue(
+        r"\_q\0\s[5]Check \_a[https://github.com/JungWonYong/nanikaai]Repo\_a or https://example.org/docs. \_q\e",
+    );
+    assert_eq!(
+        actions
+            .iter()
+            .filter(|a| a.kind == ActionKind::QuickToggle)
+            .count(),
+        2
+    );
+    let links: Vec<_> = actions
+        .iter()
+        .filter(|a| a.kind == ActionKind::Link)
+        .collect();
+    assert_eq!(links.len(), 2);
+    assert_eq!(links[0].label, "Repo");
+    assert_eq!(links[0].choice_id, "https://github.com/JungWonYong/nanikaai");
+    assert_eq!(links[1].choice_id, "https://example.org/docs");
+
+    assert!(open_validated_browser_url("http://127.0.0.1:9999", true).is_err());
+    assert!(open_validated_browser_url("file:///etc/passwd", true).is_err());
+    assert!(open_validated_browser_url("https://github.com/JungWonYong/nanikaai", true).is_ok());
+
+    // SPEC-COMP-03: TTS speech extraction & SemVer release update comparison
+    let segs = extract_speech_segments(r"\0\s[0]Hello there.\1\s[10]Ready!\e");
+    assert_eq!(segs.len(), 2);
+    assert_eq!(segs[0].0, 0);
+    assert_eq!(segs[1].0, 1);
+    assert_eq!(compare_semver("0.1.4", "v0.1.5"), std::cmp::Ordering::Greater);
+
+    let _ = fs::remove_dir_all(&tmp);
 }

@@ -131,6 +131,34 @@ fn default_persona() -> String {
     DEFAULT_PERSONA.to_string()
 }
 
+fn default_voicevox() -> String {
+    "http://127.0.0.1:50021".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReminderItem {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub message: String,
+    #[serde(default)]
+    pub fire_at_unix: i64,
+    #[serde(default)]
+    pub shell_id: String,
+    #[serde(default)]
+    pub done: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ShellGhostProfile {
+    #[serde(default)]
+    pub system_persona: String,
+    #[serde(default)]
+    pub memories: Vec<MemoryItem>,
+    #[serde(default)]
+    pub active_binds: Option<Vec<i32>>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
     #[serde(default = "default_provider")]
@@ -169,10 +197,20 @@ pub struct AgentConfig {
     pub always_on_top: bool,
     #[serde(default = "default_true")]
     pub live2d_motion: bool,
+    #[serde(default = "default_true")]
+    pub hourly_chime: bool,
+    #[serde(default)]
+    pub voice_tts: bool,
+    #[serde(default = "default_voicevox")]
+    pub voicevox_url: String,
     #[serde(default = "default_persona")]
     pub system_persona: String,
     #[serde(default)]
     pub memories: Vec<MemoryItem>,
+    #[serde(default)]
+    pub ghost_profiles: BTreeMap<String, ShellGhostProfile>,
+    #[serde(default)]
+    pub reminders: Vec<ReminderItem>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }
@@ -196,8 +234,13 @@ impl Default for AgentConfig {
             show_kero: true,
             always_on_top: true,
             live2d_motion: true,
+            hourly_chime: true,
+            voice_tts: false,
+            voicevox_url: default_voicevox(),
             system_persona: default_persona(),
             memories: Vec::new(),
+            ghost_profiles: BTreeMap::new(),
+            reminders: Vec::new(),
             extra: BTreeMap::new(),
         }
     }
@@ -218,6 +261,9 @@ pub struct ConfigPatch {
     pub show_kero: Option<bool>,
     pub always_on_top: Option<bool>,
     pub live2d_motion: Option<bool>,
+    pub hourly_chime: Option<bool>,
+    pub voice_tts: Option<bool>,
+    pub voicevox_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -247,7 +293,24 @@ impl ConfigStore {
             return defaults;
         }
         match fs::read_to_string(file_path) {
-            Ok(txt) => serde_json::from_str::<AgentConfig>(&txt).unwrap_or_default(),
+            Ok(txt) => {
+                let mut cfg = serde_json::from_str::<AgentConfig>(&txt).unwrap_or_default();
+                if !cfg.memories.is_empty() {
+                    let shell_id = if cfg.active_shell_id.trim().is_empty() {
+                        default_shell_id()
+                    } else {
+                        cfg.active_shell_id.clone()
+                    };
+                    let profile = cfg.ghost_profiles.entry(shell_id).or_default();
+                    if profile.memories.is_empty() {
+                        profile.memories = std::mem::take(&mut cfg.memories);
+                    } else {
+                        cfg.memories.clear();
+                    }
+                    Self::save_to_path(file_path, &cfg);
+                }
+                cfg
+            }
             Err(_) => AgentConfig::default(),
         }
     }
@@ -306,11 +369,174 @@ impl ConfigStore {
         if let Some(v) = patch.live2d_motion {
             guard.live2d_motion = v;
         }
+        if let Some(v) = patch.hourly_chime {
+            guard.hourly_chime = v;
+        }
+        if let Some(v) = patch.voice_tts {
+            guard.voice_tts = v;
+        }
+        if let Some(v) = patch.voicevox_url {
+            guard.voicevox_url = v;
+        }
         Self::save_to_path(&self.file_path, &guard);
         guard.clone()
     }
 
+    pub fn active_memories(&self) -> Vec<MemoryItem> {
+        let guard = self.inner.lock().expect("config mutex poisoned");
+        Self::memories_slice(&guard, &guard.active_shell_id).to_vec()
+    }
+
+    pub fn memories_for_shell(&self, shell_id: &str) -> Vec<MemoryItem> {
+        let guard = self.inner.lock().expect("config mutex poisoned");
+        Self::memories_slice(&guard, shell_id).to_vec()
+    }
+
+    fn memories_slice<'a>(cfg: &'a AgentConfig, shell_id: &str) -> &'a [MemoryItem] {
+        cfg.ghost_profiles
+            .get(shell_id)
+            .map(|p| p.memories.as_slice())
+            .unwrap_or(&[])
+    }
+
+    pub fn persona_override_for_shell(&self, shell_id: &str) -> Option<String> {
+        let guard = self.inner.lock().ok()?;
+        let custom = guard
+            .ghost_profiles
+            .get(shell_id)
+            .map(|p| p.system_persona.trim())
+            .unwrap_or("");
+        if custom.is_empty() {
+            None
+        } else {
+            Some(custom.to_string())
+        }
+    }
+
+    pub fn set_persona_override_for_shell(&self, shell_id: &str, persona: &str) {
+        let mut guard = self.inner.lock().expect("config mutex poisoned");
+        let profile = guard
+            .ghost_profiles
+            .entry(shell_id.to_string())
+            .or_default();
+        profile.system_persona = persona.trim().to_string();
+        Self::save_to_path(&self.file_path, &guard);
+    }
+
+    pub fn get_active_binds(&self, shell_id: &str, default_binds: &[i32]) -> Vec<i32> {
+        let guard = self.inner.lock().expect("config mutex poisoned");
+        if let Some(Some(saved)) = guard
+            .ghost_profiles
+            .get(shell_id)
+            .map(|p| &p.active_binds)
+        {
+            return saved.clone();
+        }
+        let mut out = default_binds.to_vec();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    pub fn toggle_shell_bind(
+        &self,
+        shell_id: &str,
+        bind_id: i32,
+        default_binds: &[i32],
+    ) -> (Vec<i32>, bool) {
+        let mut guard = self.inner.lock().expect("config mutex poisoned");
+        let profile = guard
+            .ghost_profiles
+            .entry(shell_id.to_string())
+            .or_default();
+        let mut current = match &profile.active_binds {
+            Some(list) => list.clone(),
+            None => default_binds.to_vec(),
+        };
+        let now_enabled = if let Some(pos) = current.iter().position(|&id| id == bind_id) {
+            current.remove(pos);
+            false
+        } else {
+            current.push(bind_id);
+            current.sort_unstable();
+            current.dedup();
+            true
+        };
+        profile.active_binds = Some(current.clone());
+        Self::save_to_path(&self.file_path, &guard);
+        (current, now_enabled)
+    }
+
+    pub fn add_reminder(
+        &self,
+        message: &str,
+        fire_at_unix: i64,
+        shell_id: Option<&str>,
+    ) -> ReminderItem {
+        let mut guard = self.inner.lock().expect("config mutex poisoned");
+        let target_shell = shell_id
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| guard.active_shell_id.clone());
+        let id = format!(
+            "rem_{}_{}",
+            Utc::now().timestamp_millis(),
+            guard.reminders.len() + 1
+        );
+        let item = ReminderItem {
+            id,
+            message: message.trim().chars().take(240).collect(),
+            fire_at_unix,
+            shell_id: target_shell,
+            done: false,
+        };
+        guard.reminders.push(item.clone());
+        // Retain at most 64 recent reminders to keep config.json lean.
+        if guard.reminders.len() > 64 {
+            let drain_count = guard.reminders.len() - 64;
+            guard.reminders.drain(0..drain_count);
+        }
+        Self::save_to_path(&self.file_path, &guard);
+        item
+    }
+
+    pub fn list_reminders(&self, include_done: bool) -> Vec<ReminderItem> {
+        let guard = self.inner.lock().expect("config mutex poisoned");
+        guard
+            .reminders
+            .iter()
+            .filter(|r| include_done || !r.done)
+            .cloned()
+            .collect()
+    }
+
+    pub fn take_due_reminders(&self, now_unix: i64) -> Vec<ReminderItem> {
+        let mut guard = self.inner.lock().expect("config mutex poisoned");
+        let mut due = Vec::new();
+        let mut changed = false;
+        for rem in &mut guard.reminders {
+            if !rem.done && rem.fire_at_unix <= now_unix {
+                rem.done = true;
+                due.push(rem.clone());
+                changed = true;
+            }
+        }
+        if changed {
+            Self::save_to_path(&self.file_path, &guard);
+        }
+        due
+    }
+
     pub fn upsert_memory(&self, title: &str, content: &str) -> MemoryItem {
+        let active = self.get().active_shell_id;
+        self.upsert_memory_for_shell(&active, title, content)
+    }
+
+    pub fn upsert_memory_for_shell(
+        &self,
+        shell_id: &str,
+        title: &str,
+        content: &str,
+    ) -> MemoryItem {
         let clean_title: String = title.trim().chars().take(120).collect();
         let clean_title = if clean_title.is_empty() {
             "note".to_string()
@@ -324,29 +550,37 @@ impl ConfigStore {
             updated_at: Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
         };
         let mut guard = self.inner.lock().expect("config mutex poisoned");
-        if let Some(existing) = guard
+        let profile = guard
+            .ghost_profiles
+            .entry(shell_id.to_string())
+            .or_default();
+        if let Some(existing) = profile
             .memories
             .iter_mut()
             .find(|m| m.title.eq_ignore_ascii_case(&clean_title))
         {
             *existing = entry.clone();
         } else {
-            guard.memories.push(entry.clone());
+            profile.memories.push(entry.clone());
         }
         Self::save_to_path(&self.file_path, &guard);
         entry
     }
 
     pub fn search_memories(&self, keyword: &str) -> Vec<MemoryItem> {
+        let active = self.get().active_shell_id;
+        self.search_memories_for_shell(&active, keyword)
+    }
+
+    pub fn search_memories_for_shell(&self, shell_id: &str, keyword: &str) -> Vec<MemoryItem> {
         let q = keyword.trim().to_lowercase();
         let guard = self.inner.lock().expect("config mutex poisoned");
+        let mems = Self::memories_slice(&guard, shell_id);
         if q.is_empty() {
-            let start = guard.memories.len().saturating_sub(10);
-            return guard.memories[start..].to_vec();
+            let start = mems.len().saturating_sub(10);
+            return mems[start..].to_vec();
         }
-        guard
-            .memories
-            .iter()
+        mems.iter()
             .filter(|m| m.title.to_lowercase().contains(&q) || m.content.to_lowercase().contains(&q))
             .cloned()
             .collect()
