@@ -15,6 +15,7 @@ mkdir "%DIST_DIR%"
 echo [2/3] Copying executable and CC0 default assets...
 copy /Y "%ROOT_DIR%\target\release\nanikaai.exe" "%DIST_DIR%\nanikaai.exe" >nul
 xcopy /E /I /Y "%ROOT_DIR%\assets" "%DIST_DIR%\assets" >nul
+if exist "%ROOT_DIR%\tools" xcopy /E /I /Y "%ROOT_DIR%\tools" "%DIST_DIR%\tools" >nul
 copy /Y "%ROOT_DIR%\LICENSE" "%DIST_DIR%\LICENSE" >nul
 
 echo [3/3] Windows portable build ready: %DIST_DIR%

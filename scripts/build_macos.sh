@@ -39,6 +39,9 @@ mkdir -p "$APP_BUNDLE/Contents/Resources"
 cp "$BIN_PATH" "$APP_BUNDLE/Contents/MacOS/nanikaai"
 chmod +x "$APP_BUNDLE/Contents/MacOS/nanikaai"
 cp -R "$ROOT_DIR/assets" "$APP_BUNDLE/Contents/Resources/assets"
+if [ -d "$ROOT_DIR/tools" ]; then
+    cp -R "$ROOT_DIR/tools" "$APP_BUNDLE/Contents/Resources/tools"
+fi
 
 if [ -f "$ICNS_PATH" ]; then
     cp "$ICNS_PATH" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
@@ -66,9 +69,9 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.5</string>
+    <string>0.1.6</string>
     <key>CFBundleVersion</key>
-    <string>0.1.5</string>
+    <string>0.1.6</string>
     <key>LSMinimumSystemVersion</key>
     <string>12.0</string>
     <key>LSUIElement</key>

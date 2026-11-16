@@ -1,0 +1,722 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>何か藍 (NanikaAi) — Live2D Sidecar Rig Studio (Offline)</title>
+<style>
+  :root {
+    --bg: #0f131c;
+    --panel: #171d2b;
+    --panel-alt: #1e2638;
+    --border: #2c3852;
+    --accent: #4f8cff;
+    --accent-soft: rgba(79, 140, 255, 0.18);
+    --text: #e8eefc;
+    --muted: #93a3c7;
+    --good: #34d399;
+    --warn: #fbbf24;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Yu Gothic UI", "Segoe UI", sans-serif;
+    font-size: 13px; overflow: hidden;
+  }
+  .app {
+    display: grid;
+    grid-template-rows: 48px 1fr;
+    grid-template-columns: 290px 1fr 340px;
+    height: 100vh; width: 100vw;
+  }
+  header {
+    grid-column: 1 / -1;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 14px; background: var(--panel); border-bottom: 1px solid var(--border);
+  }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 14px; }
+  .badge {
+    font-size: 11px; padding: 2px 8px; border-radius: 999px;
+    background: var(--accent-soft); color: #9fc2ff; border: 1px solid rgba(79,140,255,0.4);
+  }
+  .toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  button, select, input[type="number"], input[type="text"] {
+    background: var(--panel-alt); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 5px 9px; font-size: 12px;
+  }
+  button { cursor: pointer; font-weight: 600; transition: border-color 0.15s, background 0.15s; }
+  button:hover { border-color: var(--accent); background: #26314a; }
+  button.primary { background: #2563eb; border-color: #3b82f6; color: #fff; }
+  button.primary:hover { background: #1d4ed8; }
+  button.active { background: var(--accent-soft); border-color: var(--accent); color: #fff; }
+  aside.left, aside.right {
+    background: var(--panel); overflow-y: auto; padding: 10px;
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  aside.left { border-right: 1px solid var(--border); }
+  aside.right { border-left: 1px solid var(--border); }
+  .section {
+    background: var(--panel-alt); border: 1px solid var(--border); border-radius: 8px; padding: 10px;
+  }
+  .section h3 {
+    margin: 0 0 8px 0; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: #a8c0f0;
+  }
+  .drop-zone {
+    border: 1.5px dashed #475d8c; border-radius: 8px; padding: 10px; text-align: center;
+    background: rgba(79,140,255,0.06); cursor: pointer; transition: border-color 0.15s;
+  }
+  .drop-zone.dragover { border-color: var(--good); background: rgba(52,211,153,0.12); }
+  .layer-list { display: flex; flex-direction: column; gap: 4px; max-height: 46vh; overflow-y: auto; }
+  .layer-item {
+    display: grid; grid-template-columns: 28px 1fr 44px; align-items: center; gap: 6px;
+    padding: 6px 8px; border-radius: 6px; border: 1px solid transparent;
+    background: rgba(15,19,28,0.5); cursor: pointer;
+  }
+  .layer-item.selected { border-color: var(--accent); background: var(--accent-soft); }
+  .layer-z { font-family: monospace; font-size: 11px; color: var(--muted); }
+  .layer-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .layer-meta { font-size: 10px; color: var(--muted); }
+  main.viewport {
+    position: relative; overflow: hidden; display: flex; align-items: center; justify-content: center;
+    background-image:
+      linear-gradient(45deg, #161b26 25%, transparent 25%),
+      linear-gradient(-45deg, #161b26 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, #161b26 75%),
+      linear-gradient(-45deg, transparent 75%, #161b26 75%);
+    background-size: 24px 24px;
+    background-position: 0 0, 0 12px, 12px -12px, -12px 0;
+  }
+  canvas#stage { max-width: 96%; max-height: 94%; border-radius: 8px; cursor: crosshair; box-shadow: 0 12px 42px rgba(0,0,0,0.45); }
+  .hud {
+    position: absolute; bottom: 10px; left: 12px; right: 12px; pointer-events: none;
+    display: flex; justify-content: space-between; font-size: 11px; color: #b7c6ea;
+  }
+  .hud span { background: rgba(15,19,28,0.82); padding: 4px 8px; border-radius: 6px; border: 1px solid var(--border); }
+  .field-row { display: grid; grid-template-columns: 116px 1fr; align-items: center; gap: 6px; margin-bottom: 6px; }
+  .field-row label { color: var(--muted); font-size: 11.5px; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .slider-row { margin-bottom: 7px; }
+  .slider-head { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+  input[type="range"] { width: 100%; accent-color: var(--accent); }
+  textarea#jsonOut {
+    width: 100%; height: 155px; background: #0c1018; color: #b8dcff;
+    border: 1px solid var(--border); border-radius: 6px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px; padding: 6px; resize: vertical;
+  }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="brand">
+      <span>何か藍 Live2D サイドカー Studio</span>
+      <span class="badge">Offline · Zero-CDN</span>
+      <select id="scopeSelect" title="Character Scope">
+        <option value="sakura">\0 メイン (Sakura / 660x1350)</option>
+        <option value="kero">\1 パートナー (Kero / 380x420)</option>
+      </select>
+    </div>
+    <div class="toolbar">
+      <button id="btnMotion" class="active">Motion ON</button>
+      <button id="btnSpeak">発話テスト · Talk</button>
+      <button id="btnGust">風揺れ · Gust</button>
+      <button id="btnPivots" class="active">支点・ボーン表示</button>
+      <button id="btnSolo">Solo</button>
+      <button id="btnExport" class="primary">live2d.json を保存</button>
+    </div>
+  </header>
+
+  <aside class="left">
+    <div class="section">
+      <h3>1. パーツ / JSON 読込</h3>
+      <div id="dropZone" class="drop-zone">
+        <div><strong>PNG パーツ群 / live2d.json</strong> をドラッグ＆ドロップ</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:3px;">クリックでファイル選択 (複数可)</div>
+        <input id="fileInput" type="file" multiple accept=".png,.json" class="hidden">
+      </div>
+      <div class="field-row" style="margin-top:8px;">
+        <label>参照下絵 (Onion)</label>
+        <input id="refInput" type="file" accept=".png">
+      </div>
+      <div class="slider-row">
+        <div class="slider-head"><span>下絵オーバーレイ透明度</span><span id="onionVal">0%</span></div>
+        <input id="onionAlpha" type="range" min="0" max="80" value="0">
+      </div>
+    </div>
+
+    <div class="section" style="flex:1;display:flex;flex-direction:column;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+        <h3 style="margin:0;">2. レイヤー階層 (Z順)</h3>
+        <button id="btnAddBlank" style="padding:2px 7px;font-size:11px;">+ 空パーツ</button>
+      </div>
+      <div id="layerList" class="layer-list"></div>
+    </div>
+  </aside>
+
+  <main class="viewport" id="viewport">
+    <canvas id="stage" width="660" height="1350"></canvas>
+    <div class="hud">
+      <span id="hudHint">キャンバス上でクリック＆ドラッグ: 選択パーツの支点 (pivot_px) を移動 · カーソル追従リアルタイム確認</span>
+      <span id="hudCoords">Canvas: 660x1350</span>
+    </div>
+  </main>
+
+  <aside class="right">
+    <div class="section" id="inspector">
+      <h3>3. 選択パーツ設定</h3>
+      <div class="field-row">
+        <label>ID</label>
+        <input id="fId" type="text">
+      </div>
+      <div class="field-row">
+        <label>Texture パス</label>
+        <input id="fTex" type="text">
+      </div>
+      <div class="field-row">
+        <label>役割 (role)</label>
+        <select id="fRole">
+          <option value="planted">planted (足元固定)</option>
+          <option value="skirt">skirt (スカート)</option>
+          <option value="torso">torso (胴体・呼吸)</option>
+          <option value="ribbon">ribbon (リボン・小物)</option>
+          <option value="head">head (頭部・顔)</option>
+          <option value="hair_back">hair_back (後ろ髪)</option>
+          <option value="hair_side_l">hair_side_l (左横髪)</option>
+          <option value="hair_side_r">hair_side_r (右横髪)</option>
+          <option value="ahoge">ahoge (アホ毛)</option>
+          <option value="mochi_body">mochi_body (もち胴体)</option>
+          <option value="mochi_tuft">mochi_tuft (もちトサカ)</option>
+          <option value="mochi_face">mochi_face (もち表情)</option>
+          <option value="mochi_paws">mochi_paws (もち手足)</option>
+          <option value="mochi_glasses">mochi_glasses (メガネ)</option>
+          <option value="accessory">accessory (装飾品)</option>
+        </select>
+      </div>
+      <div class="field-row">
+        <label>親ボーン (parent)</label>
+        <select id="fParent"></select>
+      </div>
+      <div class="field-row">
+        <label>Z 順 / 位相</label>
+        <div class="pair">
+          <input id="fZ" type="number" step="1">
+          <input id="fPhase" type="number" step="0.1">
+        </div>
+      </div>
+      <div class="field-row">
+        <label>支点 pivot_px</label>
+        <div class="pair">
+          <input id="fPivX" type="number" step="1">
+          <input id="fPivY" type="number" step="1">
+        </div>
+      </div>
+      <div class="field-row">
+        <label>視差 parallax</label>
+        <div class="pair">
+          <input id="fParX" type="number" step="0.05">
+          <input id="fParY" type="number" step="0.05">
+        </div>
+      </div>
+      <div class="slider-row">
+        <div class="slider-head"><span>最大回転 (rot_deg)</span><span id="vRot">0.0</span></div>
+        <input id="fRot" type="range" min="-20" max="20" step="0.2" value="0">
+      </div>
+      <div class="slider-row">
+        <div class="slider-head"><span>しなり先端量 (bend_px)</span><span id="vBend">0.0</span></div>
+        <input id="fBend" type="range" min="0" max="24" step="0.5" value="0">
+      </div>
+      <div class="slider-row">
+        <div class="slider-head"><span>バネ固有周波数 (spring_omega)</span><span id="vOmega">9.5</span></div>
+        <input id="fOmega" type="range" min="3" max="22" step="0.2" value="9.5">
+      </div>
+      <div class="slider-row">
+        <div class="slider-head"><span>バネ減衰率 (spring_zeta)</span><span id="vZeta">0.36</span></div>
+        <input id="fZeta" type="range" min="0.12" max="1.0" step="0.02" value="0.36">
+      </div>
+      <div class="field-row">
+        <label>呼吸移動 / 伸縮</label>
+        <div class="pair">
+          <input id="fBreathY" type="number" step="0.2" title="breath_px[1]">
+          <input id="fScaleX" type="number" step="0.002" title="scale_breath[0]">
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+        <h3 style="margin:0;">4. サイドカー JSON</h3>
+        <button id="btnCopy" style="padding:2px 8px;font-size:11px;">コピー</button>
+      </div>
+      <textarea id="jsonOut" readonly></textarea>
+    </div>
+  </aside>
+</div>
+
+<script>
+(() => {
+  const DEFAULT_PARTS = {
+    sakura: { canvas_size: [660, 1350], parts: [] },
+    kero: { canvas_size: [380, 420], parts: [] }
+  };
+
+  const state = {
+    name: "custom_live2d_rig",
+    scope: "sakura",
+    specs: JSON.parse(JSON.stringify(DEFAULT_PARTS)),
+    images: new Map(), // texture -> HTMLImageElement
+    refImage: null,
+    selectedIdx: -1,
+    motionOn: true,
+    speaking: false,
+    showPivots: true,
+    solo: false,
+    onionAlpha: 0,
+    draggingPivot: false,
+    gaze: { x: 0, y: 0, vx: 0, vy: 0, px: 0, py: 0, z: 0 },
+    targetGaze: { x: 0, y: 0 },
+    springs: new Map(),
+    gustImpulse: 0,
+    startTime: performance.now()
+  };
+
+  const canvas = document.getElementById("stage");
+  const ctx = canvas.getContext("2d");
+  const layerListEl = document.getElementById("layerList");
+  const jsonOutEl = document.getElementById("jsonOut");
+
+  function activeSpec() {
+    return state.specs[state.scope];
+  }
+
+  function resizeStage() {
+    const [w, h] = activeSpec().canvas_size;
+    canvas.width = w;
+    canvas.height = h;
+    document.getElementById("hudCoords").textContent = `Canvas: ${w}x${h}`;
+  }
+
+  function getSpring(id) {
+    if (!state.springs.has(id)) {
+      state.springs.set(id, { pos: 0, vel: 0 });
+    }
+    return state.springs.get(id);
+  }
+
+  function stepSpring(sp, target, omega, zeta, dt) {
+    const sub = Math.min(0.045, Math.max(0.001, dt)) * 0.5;
+    for (let k = 0; k < 2; k++) {
+      const acc = omega * omega * (target - sp.pos) - 2 * zeta * omega * sp.vel;
+      sp.vel = Math.max(-10, Math.min(10, sp.vel + acc * sub));
+      sp.pos = Math.max(-2, Math.min(2, sp.pos + sp.vel * sub));
+    }
+  }
+
+  function mulMat(a, b) {
+    return [
+      a[0] * b[0] + a[1] * b[3],
+      a[0] * b[1] + a[1] * b[4],
+      a[0] * b[2] + a[1] * b[5] + a[2],
+      a[3] * b[0] + a[4] * b[3],
+      a[3] * b[1] + a[4] * b[4],
+      a[3] * b[2] + a[4] * b[5] + a[5]
+    ];
+  }
+
+  function matAroundPivot(px, py, tx, ty, rad, sx, sy) {
+    const c = Math.cos(rad), s = Math.sin(rad);
+    const m00 = c * sx, m01 = -s * sy, m10 = s * sx, m11 = c * sy;
+    return [m00, m01, px + tx - (m00 * px + m01 * py), m10, m11, py + ty - (m10 * px + m11 * py)];
+  }
+
+  function refreshLayerList() {
+    const parts = activeSpec().parts;
+    parts.sort((a, b) => a.z - b.z);
+    layerListEl.innerHTML = "";
+    parts.forEach((p, idx) => {
+      const div = document.createElement("div");
+      div.className = "layer-item" + (idx === state.selectedIdx ? " selected" : "");
+      div.innerHTML = `
+        <span class="layer-z">${p.z}</span>
+        <div>
+          <div class="layer-name">${p.id}</div>
+          <div class="layer-meta">${p.role} · parent:${p.parent || "-"}</div>
+        </div>
+        <span class="layer-meta" style="text-align:right;">${state.images.has(p.texture) ? "IMG" : "NO"}</span>
+      `;
+      div.onclick = () => {
+        state.selectedIdx = idx;
+        syncInspector();
+        refreshLayerList();
+      };
+      layerListEl.appendChild(div);
+    });
+    syncParentDropdown();
+    refreshJson();
+  }
+
+  function syncParentDropdown() {
+    const sel = document.getElementById("fParent");
+    const parts = activeSpec().parts;
+    const cur = state.selectedIdx >= 0 ? parts[state.selectedIdx] : null;
+    sel.innerHTML = `<option value="">(None / Root)</option>`;
+    parts.forEach((p, idx) => {
+      if (idx !== state.selectedIdx) {
+        const opt = document.createElement("option");
+        opt.value = p.id;
+        opt.textContent = p.id;
+        sel.appendChild(opt);
+      }
+    });
+    sel.value = cur && cur.parent ? cur.parent : "";
+  }
+
+  function syncInspector() {
+    const parts = activeSpec().parts;
+    const p = state.selectedIdx >= 0 && state.selectedIdx < parts.length ? parts[state.selectedIdx] : null;
+    if (!p) return;
+    document.getElementById("fId").value = p.id;
+    document.getElementById("fTex").value = p.texture;
+    document.getElementById("fRole").value = p.role;
+    syncParentDropdown();
+    document.getElementById("fZ").value = p.z;
+    document.getElementById("fPhase").value = p.phase_offset || 0;
+    document.getElementById("fPivX").value = Math.round(p.pivot_px[0] * 10) / 10;
+    document.getElementById("fPivY").value = Math.round(p.pivot_px[1] * 10) / 10;
+    document.getElementById("fParX").value = p.parallax[0];
+    document.getElementById("fParY").value = p.parallax[1];
+    document.getElementById("fRot").value = p.rot_deg;
+    document.getElementById("vRot").textContent = Number(p.rot_deg).toFixed(1);
+    document.getElementById("fBend").value = p.bend_px;
+    document.getElementById("vBend").textContent = Number(p.bend_px).toFixed(1);
+    const om = p.spring_omega ?? 9.5;
+    const ze = p.spring_zeta ?? 0.36;
+    document.getElementById("fOmega").value = om;
+    document.getElementById("vOmega").textContent = Number(om).toFixed(1);
+    document.getElementById("fZeta").value = ze;
+    document.getElementById("vZeta").textContent = Number(ze).toFixed(2);
+    document.getElementById("fBreathY").value = p.breath_px ? p.breath_px[1] : 0;
+    document.getElementById("fScaleX").value = p.scale_breath ? p.scale_breath[0] : 0;
+  }
+
+  function bindField(id, handler) {
+    document.getElementById(id).addEventListener("input", (e) => {
+      const parts = activeSpec().parts;
+      const p = parts[state.selectedIdx];
+      if (!p) return;
+      handler(p, e.target.value);
+      refreshLayerList();
+      syncInspector();
+    });
+  }
+
+  bindField("fId", (p, v) => { p.id = v.trim() || p.id; });
+  bindField("fTex", (p, v) => { p.texture = v.trim(); });
+  bindField("fRole", (p, v) => { p.role = v; });
+  bindField("fParent", (p, v) => { p.parent = v || null; });
+  bindField("fZ", (p, v) => { p.z = parseInt(v, 10) || 0; });
+  bindField("fPhase", (p, v) => { p.phase_offset = parseFloat(v) || 0; });
+  bindField("fPivX", (p, v) => { p.pivot_px[0] = parseFloat(v) || 0; });
+  bindField("fPivY", (p, v) => { p.pivot_px[1] = parseFloat(v) || 0; });
+  bindField("fParX", (p, v) => { p.parallax[0] = parseFloat(v) || 0; });
+  bindField("fParY", (p, v) => { p.parallax[1] = parseFloat(v) || 0; });
+  bindField("fRot", (p, v) => { p.rot_deg = parseFloat(v) || 0; });
+  bindField("fBend", (p, v) => { p.bend_px = parseFloat(v) || 0; });
+  bindField("fOmega", (p, v) => { p.spring_omega = parseFloat(v) || 9.5; });
+  bindField("fZeta", (p, v) => { p.spring_zeta = parseFloat(v) || 0.36; });
+  bindField("fBreathY", (p, v) => { p.breath_px[1] = parseFloat(v) || 0; });
+  bindField("fScaleX", (p, v) => { p.scale_breath[0] = parseFloat(v) || 0; });
+
+  function refreshJson() {
+    const out = {
+      schema_version: 1,
+      name: state.name,
+      sakura: state.specs.sakura.parts.length ? state.specs.sakura : undefined,
+      kero: state.specs.kero.parts.length ? state.specs.kero : undefined
+    };
+    jsonOutEl.value = JSON.stringify(out, null, 2);
+  }
+
+  function guessRoleFromName(name) {
+    const lo = name.toLowerCase();
+    if (lo.includes("leg") || lo.includes("boot")) return ["legs_boots", 10, null, "planted"];
+    if (lo.includes("hair_back")) return ["hair_back", 20, "torso", "hair_back"];
+    if (lo.includes("skirt")) return ["skirt", 30, "torso", "skirt"];
+    if (lo.includes("torso") || lo.includes("body")) return ["torso", 40, null, lo.includes("mochi") ? "mochi_body" : "torso"];
+    if (lo.includes("chest")) return ["chest_bow", 50, "torso", "ribbon"];
+    if (lo.includes("waist")) return ["waist_bow", 55, "torso", "ribbon"];
+    if (lo.includes("head") || lo.includes("face")) return [lo.includes("face") ? "mochi_face" : "head", 60, "torso", lo.includes("face") ? "mochi_face" : "head"];
+    if (lo.includes("side_l")) return ["hair_side_l", 70, "head", "hair_side_l"];
+    if (lo.includes("side_r")) return ["hair_side_r", 72, "head", "hair_side_r"];
+    if (lo.includes("ahoge")) return ["ahoge", 80, "head", "ahoge"];
+    if (lo.includes("tuft")) return ["mochi_tuft", 20, "mochi_body", "mochi_tuft"];
+    if (lo.includes("glasses")) return ["mochi_glasses", 50, "mochi_face", "mochi_glasses"];
+    if (lo.includes("paw")) return [lo.includes("_r") ? "mochi_paw_r" : "mochi_paw_l", 40, "mochi_body", "mochi_paws"];
+    return [name.replace(/\.png$/i, ""), 90, null, "accessory"];
+  }
+
+  async function handleFiles(files) {
+    for (const f of files) {
+      if (f.name.endsWith(".json")) {
+        try {
+          const parsed = JSON.parse(await f.text());
+          state.name = parsed.name || state.name;
+          if (parsed.sakura) state.specs.sakura = parsed.sakura;
+          if (parsed.kero) state.specs.kero = parsed.kero;
+          resizeStage();
+          state.selectedIdx = activeSpec().parts.length > 0 ? 0 : -1;
+          refreshLayerList();
+          syncInspector();
+        } catch (err) {
+          alert("live2d.json parse error: " + err.message);
+        }
+      } else if (f.name.match(/\.(png|webp)$/i)) {
+        const url = URL.createObjectURL(f);
+        const img = new Image();
+        await new Promise((res) => { img.onload = res; img.src = url; });
+        const texKey = "parts/" + f.name;
+        state.images.set(texKey, img);
+        state.images.set(f.name, img);
+        const spec = activeSpec();
+        if (spec.parts.length === 0) {
+          spec.canvas_size = [img.naturalWidth, img.naturalHeight];
+          resizeStage();
+        }
+        const exists = spec.parts.some((p) => p.texture === texKey || p.texture === f.name);
+        if (!exists) {
+          const [id, z, parent, role] = guessRoleFromName(f.name);
+          spec.parts.push({
+            id, parent, texture: texKey, z,
+            pivot_px: [spec.canvas_size[0] * 0.5, spec.canvas_size[1] * 0.5],
+            role, parallax: [0.35, 0.18], rot_deg: 2.0, bend_px: 0.0,
+            breath_px: [0.0, -1.0], scale_breath: [0.0, 0.0],
+            spring_omega: 9.5, spring_zeta: 0.36, phase_offset: 0.0
+          });
+          if (state.selectedIdx < 0) state.selectedIdx = 0;
+        }
+        refreshLayerList();
+        syncInspector();
+      }
+    }
+  }
+
+  const dropZone = document.getElementById("dropZone");
+  const fileInput = document.getElementById("fileInput");
+  dropZone.onclick = () => fileInput.click();
+  fileInput.onchange = (e) => handleFiles(e.target.files);
+  dropZone.ondragover = (e) => { e.preventDefault(); dropZone.classList.add("dragover"); };
+  dropZone.ondragleave = () => dropZone.classList.remove("dragover");
+  dropZone.ondrop = (e) => {
+    e.preventDefault(); dropZone.classList.remove("dragover");
+    handleFiles(e.dataTransfer.files);
+  };
+
+  document.getElementById("refInput").onchange = async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    const img = new Image();
+    await new Promise((r) => { img.onload = r; img.src = URL.createObjectURL(f); });
+    state.refImage = img;
+    if (document.getElementById("onionAlpha").value === "0") {
+      document.getElementById("onionAlpha").value = "35";
+      state.onionAlpha = 0.35;
+      document.getElementById("onionVal").textContent = "35%";
+    }
+  };
+  document.getElementById("onionAlpha").oninput = (e) => {
+    state.onionAlpha = parseInt(e.target.value, 10) / 100;
+    document.getElementById("onionVal").textContent = e.target.value + "%";
+  };
+
+  document.getElementById("scopeSelect").onchange = (e) => {
+    state.scope = e.target.value;
+    resizeStage();
+    state.selectedIdx = activeSpec().parts.length > 0 ? 0 : -1;
+    refreshLayerList();
+    syncInspector();
+  };
+  document.getElementById("btnMotion").onclick = (e) => {
+    state.motionOn = !state.motionOn;
+    e.target.classList.toggle("active", state.motionOn);
+    e.target.textContent = state.motionOn ? "Motion ON" : "Motion OFF";
+  };
+  document.getElementById("btnSpeak").onclick = (e) => {
+    state.speaking = !state.speaking;
+    e.target.classList.toggle("active", state.speaking);
+  };
+  document.getElementById("btnGust").onclick = () => { state.gustImpulse = 1.6; };
+  document.getElementById("btnPivots").onclick = (e) => {
+    state.showPivots = !state.showPivots;
+    e.target.classList.toggle("active", state.showPivots);
+  };
+  document.getElementById("btnSolo").onclick = (e) => {
+    state.solo = !state.solo;
+    e.target.classList.toggle("active", state.solo);
+  };
+  document.getElementById("btnAddBlank").onclick = () => {
+    const parts = activeSpec().parts;
+    parts.push({
+      id: "layer_" + (parts.length + 1), parent: null, texture: "parts/layer.png",
+      z: 90 + parts.length,
+      pivot_px: [activeSpec().canvas_size[0] * 0.5, activeSpec().canvas_size[1] * 0.5],
+      role: "accessory", parallax: [0.3, 0.15], rot_deg: 2.0, bend_px: 0,
+      breath_px: [0, -1], scale_breath: [0, 0], spring_omega: 9.5, spring_zeta: 0.36, phase_offset: 0
+    });
+    state.selectedIdx = parts.length - 1;
+    refreshLayerList();
+    syncInspector();
+  };
+  document.getElementById("btnCopy").onclick = async () => {
+    await navigator.clipboard.writeText(jsonOutEl.value);
+  };
+  document.getElementById("btnExport").onclick = () => {
+    refreshJson();
+    const blob = new Blob([jsonOutEl.value + "\n"], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "live2d.json";
+    a.click();
+  };
+
+  function canvasPoint(e) {
+    const rect = canvas.getBoundingClientRect();
+    return [
+      (e.clientX - rect.left) * (canvas.width / Math.max(1, rect.width)),
+      (e.clientY - rect.top) * (canvas.height / Math.max(1, rect.height))
+    ];
+  }
+  canvas.addEventListener("pointerdown", (e) => {
+    if (state.selectedIdx < 0) return;
+    state.draggingPivot = true;
+    const [cx, cy] = canvasPoint(e);
+    const p = activeSpec().parts[state.selectedIdx];
+    p.pivot_px[0] = Math.round(cx * 10) / 10;
+    p.pivot_px[1] = Math.round(cy * 10) / 10;
+    syncInspector();
+    refreshJson();
+  });
+  window.addEventListener("pointermove", (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const nx = ((e.clientX - (rect.left + rect.width * 0.5)) / 360);
+    const ny = ((e.clientY - (rect.top + rect.height * 0.3)) / 320);
+    state.targetGaze.x = Math.max(-1, Math.min(1, nx));
+    state.targetGaze.y = Math.max(-1, Math.min(1, ny));
+    if (state.draggingPivot && state.selectedIdx >= 0) {
+      const [cx, cy] = canvasPoint(e);
+      const p = activeSpec().parts[state.selectedIdx];
+      p.pivot_px[0] = Math.round(cx * 10) / 10;
+      p.pivot_px[1] = Math.round(cy * 10) / 10;
+      syncInspector();
+      refreshJson();
+    }
+  });
+  window.addEventListener("pointerup", () => { state.draggingPivot = false; });
+
+  let lastTs = performance.now();
+  function renderFrame(now) {
+    const dt = Math.min(0.05, Math.max(0.005, (now - lastTs) / 1000));
+    lastTs = now;
+    const t = (now - state.startTime) / 1000;
+
+    const g = state.gaze;
+    const follow = 1 - Math.exp(-dt * 8.5);
+    g.x += (state.targetGaze.x - g.x) * follow;
+    g.y += (state.targetGaze.y - g.y) * follow;
+    g.vx = (g.x - g.px) / dt; g.vy = (g.y - g.py) / dt;
+    g.px = g.x; g.py = g.y;
+    const breath = (0.5 - 0.5 * Math.cos(t * 1.75)) * (0.75 + 0.25 * Math.sin(t * 0.62)) * 0.92;
+    const bodySway = Math.sin(t * 0.88) * 0.55 + Math.cos(t * 0.41) * 0.28;
+    const talkBob = state.speaking ? Math.abs(Math.sin(t * 12.5)) * 0.72 : 0;
+    g.z += (g.x * 0.032 + Math.sin(t * 0.92) * 0.015 - g.z) * (1 - Math.exp(-dt * 9));
+    state.gustImpulse *= Math.exp(-dt * 2.5);
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (state.refImage && state.onionAlpha > 0) {
+      ctx.save();
+      ctx.globalAlpha = state.onionAlpha;
+      ctx.drawImage(state.refImage, 0, 0, canvas.width, canvas.height);
+      ctx.restore();
+    }
+
+    const parts = activeSpec().parts;
+    const localMats = new Map();
+    for (const p of parts) {
+      if (!state.motionOn) {
+        localMats.set(p.id, [1, 0, 0, 0, 1, 0]);
+        continue;
+      }
+      const sp = getSpring(p.id);
+      const ph = p.phase_offset || 0;
+      const om = p.spring_omega ?? 9.5;
+      const ze = p.spring_zeta ?? 0.36;
+      const breeze = Math.sin(t * 1.35 + ph) * 0.24 + state.gustImpulse;
+      stepSpring(sp, -g.vx * 0.24 - bodySway * 0.2 + breeze, om, ze, dt);
+
+      const deg2rad = Math.PI / 180;
+      let tx = p.parallax[0] * g.x * 6.5 + sp.pos * (p.role === "ahoge" || p.role === "mochi_tuft" ? 1.8 : 1.1);
+      let ty = p.parallax[1] * g.y * 4.5 + (p.breath_px ? p.breath_px[1] * breath : 0) - (p.role === "mochi_paws" ? talkBob * 3.6 : 0);
+      let rot = (p.role === "head" || p.role === "mochi_face" ? g.z : 0) + (p.rot_deg * deg2rad) * (p.role === "planted" ? 0 : 0.65 * sp.pos + 0.35 * g.x);
+      let sx = 1 + (p.scale_breath ? p.scale_breath[0] * (breath - 0.5) : 0);
+      let sy = 1 + (p.scale_breath ? p.scale_breath[1] * (breath - 0.5) : 0);
+      if (p.role === "planted") { tx = 0; ty = 0; rot = 0; }
+      localMats.set(p.id, matAroundPivot(p.pivot_px[0], p.pivot_px[1], tx, ty, rot, sx, sy));
+    }
+
+    const byId = new Map(parts.map((p) => [p.id, p]));
+    const worldMats = new Map();
+    function getWorld(id, depth = 0) {
+      if (worldMats.has(id)) return worldMats.get(id);
+      const p = byId.get(id);
+      const lm = localMats.get(id) || [1, 0, 0, 0, 1, 0];
+      if (!p || !p.parent || depth > 32 || !localMats.has(p.parent)) {
+        worldMats.set(id, lm);
+        return lm;
+      }
+      const wm = mulMat(getWorld(p.parent, depth + 1), lm);
+      worldMats.set(id, wm);
+      return wm;
+    }
+
+    parts.forEach((p, idx) => {
+      if (state.solo && idx !== state.selectedIdx) return;
+      const img = state.images.get(p.texture);
+      if (!img) return;
+      const m = getWorld(p.id);
+      ctx.save();
+      ctx.transform(m[0], m[3], m[1], m[4], m[2], m[5]);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      ctx.restore();
+    });
+
+    if (state.showPivots) {
+      parts.forEach((p, idx) => {
+        const m = getWorld(p.id);
+        const wx = m[0] * p.pivot_px[0] + m[1] * p.pivot_px[1] + m[2];
+        const wy = m[3] * p.pivot_px[0] + m[4] * p.pivot_px[1] + m[5];
+        if (p.parent && byId.has(p.parent)) {
+          const pp = byId.get(p.parent);
+          const pm = getWorld(p.parent);
+          const pwx = pm[0] * pp.pivot_px[0] + pm[1] * pp.pivot_px[1] + pm[2];
+          const pwy = pm[3] * pp.pivot_px[0] + pm[4] * pp.pivot_px[1] + pm[5];
+          ctx.strokeStyle = "rgba(150, 195, 255, 0.55)";
+          ctx.lineWidth = 1.5;
+          ctx.beginPath(); ctx.moveTo(pwx, pwy); ctx.lineTo(wx, wy); ctx.stroke();
+        }
+        const isSel = idx === state.selectedIdx;
+        ctx.fillStyle = isSel ? "#34d399" : "#fbbf24";
+        ctx.strokeStyle = "#0b0e14";
+        ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(wx, wy, isSel ? 7 : 4.5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      });
+    }
+    requestAnimationFrame(renderFrame);
+  }
+
+  resizeStage();
+  refreshLayerList();
+  requestAnimationFrame(renderFrame);
+})();
+</script>
+</body>
+</html>

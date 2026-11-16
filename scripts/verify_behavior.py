@@ -93,6 +93,7 @@ def select_auto_mode(changed_files: list[str]) -> tuple[str, str]:
 
     gui_triggers = (
         "src/gui.rs",
+        "src/live2d_rig.rs",
         "src/shell_parser.rs",
         "src/main.rs",
         "Cargo.toml",
@@ -100,6 +101,7 @@ def select_auto_mode(changed_files: list[str]) -> tuple[str, str]:
     touches_gui_or_assets = any(
         f.replace("\\", "/") in gui_triggers
         or f.replace("\\", "/").startswith("assets/")
+        or f.replace("\\", "/").startswith("tools/")
         or f.replace("\\", "/").startswith("scripts/build_")
         for f in changed_files
     )
@@ -348,7 +350,9 @@ def check_tier0_static() -> list[dict[str, Any]]:
     req_docs = [
         "LICENSE",
         "assets/shells/neo_default/LICENSE-CC0.txt",
+        "assets/live2d/neo_default/LICENSE-CC0.txt",
         "assets/balloons/clean_default/LICENSE-CC0.txt",
+        "tools/live2d_studio.html",
         "docs/BEHAVIOR_SPEC.md",
     ]
     missing = [d for d in req_docs if not (ROOT_DIR / d).is_file() or (ROOT_DIR / d).stat().st_size < 32]
@@ -448,6 +452,7 @@ def check_tier1_cargo_tests() -> tuple[list[dict[str, Any]], str]:
         ("SPEC-GHOST-01/SKIN-05", "spec_ghost_01_and_skin_05_profile_isolation_and_bind_dressup", "ゴーストプロファイル分離・着せ替え(bind)"),
         ("SPEC-COMP-01/02/03/DLG-04", "spec_comp_01_02_03_dlg_04_reminders_drop_links_and_updates", "時報/リマインダー・D&D・リンク/\\ _q・音声/更新確認"),
         ("SPEC-COMP-04", "spec_comp_04_headless_tts_speaker_discovery_and_profile_voice", "ヘッドレス音声エンジン話者解決・シェル別声色永続化"),
+        ("SPEC-L2D-01/02", "spec_l2d_01_02_external_sidecar_parts_and_path_safety", "外付けサイドカー Live2D マルチパーツ・信頼境界保護"),
     ]
     for spec_id, test_fn, label in expected_groups:
         ok = spec_cases.get(test_fn, False)

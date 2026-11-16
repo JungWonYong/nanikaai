@@ -32,6 +32,9 @@ use crate::agent_engine::{provider_catalog, AgentEngine, AgentReply, StatusCallb
 use crate::builtin_tools::BuiltinToolRunner;
 use crate::config_store::{default_user_data_dir, legacy_user_data_dir, ConfigPatch, ConfigStore};
 use crate::dialogue_parser::{parse_dialogue, ActionKind, DialogueAction, Scope};
+use crate::live2d_rig::{
+    discover_and_load_rig, Live2dMotionInputs, LoadedCharacterRig,
+};
 use crate::shell_parser::{
     install_nar_archive, BalloonManager, BalloonSkin, BalloonSummary, CollisionRect, RgbaBitmap,
     ShellManifest, ShellManager, ShellSummary, StrokeDetector,
@@ -341,6 +344,128 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+const PART_SHADER_WGSL: &str = r#"
+struct PartUniform {
+    inv_row0: vec4<f32>,
+    inv_row1: vec4<f32>,
+    deform: vec4<f32>,
+    flags_alpha: vec4<f32>,
+};
+
+struct VsOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@group(0) @binding(0) var u_tex: texture_2d<f32>;
+@group(0) @binding(1) var<uniform> u_part: PartUniform;
+
+@vertex
+fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
+    var positions = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0,  1.0),
+        vec2<f32>( 3.0,  1.0),
+        vec2<f32>(-1.0, -3.0),
+    );
+    var uvs = array<vec2<f32>, 3>(
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(2.0, 0.0),
+        vec2<f32>(0.0, 2.0),
+    );
+    var out: VsOut;
+    out.pos = vec4<f32>(positions[vid], 0.0, 1.0);
+    out.uv = uvs[vid];
+    return out;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    if (u_part.flags_alpha.x < 0.5) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+    let cw = max(u_part.inv_row0.w, 1.0);
+    let ch = max(u_part.inv_row1.w, 1.0);
+    let op = in.uv * vec2<f32>(cw, ch);
+    let rel = clamp(((op.y - u_part.deform.x) * u_part.deform.y) / max(u_part.deform.z, 1.0), 0.0, 1.0);
+    let bend = u_part.deform.w * rel * rel;
+    let sx_c = u_part.inv_row0.x * op.x + u_part.inv_row0.y * op.y + u_part.inv_row0.z - bend;
+    let sy_c = u_part.inv_row1.x * op.x + u_part.inv_row1.y * op.y + u_part.inv_row1.z;
+
+    let dims_u = textureDimensions(u_tex, 0);
+    let dims = vec2<f32>(dims_u);
+    let scale_uv = dims / vec2<f32>(cw, ch);
+    let sx = sx_c * scale_uv.x;
+    let sy = sy_c * scale_uv.y;
+    if (sx < 0.0 || sx >= dims.x || sy < 0.0 || sy >= dims.y) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+
+    let px = vec2<f32>(sx, sy) - vec2<f32>(0.5, 0.5);
+    let p0 = vec2<i32>(floor(px));
+    let f = fract(px);
+    let max_c = vec2<i32>(dims_u) - vec2<i32>(1, 1);
+    let t00 = textureLoad(u_tex, clamp(p0, vec2<i32>(0, 0), max_c), 0);
+    let t10 = textureLoad(u_tex, clamp(p0 + vec2<i32>(1, 0), vec2<i32>(0, 0), max_c), 0);
+    let t01 = textureLoad(u_tex, clamp(p0 + vec2<i32>(0, 1), vec2<i32>(0, 0), max_c), 0);
+    let t11 = textureLoad(u_tex, clamp(p0 + vec2<i32>(1, 1), vec2<i32>(0, 0), max_c), 0);
+    let pm00 = vec4<f32>(t00.rgb * t00.a, t00.a);
+    let pm10 = vec4<f32>(t10.rgb * t10.a, t10.a);
+    let pm01 = vec4<f32>(t01.rgb * t01.a, t01.a);
+    let pm11 = vec4<f32>(t11.rgb * t11.a, t11.a);
+    let pm = mix(mix(pm00, pm10, f.x), mix(pm01, pm11, f.x), f.y);
+    return pm * u_part.flags_alpha.y;
+}
+"#;
+
+const PRESENT_OFFSCREEN_WGSL: &str = r#"
+struct PresentParams {
+    premul: u32,
+    pad0: u32,
+    pad1: u32,
+    pad2: u32,
+};
+
+struct VsOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@group(0) @binding(0) var u_tex: texture_2d<f32>;
+@group(0) @binding(1) var<uniform> u_present: PresentParams;
+
+@vertex
+fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
+    var positions = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0,  1.0),
+        vec2<f32>( 3.0,  1.0),
+        vec2<f32>(-1.0, -3.0),
+    );
+    var uvs = array<vec2<f32>, 3>(
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(2.0, 0.0),
+        vec2<f32>(0.0, 2.0),
+    );
+    var out: VsOut;
+    out.pos = vec4<f32>(positions[vid], 0.0, 1.0);
+    out.uv = uvs[vid];
+    return out;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let dims_u = textureDimensions(u_tex, 0);
+    let coord = clamp(vec2<i32>(floor(in.uv * vec2<f32>(dims_u))), vec2<i32>(0, 0), vec2<i32>(dims_u) - vec2<i32>(1, 1));
+    let pm = textureLoad(u_tex, coord, 0);
+    if (u_present.premul != 0u) {
+        return pm;
+    }
+    if (pm.a <= 0.0001) {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+    return vec4<f32>(pm.rgb / pm.a, pm.a);
+}
+"#;
+
 pub fn resolve_assets_dir() -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -361,12 +486,65 @@ pub fn resolve_assets_dir() -> PathBuf {
     PathBuf::from("assets")
 }
 
+pub fn resolve_tools_dir() -> PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let mac_tools = dir.join("../Resources/tools");
+            if mac_tools.is_dir() {
+                return mac_tools;
+            }
+            let local_tools = dir.join("tools");
+            if local_tools.is_dir() {
+                return local_tools;
+            }
+        }
+    }
+    let manifest_tools = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools");
+    if manifest_tools.is_dir() {
+        return manifest_tools;
+    }
+    PathBuf::from("tools")
+}
+
+fn open_local_path_in_os(target: &Path) -> Result<(), String> {
+    let resolved = target.to_string_lossy().to_string();
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&resolved)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(&resolved)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&resolved)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+}
+
 struct GpuContext {
     _instance: wgpu::Instance,
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
+    part_pipeline: wgpu::RenderPipeline,
+    part_bind_group_layout: wgpu::BindGroupLayout,
+    present_pipeline: wgpu::RenderPipeline,
+    present_bind_group_layout: wgpu::BindGroupLayout,
+    present_params_buffer: wgpu::Buffer,
     sampler: wgpu::Sampler,
     premul: u32,
     surface_format: wgpu::TextureFormat,
@@ -506,12 +684,151 @@ impl GpuContext {
             cache: None,
         });
 
+        let part_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("part-bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let part_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("part-shader"),
+            source: wgpu::ShaderSource::Wgsl(PART_SHADER_WGSL.into()),
+        });
+
+        let part_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("part-pl"),
+            bind_group_layouts: &[&part_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let part_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("part-pipeline"),
+            layout: Some(&part_pl),
+            vertex: wgpu::VertexState {
+                module: &part_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &part_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: texture_format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let present_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("present-bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let present_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("present-shader"),
+            source: wgpu::ShaderSource::Wgsl(PRESENT_OFFSCREEN_WGSL.into()),
+        });
+
+        let present_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("present-pl"),
+            bind_group_layouts: &[&present_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let present_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("present-pipeline"),
+            layout: Some(&present_pl),
+            vertex: wgpu::VertexState {
+                module: &present_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &present_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let mut present_bytes = [0u8; 16];
+        present_bytes[0..4].copy_from_slice(&(premul as u32).to_ne_bytes());
+        let present_params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("present-params"),
+            contents: &present_bytes,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
         Ok(Self {
             _instance: instance,
             device,
             queue,
             pipeline,
             bind_group_layout,
+            part_pipeline,
+            part_bind_group_layout,
+            present_pipeline,
+            present_bind_group_layout,
+            present_params_buffer,
             sampler,
             premul,
             surface_format,
@@ -534,6 +851,20 @@ impl GpuContext {
     }
 }
 
+struct GpuPartLayer {
+    texture: wgpu::Texture,
+    uniform_buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    tex_size: (u32, u32),
+}
+
+struct GpuOffscreenTarget {
+    _texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    present_bind_group: wgpu::BindGroup,
+    size: (u32, u32),
+}
+
 struct WindowSurface {
     // Drop `surface` before `window`!
     surface: wgpu::Surface<'static>,
@@ -542,6 +873,9 @@ struct WindowSurface {
     texture: Option<wgpu::Texture>,
     bind_group: Option<wgpu::BindGroup>,
     params_buffer: wgpu::Buffer,
+    part_layers: Vec<GpuPartLayer>,
+    offscreen_target: Option<GpuOffscreenTarget>,
+    multipart_active: bool,
     last_live2d_active: bool,
     tex_size: (u32, u32),
 }
@@ -567,6 +901,9 @@ impl WindowSurface {
             texture: None,
             bind_group: None,
             params_buffer,
+            part_layers: Vec::new(),
+            offscreen_target: None,
+            multipart_active: false,
             last_live2d_active: false,
             tex_size: (0, 0),
         }
@@ -586,6 +923,180 @@ impl WindowSurface {
             self.config.height = h;
             self.surface.configure(&gpu.device, &self.config);
         }
+    }
+
+    fn sync_part_rig(&mut self, gpu: &GpuContext, rig_opt: Option<&mut LoadedCharacterRig>) {
+        let Some(rig) = rig_opt else {
+            self.part_layers.clear();
+            self.offscreen_target = None;
+            self.multipart_active = false;
+            return;
+        };
+        if rig.parts.is_empty() {
+            self.part_layers.clear();
+            self.offscreen_target = None;
+            self.multipart_active = false;
+            return;
+        }
+        self.multipart_active = true;
+        if self.part_layers.len() != rig.parts.len() {
+            self.part_layers.clear();
+            for part in &mut rig.parts {
+                let bw = part.current_bitmap.width.max(1);
+                let bh = part.current_bitmap.height.max(1);
+                let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("part-layer-tex"),
+                    size: wgpu::Extent3d {
+                        width: bw,
+                        height: bh,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: gpu.texture_format,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+                let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+                let uniform_buffer = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("part-uniform-buf"),
+                    contents: &part.uniform.to_bytes(),
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                });
+                let bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("part-layer-bg"),
+                    layout: &gpu.part_bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: uniform_buffer.as_entire_binding(),
+                        },
+                    ],
+                });
+                self.part_layers.push(GpuPartLayer {
+                    texture: tex,
+                    uniform_buffer,
+                    bind_group,
+                    tex_size: (bw, bh),
+                });
+                part.dirty_gpu = true;
+            }
+        }
+
+        for (i, part) in rig.parts.iter_mut().enumerate() {
+            let gpu_layer = &mut self.part_layers[i];
+            let bw = part.current_bitmap.width.max(1);
+            let bh = part.current_bitmap.height.max(1);
+            if part.dirty_gpu {
+                if gpu_layer.tex_size != (bw, bh) {
+                    let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("part-layer-tex"),
+                        size: wgpu::Extent3d {
+                            width: bw,
+                            height: bh,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: gpu.texture_format,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                        view_formats: &[],
+                    });
+                    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+                    gpu_layer.bind_group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("part-layer-bg"),
+                        layout: &gpu.part_bind_group_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: gpu_layer.uniform_buffer.as_entire_binding(),
+                            },
+                        ],
+                    });
+                    gpu_layer.texture = tex;
+                    gpu_layer.tex_size = (bw, bh);
+                }
+                gpu.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &gpu_layer.texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &part.current_bitmap.data,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(4 * bw),
+                        rows_per_image: Some(bh),
+                    },
+                    wgpu::Extent3d {
+                        width: bw,
+                        height: bh,
+                        depth_or_array_layers: 1,
+                    },
+                );
+                part.dirty_gpu = false;
+            }
+            gpu.queue
+                .write_buffer(&gpu_layer.uniform_buffer, 0, &part.uniform.to_bytes());
+        }
+    }
+
+    fn ensure_offscreen_target(&mut self, gpu: &GpuContext, w: u32, h: u32) {
+        let tw = w.max(1);
+        let th = h.max(1);
+        let needs_new = self
+            .offscreen_target
+            .as_ref()
+            .is_none_or(|t| t.size != (tw, th));
+        if !needs_new {
+            return;
+        }
+        let tex = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("multipart-offscreen-tex"),
+            size: wgpu::Extent3d {
+                width: tw,
+                height: th,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: gpu.texture_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let present_bg = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("present-offscreen-bg"),
+            layout: &gpu.present_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: gpu.present_params_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        self.offscreen_target = Some(GpuOffscreenTarget {
+            _texture: tex,
+            view,
+            present_bind_group: present_bg,
+            size: (tw, th),
+        });
     }
 
     fn upload_rgba(&mut self, gpu: &GpuContext, bmp: &RgbaBitmap) {
@@ -653,9 +1164,10 @@ impl WindowSurface {
     }
 
     fn render(&mut self, gpu: &GpuContext) {
-        let Some(ref bg) = self.bind_group else {
+        let use_multipart = self.multipart_active && !self.part_layers.is_empty();
+        if !use_multipart && self.bind_group.is_none() {
             return;
-        };
+        }
         let frame = match self.surface.get_current_texture() {
             Ok(f) => f,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -672,7 +1184,52 @@ impl WindowSurface {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("quad-encoder"),
             });
-        {
+
+        if use_multipart {
+            self.ensure_offscreen_target(gpu, self.config.width, self.config.height);
+            if let Some(ref target) = self.offscreen_target {
+                {
+                    let mut p_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("multipart-offscreen-pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &target.view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        occlusion_query_set: None,
+                        timestamp_writes: None,
+                    });
+                    p_pass.set_pipeline(&gpu.part_pipeline);
+                    for layer in &self.part_layers {
+                        p_pass.set_bind_group(0, &layer.bind_group, &[]);
+                        p_pass.draw(0..3, 0..1);
+                    }
+                }
+                {
+                    let mut pres_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("multipart-present-pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        occlusion_query_set: None,
+                        timestamp_writes: None,
+                    });
+                    pres_pass.set_pipeline(&gpu.present_pipeline);
+                    pres_pass.set_bind_group(0, &target.present_bind_group, &[]);
+                    pres_pass.draw(0..3, 0..1);
+                }
+            }
+        } else if let Some(ref bg) = self.bind_group {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("quad-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -691,6 +1248,7 @@ impl WindowSurface {
             pass.set_bind_group(0, bg, &[]);
             pass.draw(0..3, 0..1);
         }
+
         gpu.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
     }
@@ -941,12 +1499,34 @@ struct CharacterWindowState {
     center_u: f32,
     aspect_hw: f32,
     rig: Live2dRigState,
+    rig_parts: Option<LoadedCharacterRig>,
     active_binds: Vec<i32>,
     was_speaking: bool,
     visible: bool,
 }
 
 impl CharacterWindowState {
+    fn reload_sidecar_rig(
+        &mut self,
+        manifest: &ShellManifest,
+        user_data_dir: &Path,
+        assets_dir: &Path,
+        gpu: &GpuContext,
+    ) {
+        self.rig_parts = discover_and_load_rig(
+            &manifest.shell_id,
+            &manifest.dir_path,
+            user_data_dir,
+            assets_dir,
+            self.scope,
+        );
+        if let Some(ref mut rig) = self.rig_parts {
+            let _ = rig.sync_from_composited(&self.composited);
+            self.ws.sync_part_rig(gpu, Some(rig));
+        } else {
+            self.ws.sync_part_rig(gpu, None);
+        }
+    }
     fn sync_pos_from_window(&mut self) {
         if let Ok(pos) = self.ws.window.outer_position() {
             let l = pos.to_logical::<f64>(self.ws.window.scale_factor().max(1.0));
@@ -1273,6 +1853,10 @@ impl CharacterWindowState {
         let phys = self.ws.window.inner_size();
         self.ws.resize(gpu, phys);
         self.ws.upload_rgba(gpu, &comp);
+        if let Some(ref mut rig) = self.rig_parts {
+            let _ = rig.sync_from_composited(&comp);
+            self.ws.sync_part_rig(gpu, Some(rig));
+        }
         self.composited = comp;
         self.ws.window.request_redraw();
     }
@@ -1294,8 +1878,16 @@ impl CharacterWindowState {
             self.smooth_gaze = (0.0, 0.0);
             self.bounce_at = None;
             self.rig.reset();
+            let mut need_redraw = self.ws.last_live2d_active;
+            if let Some(ref mut rig) = self.rig_parts {
+                rig.reset();
+                self.ws.sync_part_rig(gpu, Some(rig));
+                need_redraw = true;
+            }
             if self.ws.last_live2d_active {
                 self.ws.update_params(gpu, &ShaderParams::idle(gpu.premul));
+            }
+            if need_redraw {
                 self.ws.window.request_redraw();
             }
             return;
@@ -1304,10 +1896,22 @@ impl CharacterWindowState {
         let dt = self.rig.last_tick.elapsed().as_secs_f32().clamp(0.005, 0.05);
         self.rig.last_tick = Instant::now();
 
+        let (breath_amp, gaze_scale) = self
+            .rig_parts
+            .as_ref()
+            .and_then(|r| r.uv_rig.as_ref())
+            .map(|u| {
+                (
+                    u.breath_amp.unwrap_or(1.0).clamp(0.2, 2.5),
+                    u.gaze_scale.unwrap_or(1.0).clamp(0.2, 2.5),
+                )
+            })
+            .unwrap_or((1.0, 1.0));
+
         let t = self.anim_start.elapsed().as_secs_f32() + self.phase_offset;
         // Smooth biological chest inhalation curve (0.0 .. 1.0 biased upward on inhale)
         let breath_raw = 0.5 - 0.5 * (t * 1.75).cos();
-        let breath = breath_raw * (0.75 + 0.25 * (t * 0.62).sin()) * 0.92;
+        let breath = breath_raw * (0.75 + 0.25 * (t * 0.62).sin()) * 0.92 * breath_amp;
         let body_sway = (t * 0.88).sin() * 0.55 + (t * 0.41).cos() * 0.28;
 
         let squish = if let Some(bt) = self.bounce_at {
@@ -1362,8 +1966,8 @@ impl CharacterWindowState {
         };
 
         let follow = 1.0 - (-dt * 8.5).exp();
-        self.rig.angle_x += (target_angle.0 - self.rig.angle_x) * follow;
-        self.rig.angle_y += (target_angle.1 - self.rig.angle_y) * follow;
+        self.rig.angle_x += (target_angle.0 * gaze_scale - self.rig.angle_x) * follow;
+        self.rig.angle_y += (target_angle.1 * gaze_scale - self.rig.angle_y) * follow;
         self.smooth_gaze = (self.rig.angle_x, self.rig.angle_y);
 
         let vel_x = (self.rig.angle_x - self.rig.prev_angle_x) / dt;
@@ -1392,6 +1996,24 @@ impl CharacterWindowState {
         self.rig.hair_y.step(head_lag_y, 11.0, 0.38, dt);
         self.rig.ahoge.step(ahoge_target, 15.0, 0.24, dt);
         self.rig.cloth.step(cloth_target, 6.8, 0.44, dt);
+
+        if let Some(ref mut rig) = self.rig_parts {
+            rig.step(&Live2dMotionInputs {
+                dt,
+                time_s: t,
+                breath,
+                body_sway,
+                squish,
+                talk_bob,
+                angle_x: self.rig.angle_x,
+                angle_y: self.rig.angle_y,
+                angle_z: self.rig.angle_z,
+                vel_x,
+                vel_y,
+                speech_impulse: !was_speaking && is_speaking,
+            });
+            self.ws.sync_part_rig(gpu, Some(rig));
+        }
 
         let rig_kind = if !self.is_neo_default {
             2
@@ -2233,6 +2855,8 @@ enum MenuCommand {
     ToggleKero,
     ToggleAlwaysOnTop,
     ToggleLive2dMotion,
+    OpenLive2dStudio,
+    OpenLive2dFolder,
     ToggleBind(i32),
     ToggleHourlyChime,
     ToggleVoiceTts,
@@ -3144,11 +3768,14 @@ impl AppRuntime {
                 active_shell_id: Some(sid.clone()),
                 ..Default::default()
             });
+            let user_data_dir = self.config_store.config_dir.clone();
+            let assets_dir = resolve_assets_dir();
             if let (Some(ref gpu), Some(ref mut sak)) = (&self.gpu, &mut self.sakura) {
                 let mut m = self.manifest.lock().expect("manifest mutex poisoned");
                 sak.display_scale = new_ds;
                 sak.active_binds = next_binds.clone();
                 sak.anim_next.clear();
+                sak.reload_sidecar_rig(&m, &user_data_dir, &assets_dir, gpu);
                 sak.set_surface(&mut m, gpu, 0, true);
             }
             if let (Some(ref gpu), Some(ref mut ker)) = (&self.gpu, &mut self.kero) {
@@ -3156,6 +3783,7 @@ impl AppRuntime {
                 ker.display_scale = new_ds;
                 ker.active_binds = next_binds;
                 ker.anim_next.clear();
+                ker.reload_sidecar_rig(&m, &user_data_dir, &assets_dir, gpu);
                 ker.set_surface(&mut m, gpu, 10, true);
             }
         }
@@ -3264,6 +3892,14 @@ impl AppRuntime {
                 }
                 .to_string(),
                 cmd: MenuCommand::ToggleLive2dMotion,
+            },
+            MenuRow {
+                label: "🛠 Live2D スタジオを開く · Rig Studio".to_string(),
+                cmd: MenuCommand::OpenLive2dStudio,
+            },
+            MenuRow {
+                label: "📂 Live2D サイドカーフォルダ · Sidecar Folder".to_string(),
+                cmd: MenuCommand::OpenLive2dFolder,
             },
             MenuRow {
                 label: if cfg.hourly_chime {
@@ -3480,6 +4116,14 @@ impl AppRuntime {
         );
         map.insert(live2d_item.id().clone(), MenuCommand::ToggleLive2dMotion);
         let _ = menu.append(&live2d_item);
+
+        let studio_item = MenuItem::new("🛠 Live2D スタジオを開く · Rig Studio", true, None);
+        map.insert(studio_item.id().clone(), MenuCommand::OpenLive2dStudio);
+        let _ = menu.append(&studio_item);
+
+        let l2d_dir_item = MenuItem::new("📂 Live2D サイドカーフォルダ · Sidecar Folder", true, None);
+        map.insert(l2d_dir_item.id().clone(), MenuCommand::OpenLive2dFolder);
+        let _ = menu.append(&l2d_dir_item);
 
         let chime_item = MenuItem::new(
             if cfg.hourly_chime {
@@ -3719,6 +4363,37 @@ impl AppRuntime {
                     }
                 }
                 self.rebuild_tray_menu();
+            }
+            MenuCommand::OpenLive2dStudio => {
+                if !self.smoke_mode {
+                    let studio_path = resolve_tools_dir().join("live2d_studio.html");
+                    if studio_path.is_file() {
+                        let _ = open_local_path_in_os(&studio_path);
+                    } else {
+                        self.apply_status_feedback(
+                            "tools/live2d_studio.html が見つかりませんでした。".to_string(),
+                        );
+                    }
+                }
+            }
+            MenuCommand::OpenLive2dFolder => {
+                let shell_id = self.config_store.get().active_shell_id;
+                let dir = self.config_store.config_dir.join("live2d").join(&shell_id);
+                let _ = std::fs::create_dir_all(&dir.join("parts"));
+                let readme_path = dir.join("README-live2d.txt");
+                if !readme_path.exists() {
+                    let guide = format!(
+                        "何か藍 (NanikaAi) External Live2D Sidecar Directory\n\
+                         Shell ID: {shell_id}\n\
+                         1. Put separated RGBA part PNG files under parts/ (same canvas dimensions as surface0/surface10).\n\
+                         2. Export live2d.json using tools/live2d_studio.html and place it right in this folder.\n\
+                         3. User sidecar files in this directory take priority over bundled defaults.\n"
+                    );
+                    let _ = std::fs::write(&readme_path, guide);
+                }
+                if !self.smoke_mode {
+                    let _ = open_local_path_in_os(&dir);
+                }
             }
             MenuCommand::ToggleBind(bind_id) => {
                 let shell_id = self.config_store.get().active_shell_id;
@@ -5024,6 +5699,8 @@ impl AppRuntime {
                 .unwrap_or_else(|| std::env::temp_dir().join("nanikaai-smoke-artifacts"));
             let _ = std::fs::create_dir_all(&proof_dir);
 
+            let user_data_smoke = self.config_store.config_dir.clone();
+            let assets_smoke = resolve_assets_dir();
             let mut exported_neo = false;
             let mut exported_classic = false;
             for sum in &summaries {
@@ -5031,6 +5708,8 @@ impl AppRuntime {
                 let ds = manifest.descript.display_scale.clamp(0.5, 4.0);
                 sak_win.display_scale = ds;
                 ker_win.display_scale = ds;
+                sak_win.reload_sidecar_rig(&manifest, &user_data_smoke, &assets_smoke, gpu);
+                ker_win.reload_sidecar_rig(&manifest, &user_data_smoke, &assets_smoke, gpu);
                 sak_win.set_surface(&mut manifest, gpu, 0, true);
                 ker_win.set_surface(&mut manifest, gpu, 10, true);
 
@@ -5055,6 +5734,23 @@ impl AppRuntime {
                     }
                     if !sak_win.is_full_feet() || !ker_win.is_full_feet() {
                         return Err("neo_default 발바닥 여백 검증 실패 (하단 잘림 의심)".to_string());
+                    }
+                    let sak_part_cnt = sak_win.rig_parts.as_ref().map(|r| r.parts.len()).unwrap_or(0);
+                    let ker_part_cnt = ker_win.rig_parts.as_ref().map(|r| r.parts.len()).unwrap_or(0);
+                    if sak_part_cnt < 9 || ker_part_cnt < 6 {
+                        return Err(format!(
+                            "neo_default Live2D sidecar part count mismatch: sak={sak_part_cnt}, ker={ker_part_cnt}"
+                        ));
+                    }
+                    sak_win.tick_live2d(gpu, true, Some((180.0, 200.0)), true);
+                    ker_win.tick_live2d(gpu, true, Some((180.0, 200.0)), false);
+                    sak_win.ws.render(gpu);
+                    ker_win.ws.render(gpu);
+                    if let Some(ref rig) = sak_win.rig_parts {
+                        rig.render_cpu_rgba().save_png(&proof_dir.join("proof-live2d-sakura.png"))?;
+                    }
+                    if let Some(ref rig) = ker_win.rig_parts {
+                        rig.render_cpu_rgba().save_png(&proof_dir.join("proof-live2d-unyu.png"))?;
                     }
                     sak_win.composited.save_png(&proof_dir.join("neo-sakura.png"))?;
                     ker_win.composited.save_png(&proof_dir.join("neo-unyu.png"))?;
@@ -5101,6 +5797,8 @@ impl AppRuntime {
             let active_ds = active_manifest.descript.display_scale.clamp(0.5, 4.0);
             sak_win.display_scale = active_ds;
             ker_win.display_scale = active_ds;
+            sak_win.reload_sidecar_rig(&active_manifest, &user_data_smoke, &assets_smoke, gpu);
+            ker_win.reload_sidecar_rig(&active_manifest, &user_data_smoke, &assets_smoke, gpu);
             sak_win.set_surface(&mut active_manifest, gpu, 0, true);
             ker_win.set_surface(&mut active_manifest, gpu, 10, true);
             *self.manifest.lock().expect("manifest mutex poisoned") = active_manifest;
@@ -5113,7 +5811,7 @@ impl AppRuntime {
                 sb.utterance_min_w = 0;
                 sb.large = false;
             }
-            let short_script = "\\0\\s[0]안녕! 何か藍(NanikaAi) v0.1.5!\\e";
+            let short_script = "\\0\\s[0]안녕! 何か藍(NanikaAi) v0.1.6!\\e";
             self.playback.enqueue(parse_dialogue(short_script));
             let _ = self.playback.fast_forward();
             self.sync_balloons_to_playback();
@@ -5139,7 +5837,7 @@ impl AppRuntime {
                 sb.utterance_min_w = 0;
                 sb.large = false;
             }
-            let demo_script = "\\0\\s[0]안녕! 100% Safe Rust 何か藍(NanikaAi) v0.1.5 テスト完了だよ！\\n\\n長い文章では吹き出しが内容に合わせて滑らかに広がり、最大サイズに達すると自動的にスクロールバーとトラックが表示されて、マウスホイールで快適に読み進められます。\\n\\n1行目: Live2D骨格・胸部呼吸・髪/アホ毛/スカートの物理揺れを有効化。\\n2行目: うにゅうの体型専用メッシュと自然な色味を保持。\\n3行目: Gemma/SentencePieceのバイトフォールバック文字も完全復元。\\w3\\1\\s[10]サングラスの上からもバッチリ見えてるぜ。\\e";
+            let demo_script = "\\0\\s[0]안녕! 100% Safe Rust 何か藍(NanikaAi) v0.1.6 テスト完了だよ！\\n\\n長い文章では吹き出しが内容に合わせて滑らかに広がり、最大サイズに達すると自動的にスクロールバーとトラックが表示されて、マウスホイールで快適に読み進められます。\\n\\n1行目: 外付けサイドカー Live2D マルチパーツ物理揺れを有効化。\\n2行目: うにゅうの体型専用マルチレイヤー（ふさ毛・メガネ・前足・表情）を保持。\\n3行目: Gemma/SentencePieceのバイトフォールバック文字も完全復元。\\w3\\1\\s[10]サングラスの上からもバッチリ見えてるぜ。\\e";
             self.playback.enqueue(parse_dialogue(demo_script));
             let _ = self.playback.fast_forward();
             self.sync_balloons_to_playback();
@@ -5682,6 +6380,7 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
             center_u: 0.50,
             aspect_hw: 1.5,
             rig: Live2dRigState::new(),
+            rig_parts: None,
             active_binds: init_binds.clone(),
             is_neo_default: cfg.active_shell_id == "neo_default",
         });
@@ -5721,6 +6420,7 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                 center_u: 0.50,
                 aspect_hw: 1.5,
                 rig: Live2dRigState::new(),
+                rig_parts: None,
                 active_binds: init_binds,
                 is_neo_default: cfg.active_shell_id == "neo_default",
             });
@@ -5800,13 +6500,17 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
 
         self.gpu = Some(gpu);
 
-        // Render initial surfaces `\0` and `\1`
+        // Render initial surfaces `\0` and `\1` (plus external Live2D sidecar rig if present)
+        let init_user_dir = self.config_store.config_dir.clone();
+        let init_assets_dir = resolve_assets_dir();
         if let (Some(ref gpu), Some(ref mut s)) = (&self.gpu, &mut self.sakura) {
             let mut m = self.manifest.lock().expect("manifest mutex poisoned");
+            s.reload_sidecar_rig(&m, &init_user_dir, &init_assets_dir, gpu);
             s.set_surface(&mut m, gpu, 0, true);
         }
         if let (Some(ref gpu), Some(ref mut k)) = (&self.gpu, &mut self.kero) {
             let mut m = self.manifest.lock().expect("manifest mutex poisoned");
+            k.reload_sidecar_rig(&m, &init_user_dir, &init_assets_dir, gpu);
             k.set_surface(&mut m, gpu, 10, true);
         }
         self.reset_character_positions();

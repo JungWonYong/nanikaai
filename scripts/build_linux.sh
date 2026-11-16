@@ -17,6 +17,9 @@ mkdir -p "$DIST_DIR"
 cp "$BIN_PATH" "$DIST_DIR/nanikaai"
 chmod +x "$DIST_DIR/nanikaai"
 cp -R "$ROOT_DIR/assets" "$DIST_DIR/assets"
+if [ -d "$ROOT_DIR/tools" ]; then
+    cp -R "$ROOT_DIR/tools" "$DIST_DIR/tools"
+fi
 cp "$ROOT_DIR/LICENSE" "$DIST_DIR/LICENSE"
 
 cat > "$DIST_DIR/nanikaai.desktop" << 'DESKTOP'

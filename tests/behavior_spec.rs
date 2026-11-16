@@ -21,6 +21,9 @@ use nanikaai::companion_extras::{
 };
 use nanikaai::config_store::{ConfigPatch, ConfigStore};
 use nanikaai::dialogue_parser::{parse_dialogue, ActionKind, DialogueAction, Scope};
+use nanikaai::live2d_rig::{
+    discover_and_load_rig, load_character_rig, validate_safe_rel_asset_path, Live2dMotionInputs,
+};
 use nanikaai::shell_parser::{
     install_nar_archive, load_ukagaka_rgba, parse_descript_txt, BalloonManager, ShellManager,
 };
@@ -1108,4 +1111,148 @@ fn spec_comp_04_headless_tts_speaker_discovery_and_profile_voice() {
         (Some(888_753_762), Some(1_878_365_376))
     );
     let _ = fs::remove_dir_all(&cfg_dir);
+}
+
+#[test]
+fn spec_l2d_01_02_external_sidecar_parts_and_path_safety() {
+    let root = manifest_dir();
+    let assets = root.join("assets");
+    let shell_dir = assets.join("shells").join("neo_default");
+    let user_dir = fresh_temp_dir("nanikaai_spec_l2d");
+
+    // 1. SPEC-L2D-01: Bundled neo_default external sidecar loads for \0 and \1 without modifying .nar/shells
+    let mut sak_rig =
+        discover_and_load_rig("neo_default", &shell_dir, &user_dir, &assets, Scope::Sakura)
+            .expect("bundled neo_default Sakura sidecar rig");
+    let mut unyu_rig =
+        discover_and_load_rig("neo_default", &shell_dir, &user_dir, &assets, Scope::Kero)
+            .expect("bundled neo_default Unyu sidecar rig");
+    assert!(sak_rig.parts.len() >= 9, "expected >=9 Sakura parts");
+    assert!(unyu_rig.parts.len() >= 6, "expected >=6 Unyu parts");
+
+    // Verify dynamic expression + dress-up patching works on separated head/accessory layers
+    let mgr = ShellManager::new(vec![assets.join("shells")]);
+    let mut manifest = mgr.load_shell("neo_default").unwrap();
+    let sak_plain = manifest.compose_surface_rgba(0, &[]).unwrap();
+    let sak_clip = manifest.compose_surface_rgba(0, &[50]).unwrap();
+    let dirty0 = sak_rig.sync_from_composited(&sak_plain);
+    assert!(!dirty0.is_empty());
+    let head_plain_px = sak_rig
+        .parts
+        .iter()
+        .find(|p| p.spec.id == "head")
+        .unwrap()
+        .current_bitmap
+        .count_opaque_pixels();
+    let _ = sak_rig.sync_from_composited(&sak_clip);
+    let head_clip_px = sak_rig
+        .parts
+        .iter()
+        .find(|p| p.spec.id == "head")
+        .unwrap()
+        .current_bitmap
+        .count_opaque_pixels();
+    assert!(
+        head_clip_px > head_plain_px,
+        "star hair-clip bindgroup50 must expand head layer opaque pixels"
+    );
+
+    let unyu_surprised = manifest.compose_surface_rgba(11, &[51]).unwrap();
+    let unyu_dirty = unyu_rig.sync_from_composited(&unyu_surprised);
+    assert!(unyu_dirty.len() >= 2, "expected face + crown patches");
+    let crown_px = unyu_rig
+        .parts
+        .iter()
+        .find(|p| p.spec.id == "crown_accessory")
+        .unwrap()
+        .current_bitmap
+        .count_opaque_pixels();
+    assert!(crown_px > 400, "Unyu bindgroup51 crown must populate accessory slot");
+
+    let motion = Live2dMotionInputs {
+        dt: 0.033,
+        time_s: 2.1,
+        breath: 0.75,
+        body_sway: 0.45,
+        squish: 0.01,
+        talk_bob: 0.25,
+        angle_x: 0.85,
+        angle_y: -0.35,
+        angle_z: 0.025,
+        vel_x: 1.1,
+        vel_y: -0.5,
+        speech_impulse: true,
+    };
+    sak_rig.step(&motion);
+    unyu_rig.step(&motion);
+    assert!(sak_rig.render_cpu_rgba().count_opaque_pixels() > 50_000);
+    assert!(unyu_rig.render_cpu_rgba().count_opaque_pixels() > 30_000);
+
+    // Verify user override directory priority over bundled assets
+    let user_l2d_dir = user_dir.join("live2d").join("neo_default");
+    fs::create_dir_all(user_l2d_dir.join("parts")).unwrap();
+    fs::copy(
+        assets.join("live2d/neo_default/parts/unyu_body.png"),
+        user_l2d_dir.join("parts/custom_body.png"),
+    )
+    .unwrap();
+    fs::write(
+        user_l2d_dir.join("live2d.json"),
+        serde_json::json!({
+            "schema_version": 1,
+            "name": "user_override_rig",
+            "kero": {
+                "canvas_size": [380, 420],
+                "parts": [
+                    {
+                        "id": "override_body",
+                        "parent": null,
+                        "texture": "parts/custom_body.png",
+                        "z": 10,
+                        "pivot_px": [190.0, 380.0],
+                        "role": "mochi_body"
+                    }
+                ]
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let overridden =
+        discover_and_load_rig("neo_default", &shell_dir, &user_dir, &assets, Scope::Kero)
+            .expect("user sidecar override loads");
+    assert_eq!(overridden.parts.len(), 1);
+    assert_eq!(overridden.parts[0].spec.id, "override_body");
+
+    // 2. SPEC-L2D-02: Untrusted sidecar path traversal, sensitive paths, cyclic bones, & offline studio
+    let bad_dir = fresh_temp_dir("nanikaai_spec_l2d_bad");
+    fs::write(
+        bad_dir.join("live2d.json"),
+        serde_json::json!({
+            "schema_version": 1,
+            "sakura": {
+                "canvas_size": [660, 1350],
+                "parts": [
+                    {"id": "a", "parent": "b", "texture": "../../etc/passwd", "z": 1},
+                    {"id": "b", "parent": "a", "texture": ".env", "z": 2}
+                ]
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    assert!(load_character_rig(&bad_dir, Scope::Sakura).is_err());
+    assert!(validate_safe_rel_asset_path(&bad_dir, "../../etc/passwd").is_err());
+    assert!(validate_safe_rel_asset_path(&bad_dir, ".env").is_err());
+    assert!(validate_safe_rel_asset_path(&bad_dir, "/etc/hosts").is_err());
+
+    let studio_html = fs::read_to_string(root.join("tools/live2d_studio.html"))
+        .expect("offline tools/live2d_studio.html must exist");
+    assert!(
+        !studio_html.contains("http://") && !studio_html.contains("https://"),
+        "tools/live2d_studio.html must stay 100% offline with zero external URLs/CDNs"
+    );
+
+    let _ = fs::remove_dir_all(&user_dir);
+    let _ = fs::remove_dir_all(&bad_dir);
 }

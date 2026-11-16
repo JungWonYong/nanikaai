@@ -6,5 +6,6 @@ pub mod companion_extras;
 pub mod config_store;
 pub mod dialogue_parser;
 pub mod gui;
+pub mod live2d_rig;
 pub mod shell_parser;
 pub mod sstp_server;
