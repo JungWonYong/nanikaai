@@ -332,6 +332,12 @@ def render_markdown_report(report: dict[str, Any]) -> str:
 
 
 def main() -> int:
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
     parser = argparse.ArgumentParser(description="NanikaAi Behavioral Verification & Reporting")
     parser.add_argument(
         "--mode",
