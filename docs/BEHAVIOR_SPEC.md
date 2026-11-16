@@ -1,6 +1,6 @@
 # 何か藍 (`NanikaAi`) — 現行動作仕様および自動検証基準 (`BEHAVIOR_SPEC`)
 
-- **Document Version**: `v1.2.0`
+- **Document Version**: `v1.3.0`
 - **Target Software**: `nanikaai` `v0.1.3+`
 - **Purpose**: テスト実行前の機密・個人情報・AI指示配置境界検査（Phase 0）、改修後の自動動作確認テスト（`cargo test` / `--smoke-test` / 静的監査）における合否基準、変更内容に応じた検証ティアおよび結果報告様式を定義する。
 
@@ -19,7 +19,7 @@
 
 ---
 
-## 2. 現行動作仕様および判定基準一覧（22 項目）
+## 2. 現行動作仕様および判定基準一覧（24 項目）
 
 | 仕様 ID | 領域 | 期待される現行動作（仕様） | 合格基準（パス条件） | 検証手段 |
 | :--- | :--- | :--- | :--- | :--- |
@@ -39,6 +39,8 @@
 | `SPEC-UI-01` | GPU/Live2D 基盤 | シェーダ定数レイアウトと減衰バネ物理・足元固定表示が破綻しない | `ShaderParams` が `96 B`（WGSL 整合）であり、スモーク検証で `neo_default` の足元・短文吹き出し・スクロール長文・メニューを正常描画すること | unit tests / `--smoke-test` |
 | `SPEC-UI-02` | クロス OS 構成 | macOS / Windows ではトレイ統合し、Linux は右クリックメニューで完結する | `tray_icon` 依存が `macos`/`windows` のみに限定され、Linux/Windows/macOS 全ターゲットでコンパイル可能であること | CI / `cargo test` |
 | `SPEC-UI-03` | リリース版数 | `Cargo.toml` と配布バンドル版数が一致し、文書過負荷更新を避ける | `Cargo.toml` の版数と `scripts/build_macos.sh` のバンドル版数が一致し、`scripts/build_macos.sh` が正常終了すること | `verify_behavior.py --mode full` |
+| `SPEC-UI-04` | GUI 対話操作性 | 右クリックメニュー展開/ホバー/スクロール/切替実行、キャラダブルクリック入力バー展開、IME入力/編集/送信(`↑`)/`×`/`Esc`、吹き出し早送り/選択肢ホバー/スクロール/クリック非表示が正常に動作する | `--smoke-test` Phase E において全ウィンドウ対話操作・ヒット判定・状態遷移が 1 件も欠落せず合格すること | `--smoke-test` Phase E (`SPEC-UI-04`) |
+| `SPEC-UI-05` | 3秒以内反応性 SLA | ユーザー操作（送信・選択肢・右クリック・入力バー・制御API・オフライン縮退）から 3 秒（`3,000 ms`）以内に視覚反応または応答を返す | 送信/選択直後の「AI 応答準備中…」即時表示（`< 500 ms` ステータス通知）、GUI 全操作合計 `ui_ms <= 3,000 ms`、HTTP/TCP 制御応答 `ipc_ms <= 3,000 ms`、オフライン即断 `< 3,000 ms` を実測で満たすこと | `--smoke-test` Phase E / `behavior_spec` |
 | `SPEC-SRV-01` | HTTP 状態 API | `GET /api/health`・`/api/skins`・`/api/providers` が JSON (`ok: true`) を返す | 一時的 `start_dual_server(0, 0)` に対して全 3 エンドポイントが `200 OK` かつ `"ok": true` を返すこと | `behavior_spec` / `--smoke-test` |
 | `SPEC-SRV-02` | HTTP 操作 API | `POST /api/speak`・`/api/chat`・`/api/event`・`/api/skin`・`/api/provider` を処理する | 正常ペイロードで `200 OK`、必須項目欠落（空 `script`/`message`/`provider`）で `400 Bad Request` を返すこと | `behavior_spec` |
 | `SPEC-SRV-03` | SSTP 互換 | HTTP `/sstp` および生 TCP `SSTP/1.4` 要求を受理する | HTTP `/sstp` が `200 OK`＋`X-Actions`、TCP `SSTP/1.4` が `200 OK`＋`Charset: UTF-8` を返し、空 `Script` に `400 Bad Request` を返すこと | `behavior_spec` / `--smoke-test` |

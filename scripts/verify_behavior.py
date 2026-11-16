@@ -442,6 +442,7 @@ def check_tier1_cargo_tests() -> tuple[list[dict[str, Any]], str]:
         ("SPEC-DLG-01/02/03", "spec_dlg_01_02_03_sakura_script_and_tag_sanitization", "Sakura Script・タグ浄化・履歴保護"),
         ("SPEC-AI-01/02/03", "spec_ai_01_02_03_model_guard_ollama_prefs_and_config_persistence", "制限LLM拒否・Ollama候補・設定保存"),
         ("SPEC-SRV-01/02/03", "spec_srv_01_02_03_dual_http_and_sstp_tcp_contract", "HTTP API 全9系統・TCP SSTP/1.4"),
+        ("SPEC-UI-04/05", "spec_ui_04_05_control_and_fallback_responsiveness_under_3s", "制御応答・即時ステータス・3秒以内SLA"),
         ("SPEC-SEC-01", "spec_sec_01_pretest_scanner_blocks_secrets_pii_and_private_keys", "テスト前機密・個人情報遮断"),
         ("SPEC-SEC-02", "spec_sec_02_instruction_data_trust_boundary_and_rogue_config_block", "AI指示境界・データ隔離防御"),
     ]
@@ -518,6 +519,23 @@ def check_tier2_full(custom_binary: str | None = None) -> list[dict[str, Any]]:
         "name": "実ウィンドウ / GPU スモーク検証 (`--smoke-test`)",
         "status": "PASS" if smoke_ok else "FAIL",
         "detail": smoke_line if smoke_line else f"exit={s_rc}, [SMOKE PASS] 未検出",
+    })
+
+    ui_m = re.search(r"\bui_ms=(\d+)", smoke_line)
+    ipc_m = re.search(r"\bipc_ms=(\d+)", smoke_line)
+    if ui_m and ipc_m:
+        ui_ms = int(ui_m.group(1))
+        ipc_ms = int(ipc_m.group(1))
+        sla_ok = smoke_ok and (ui_ms <= 3000) and (ipc_ms <= 3000)
+        sla_detail = f"全GUI対話操作 PASS (ui_ms={ui_ms}ms <= 3000ms, ipc_ms={ipc_ms}ms <= 3000ms)"
+    else:
+        sla_ok = False
+        sla_detail = "smoke出力に ui_ms / ipc_ms 計測値がありません"
+    results.append({
+        "spec": "SPEC-UI-04/05",
+        "name": "GUI 対話操作性＆3秒以内反応性実測 (`--smoke-test`)",
+        "status": "PASS" if sla_ok else "FAIL",
+        "detail": sla_detail,
     })
 
     # Optional non-destructive probe against live background instance
@@ -636,13 +654,18 @@ exit $RC
     checks_map = {c.get("spec"): c for c in rep.get("checks", [])}
     cargo_det = checks_map.get("CARGO-TEST", {}).get("detail", "")
     smoke_det = checks_map.get("SPEC-UI-01", {}).get("detail", "")
+    sla_det = checks_map.get("SPEC-UI-04/05", {}).get("detail", "")
     smoke_short = smoke_det.split(" scale=")[0] if " scale=" in smoke_det else smoke_det
-    ok = (run_proc.returncode == 0) and (rep.get("overall") == "PASS")
+    ok = (
+        (run_proc.returncode == 0)
+        and (rep.get("overall") == "PASS")
+        and (checks_map.get("SPEC-UI-04/05", {}).get("status") == "PASS")
+    )
     return {
         "spec": "MULTI-OS-LINUX",
         "name": name,
         "status": "PASS" if ok else "FAIL",
-        "detail": f"{rep.get('counts')} | {cargo_det} | {smoke_short}",
+        "detail": f"{rep.get('counts')} | {cargo_det} | {sla_det or smoke_short}",
     }
 
 
@@ -744,12 +767,25 @@ Write-Output $b64
 
     smoke_line = str(info.get("smoke_line", ""))
     smoke_short = smoke_line.split(" scale=")[0] if " scale=" in smoke_line else smoke_line
-    ok = (info.get("exit_code") == 0) and ("[SMOKE PASS]" in smoke_line) and ("unsafe=0" in smoke_line)
+    ui_m = re.search(r"\bui_ms=(\d+)", smoke_line)
+    ipc_m = re.search(r"\bipc_ms=(\d+)", smoke_line)
+    sla_ok = bool(ui_m and ipc_m and int(ui_m.group(1)) <= 3000 and int(ipc_m.group(1)) <= 3000)
+    sla_str = (
+        f"ui_ms={ui_m.group(1)}ms ipc_ms={ipc_m.group(1)}ms"
+        if (ui_m and ipc_m)
+        else "ui_ms/ipc_ms missing"
+    )
+    ok = (
+        (info.get("exit_code") == 0)
+        and ("[SMOKE PASS]" in smoke_line)
+        and ("unsafe=0" in smoke_line)
+        and sla_ok
+    )
     return {
         "spec": "MULTI-OS-WIN",
         "name": name,
         "status": "PASS" if ok else "FAIL",
-        "detail": f"{info.get('os')} / {info.get('gpu')} ({info.get('mode')}) | {smoke_short or 'exit=' + str(info.get('exit_code'))}",
+        "detail": f"{info.get('os')} / {info.get('gpu')} ({info.get('mode')}) | {sla_str} | {smoke_short or 'exit=' + str(info.get('exit_code'))}",
     }
 
 

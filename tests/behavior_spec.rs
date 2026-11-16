@@ -2,17 +2,17 @@
 
 use std::fs;
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
 use nanikaai::agent_engine::{
     assert_allowed_model, is_forbidden_model, provider_catalog, sanitize_skin_metadata_label,
-    wrap_untrusted_data, AgentEngine, AgentReply, FORBIDDEN_MODEL_PREFIXES, PREFERRED_MODELS,
-    REMOTE_PREFERRED_MODELS,
+    wrap_untrusted_data, AgentEngine, AgentReply, StatusCallback, FORBIDDEN_MODEL_PREFIXES,
+    PREFERRED_MODELS, REMOTE_PREFERRED_MODELS,
 };
 use nanikaai::builtin_tools::{is_sensitive_path, validate_public_url, BuiltinToolRunner};
 use nanikaai::config_store::{ConfigPatch, ConfigStore};
@@ -714,6 +714,105 @@ fn spec_sec_02_instruction_data_trust_boundary_and_rogue_config_block() {
     assert!(wrapped.starts_with("<untrusted_data source=\"tool:fetch_webpage\">\n"));
     assert!(wrapped.ends_with("\n</untrusted_data>"));
     assert!(wrapped.contains("< /untrusted_data>"));
+
+    let _ = fs::remove_dir_all(&cfg_dir);
+}
+
+#[test]
+fn spec_ui_04_05_control_and_fallback_responsiveness_under_3s() {
+    let sla = Duration::from_millis(3000);
+    let backend = Arc::new(MockSpecBackend::new());
+    let mut srv = start_dual_server(backend, 0, 0)
+        .expect("start_dual_server on ephemeral loopback ports");
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .unwrap();
+    let base = format!("http://127.0.0.1:{}", srv.http_port);
+
+    // Every GUI-backing HTTP/TCP control command MUST respond well within 3.0s
+    let t0 = Instant::now();
+    let h = client.get(format!("{base}/api/health")).send().unwrap();
+    assert_eq!(h.status().as_u16(), 200);
+    assert!(t0.elapsed() < sla, "health exceeded 3s SLA: {:?}", t0.elapsed());
+
+    let t1 = Instant::now();
+    let sk = client
+        .post(format!("{base}/api/skin"))
+        .json(&json!({"shell": "neo_default", "balloon": "clean_default"}))
+        .send()
+        .unwrap();
+    assert_eq!(sk.status().as_u16(), 200);
+    assert!(t1.elapsed() < sla, "skin switch exceeded 3s SLA: {:?}", t1.elapsed());
+
+    let t2 = Instant::now();
+    let sp = client
+        .post(format!("{base}/api/speak"))
+        .json(&json!({"script": "\\0\\s[5]3秒以内応答テスト\\e"}))
+        .send()
+        .unwrap();
+    assert_eq!(sp.status().as_u16(), 200);
+    assert!(t2.elapsed() < sla, "speak exceeded 3s SLA: {:?}", t2.elapsed());
+
+    let t3 = Instant::now();
+    let mut tcp = TcpStream::connect(("127.0.0.1", srv.tcp_port)).unwrap();
+    tcp.write_all(b"SEND SSTP/1.4\r\nCharset: UTF-8\r\nSender: sla\r\nScript: \\0\\s[0]OK\\e\r\n\r\n")
+        .unwrap();
+    let mut sstp_resp = String::new();
+    let _ = tcp.read_to_string(&mut sstp_resp);
+    assert!(sstp_resp.contains("200 OK"));
+    assert!(t3.elapsed() < sla, "SSTP TCP exceeded 3s SLA: {:?}", t3.elapsed());
+
+    srv.stop();
+
+    // AgentEngine MUST emit initial status callback almost immediately (< 500ms) and complete fallback < 3s
+    let closed_port = {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        listener.local_addr().unwrap().port()
+    };
+    let cfg_dir = fresh_temp_dir("spec_ui_05_sla");
+    let cfg_store = ConfigStore::new(Some(cfg_dir.clone()));
+    cfg_store.update(ConfigPatch {
+        provider: Some("ollama".to_string()),
+        model: Some("gemma4:e4b".to_string()),
+        endpoint_url: Some(format!("http://127.0.0.1:{closed_port}")),
+        ..Default::default()
+    });
+    let runner = BuiltinToolRunner::new(cfg_store.clone(), None);
+    let assets_root = manifest_dir().join("assets");
+    let manifest = ShellManager::new(vec![assets_root.join("shells")])
+        .load_shell("neo_default")
+        .expect("load neo_default");
+
+    let start = Instant::now();
+    let first_status_ms: Arc<Mutex<Option<u128>>> = Arc::new(Mutex::new(None));
+    let cb_slot = Arc::clone(&first_status_ms);
+    let cb: StatusCallback = Arc::new(move |msg, active| {
+        if active && !msg.is_empty() {
+            let mut g = cb_slot.lock().unwrap();
+            if g.is_none() {
+                *g = Some(start.elapsed().as_millis());
+            }
+        }
+    });
+    let engine = AgentEngine::new(cfg_store, runner, Arc::new(Mutex::new(manifest)), Some(cb));
+    let reply = engine.handle_user_message("反応テスト");
+    let total_elapsed = start.elapsed();
+
+    let status_latency = first_status_ms
+        .lock()
+        .unwrap()
+        .expect("status callback must fire immediately");
+    assert!(
+        status_latency < 500,
+        "SPEC-UI-05 initial status reaction too slow: {status_latency}ms"
+    );
+    assert!(
+        total_elapsed < sla,
+        "SPEC-UI-05 offline fallback exceeded 3s SLA: {:?}",
+        total_elapsed
+    );
+    assert!(reply.offline_fallback);
 
     let _ = fs::remove_dir_all(&cfg_dir);
 }

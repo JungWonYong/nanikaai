@@ -289,7 +289,7 @@ fn maybe_ensure_ssh_tunnel(cfg: &AgentConfig) {
             "-o",
             "BatchMode=yes",
             "-o",
-            "ConnectTimeout=3",
+            "ConnectTimeout=2",
             "-o",
             "ServerAliveInterval=10",
             "-o",
@@ -552,6 +552,7 @@ impl AgentEngine {
     pub fn list_ollama_models(&self, endpoint: &str, timeout_ms: u64) -> Vec<String> {
         let base = endpoint.trim().trim_end_matches('/');
         let Ok(client) = reqwest::blocking::Client::builder()
+            .connect_timeout(Duration::from_millis(timeout_ms))
             .timeout(Duration::from_millis(timeout_ms))
             .build()
         else {
@@ -580,8 +581,8 @@ impl AgentEngine {
 
     pub fn get_providers_status(&self) -> Vec<ProviderInfo> {
         let cfg = self.config_store.get();
-        let remote_models = self.list_ollama_models(&cfg.remote_endpoint_url, 800);
-        let local_models = self.list_ollama_models(&cfg.endpoint_url, 900);
+        let remote_models = self.list_ollama_models(&cfg.remote_endpoint_url, 500);
+        let local_models = self.list_ollama_models(&cfg.endpoint_url, 500);
         let agy_bin = find_agy_bin();
         let codex_bin = find_codex_bin();
         let claude_bin = find_claude_bin();
@@ -663,21 +664,27 @@ impl AgentEngine {
         if is_remote {
             maybe_ensure_ssh_tunnel(cfg);
         }
+        let explicit = cfg.model.trim();
+        if !explicit.is_empty() && explicit != "auto" {
+            assert_allowed_model(explicit)?;
+            if explicit.contains(':') {
+                return Ok(explicit.to_string());
+            }
+        }
         let endpoint = if is_remote {
             &cfg.remote_endpoint_url
         } else {
             &cfg.endpoint_url
         };
-        let models = self.list_ollama_models(endpoint, 3000);
-        if !cfg.model.trim().is_empty() && cfg.model != "auto" {
-            assert_allowed_model(&cfg.model)?;
-            if models.is_empty() || models.iter().any(|m| m == &cfg.model) {
-                return Ok(cfg.model.clone());
+        let models = self.list_ollama_models(endpoint, 1200);
+        if !explicit.is_empty() && explicit != "auto" {
+            if models.is_empty() || models.iter().any(|m| m == explicit) {
+                return Ok(explicit.to_string());
             }
-            if let Some(m) = models.iter().find(|m| m.starts_with(&format!("{}:", cfg.model))) {
+            if let Some(m) = models.iter().find(|m| m.starts_with(&format!("{explicit}:"))) {
                 return Ok(m.clone());
             }
-            return Ok(cfg.model.clone());
+            return Ok(explicit.to_string());
         }
         let prefs = if is_remote {
             REMOTE_PREFERRED_MODELS
@@ -842,6 +849,7 @@ impl AgentEngine {
             format!("AI ({model})")
         };
         let client = reqwest::blocking::Client::builder()
+            .connect_timeout(Duration::from_millis(2200))
             .timeout(Duration::from_secs(90))
             .build()
             .map_err(|e| e.to_string())?;
@@ -980,6 +988,7 @@ impl AgentEngine {
         messages.push(json!({"role": "user", "content": prompt}));
 
         let client = reqwest::blocking::Client::builder()
+            .connect_timeout(Duration::from_millis(2200))
             .timeout(Duration::from_secs(90))
             .build()
             .map_err(|e| e.to_string())?;
@@ -1103,6 +1112,7 @@ impl AgentEngine {
         contents.push(json!({"role": "user", "parts": [{"text": prompt}]}));
 
         let client = reqwest::blocking::Client::builder()
+            .connect_timeout(Duration::from_millis(2200))
             .timeout(Duration::from_secs(90))
             .build()
             .map_err(|e| e.to_string())?;
@@ -1282,6 +1292,7 @@ impl AgentEngine {
 
         let sys_prompt = self.build_system_prompt(cfg);
         let client = reqwest::blocking::Client::builder()
+            .connect_timeout(Duration::from_millis(2200))
             .timeout(Duration::from_secs(90))
             .build()
             .map_err(|e| e.to_string())?;
@@ -1473,6 +1484,7 @@ impl AgentEngine {
         if let Ok(mut b) = self.busy.lock() {
             *b = true;
         }
+        self.emit_status("AI 応答準備中...", true);
         let result = (|| -> Result<AgentReply, String> {
             if !cfg.model.trim().is_empty() && cfg.model != "auto" {
                 assert_allowed_model(&cfg.model)?;

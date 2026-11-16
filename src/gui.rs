@@ -2571,7 +2571,7 @@ impl ServerBackend for GuiServerBackend {
     fn get_health(&self) -> Value {
         let (tx, rx) = mpsc::channel();
         if self.proxy.send_event(UserEvent::ServerGetHealth(tx)).is_ok() {
-            if let Ok(v) = rx.recv_timeout(Duration::from_secs(2)) {
+            if let Ok(v) = rx.recv_timeout(Duration::from_millis(800)) {
                 return v;
             }
         }
@@ -2588,7 +2588,7 @@ impl ServerBackend for GuiServerBackend {
     fn get_skins(&self) -> Value {
         let (tx, rx) = mpsc::channel();
         if self.proxy.send_event(UserEvent::ServerGetSkins(tx)).is_ok() {
-            if let Ok(v) = rx.recv_timeout(Duration::from_secs(2)) {
+            if let Ok(v) = rx.recv_timeout(Duration::from_millis(800)) {
                 return v;
             }
         }
@@ -2793,7 +2793,76 @@ struct AppRuntime {
     initialized: bool,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum UiWindowTarget {
+    Char(Scope),
+    Balloon(Scope),
+    Communicate,
+    Menu,
+}
+
 impl AppRuntime {
+    fn classify_window(&self, window_id: WindowId) -> Option<UiWindowTarget> {
+        if self.sakura.as_ref().is_some_and(|w| w.ws.window.id() == window_id) {
+            Some(UiWindowTarget::Char(Scope::Sakura))
+        } else if self.kero.as_ref().is_some_and(|w| w.ws.window.id() == window_id) {
+            Some(UiWindowTarget::Char(Scope::Kero))
+        } else if self
+            .sakura_balloon
+            .as_ref()
+            .is_some_and(|b| b.ws.window.id() == window_id)
+        {
+            Some(UiWindowTarget::Balloon(Scope::Sakura))
+        } else if self
+            .kero_balloon
+            .as_ref()
+            .is_some_and(|b| b.ws.window.id() == window_id)
+        {
+            Some(UiWindowTarget::Balloon(Scope::Kero))
+        } else if self.communicate.as_ref().is_some_and(|c| c.ws.window.id() == window_id) {
+            Some(UiWindowTarget::Communicate)
+        } else if self.menu.as_ref().is_some_and(|m| m.ws.window.id() == window_id) {
+            Some(UiWindowTarget::Menu)
+        } else {
+            None
+        }
+    }
+
+    fn window_scale_factor(&self, window_id: WindowId) -> f64 {
+        match self.classify_window(window_id) {
+            Some(UiWindowTarget::Char(Scope::Sakura)) => self
+                .sakura
+                .as_ref()
+                .map(|c| c.ws.window.scale_factor().max(1.0))
+                .unwrap_or(1.0),
+            Some(UiWindowTarget::Char(Scope::Kero)) => self
+                .kero
+                .as_ref()
+                .map(|c| c.ws.window.scale_factor().max(1.0))
+                .unwrap_or(1.0),
+            Some(UiWindowTarget::Balloon(Scope::Sakura)) => self
+                .sakura_balloon
+                .as_ref()
+                .map(|b| b.ws.window.scale_factor().max(1.0))
+                .unwrap_or(1.0),
+            Some(UiWindowTarget::Balloon(Scope::Kero)) => self
+                .kero_balloon
+                .as_ref()
+                .map(|b| b.ws.window.scale_factor().max(1.0))
+                .unwrap_or(1.0),
+            Some(UiWindowTarget::Communicate) => self
+                .communicate
+                .as_ref()
+                .map(|c| c.ws.window.scale_factor().max(1.0))
+                .unwrap_or(1.0),
+            Some(UiWindowTarget::Menu) => self
+                .menu
+                .as_ref()
+                .map(|m| m.ws.window.scale_factor().max(1.0))
+                .unwrap_or(1.0),
+            None => 1.0,
+        }
+    }
     fn create_borderless_window(
         event_loop: &ActiveEventLoop,
         title: &str,
@@ -3541,11 +3610,17 @@ impl AppRuntime {
         }
     }
 
-    fn spawn_user_chat(&self, text: String) {
+    fn spawn_user_chat(&mut self, text: String) {
         let trimmed = text.trim().to_string();
         if trimmed.is_empty() {
             return;
         }
+        // Immediate visual responsiveness: character reacts & thinking indicator appears synchronously (< 50ms)
+        if let Some(ref mut s) = self.sakura {
+            s.trigger_bounce(0.016);
+        }
+        self.apply_status_feedback("AI 応答準備中… / Thinking…".to_string());
+
         let eng = self.engine.clone();
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
@@ -3562,6 +3637,506 @@ impl AppRuntime {
                 let _ = proxy.send_event(UserEvent::PlayActions(reply.actions));
             }
         });
+    }
+
+    fn apply_status_feedback(&mut self, msg: String) {
+        let sp_sak = self.speaker_name(Scope::Sakura);
+        let mut need_repo = false;
+        if let Some(ref mut sb) = self.sakura_balloon {
+            sb.status_line = msg.clone();
+            if sb.visible {
+                if let Some(ref gpu) = self.gpu {
+                    need_repo = sb.redraw_content(
+                        &self.balloon_skin,
+                        &sp_sak,
+                        !sb.user_scrolled_up,
+                        &mut self.text_renderer,
+                        gpu,
+                    );
+                }
+            } else if !msg.is_empty() {
+                sb.scroll_px = 0.0;
+                sb.user_scrolled_up = false;
+                sb.utterance_min_w = 0;
+                self.playback.sakura_buf = "…".to_string();
+                self.playback.sakura_show = true;
+                self.playback.sakura_dirty = true;
+                self.sync_balloons_to_playback();
+            }
+        }
+        if need_repo {
+            self.reposition_balloon(Scope::Sakura);
+        }
+    }
+
+    fn handle_pointer_move(&mut self, window_id: WindowId, local: (f64, f64)) {
+        match self.classify_window(window_id) {
+            Some(UiWindowTarget::Char(sc)) => {
+                let cw = if sc == Scope::Sakura { self.sakura.as_mut() } else { self.kero.as_mut() };
+                if let Some(c) = cw {
+                    c.last_local_cursor = Some(local);
+                    if c.dragging {
+                        if let Mouse::Position { x, y } = Mouse::get_mouse_position() {
+                            #[cfg(target_os = "macos")]
+                            let (gx, gy) = (x as f64, y as f64);
+                            #[cfg(not(target_os = "macos"))]
+                            let (gx, gy) = {
+                                let scale = c.ws.window.scale_factor().max(1.0);
+                                (x as f64 / scale, y as f64 / scale)
+                            };
+                            let dx = gx - c.drag_start_cursor_global.0;
+                            let dy = gy - c.drag_start_cursor_global.1;
+                            if dx.abs() > 3.0 || dy.abs() > 3.0 {
+                                c.drag_moved = true;
+                            }
+                            c.set_logical_pos(
+                                c.drag_start_win_pos.0 + dx,
+                                c.drag_start_win_pos.1 + dy,
+                            );
+                            self.reposition_balloon(sc);
+                        }
+                    }
+                }
+            }
+            Some(UiWindowTarget::Balloon(sb)) => {
+                let sp_name = self.speaker_name(sb);
+                let mut need_repo = false;
+                if let Some(b) = if sb == Scope::Sakura {
+                    self.sakura_balloon.as_mut()
+                } else {
+                    self.kero_balloon.as_mut()
+                } {
+                    let hovered = b.choices.iter().position(|ch| {
+                        ch.rect.2 > ch.rect.0
+                            && local.0 >= ch.rect.0
+                            && local.0 <= ch.rect.2
+                            && local.1 >= ch.rect.1
+                            && local.1 <= ch.rect.3
+                    });
+                    if b.hovered_choice != hovered {
+                        b.hovered_choice = hovered;
+                        if let Some(ref gpu) = self.gpu {
+                            need_repo = b.redraw_content(
+                                &self.balloon_skin,
+                                &sp_name,
+                                false,
+                                &mut self.text_renderer,
+                                gpu,
+                            );
+                        }
+                    }
+                }
+                if need_repo {
+                    self.reposition_balloon(sb);
+                }
+            }
+            Some(UiWindowTarget::Communicate) => {
+                if let Some(ref mut cw) = self.communicate {
+                    cw.last_local_cursor = Some(local);
+                    let in_rect = |r: (f64, f64, f64, f64)| -> bool {
+                        r.2 > r.0 && local.0 >= r.0 && local.0 <= r.2 && local.1 >= r.1 && local.1 <= r.3
+                    };
+                    let has_text = !cw.text.trim().is_empty() || !cw.ime_preedit.trim().is_empty();
+                    let new_close = in_rect(cw.close_rect);
+                    let new_send = has_text && in_rect(cw.send_rect);
+                    if cw.hovered_close != new_close || cw.hovered_send != new_send {
+                        cw.hovered_close = new_close;
+                        cw.hovered_send = new_send;
+                        if let Some(ref gpu) = self.gpu {
+                            cw.redraw(&self.balloon_skin, &mut self.text_renderer, gpu);
+                        }
+                    }
+                }
+            }
+            Some(UiWindowTarget::Menu) => {
+                if let Some(ref mut m) = self.menu {
+                    let rel_row = ((local.1 - 7.0) / m.row_h).floor() as isize;
+                    let new_hover = if rel_row >= 0 {
+                        let idx = m.scroll_row + rel_row as usize;
+                        if idx < m.rows.len() && !matches!(m.rows[idx].cmd, MenuCommand::Separator) {
+                            Some(idx)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    if m.hovered_idx != new_hover {
+                        m.hovered_idx = new_hover;
+                        if let Some(ref gpu) = self.gpu {
+                            m.redraw(&mut self.text_renderer, gpu);
+                        }
+                    }
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn handle_scroll(&mut self, window_id: WindowId, dy: f64) {
+        match self.classify_window(window_id) {
+            Some(UiWindowTarget::Balloon(sb)) => {
+                let sp_name = self.speaker_name(sb);
+                let mut need_repo = false;
+                if let Some(b) = if sb == Scope::Sakura {
+                    self.sakura_balloon.as_mut()
+                } else {
+                    self.kero_balloon.as_mut()
+                } {
+                    b.scroll_px = (b.scroll_px - dy as f32).clamp(0.0, b.max_scroll_px);
+                    b.user_scrolled_up = b.max_scroll_px > 1.0 && (b.scroll_px + 4.0) < b.max_scroll_px;
+                    if let Some(ref gpu) = self.gpu {
+                        need_repo = b.redraw_content(
+                            &self.balloon_skin,
+                            &sp_name,
+                            false,
+                            &mut self.text_renderer,
+                            gpu,
+                        );
+                    }
+                }
+                if need_repo {
+                    self.reposition_balloon(sb);
+                }
+            }
+            Some(UiWindowTarget::Menu) => {
+                if let Some(ref mut m) = self.menu {
+                    let max_scroll = m.rows.len().saturating_sub(m.max_visible_rows);
+                    if max_scroll == 0 {
+                        m.scroll_row = 0;
+                        m.scroll_accum = 0.0;
+                    } else {
+                        m.scroll_accum += dy;
+                        let step = 18.0;
+                        let prev_row = m.scroll_row;
+                        while m.scroll_accum <= -step {
+                            m.scroll_accum += step;
+                            if m.scroll_row < max_scroll {
+                                m.scroll_row += 1;
+                            } else {
+                                m.scroll_accum = 0.0;
+                                break;
+                            }
+                        }
+                        while m.scroll_accum >= step {
+                            m.scroll_accum -= step;
+                            if m.scroll_row > 0 {
+                                m.scroll_row -= 1;
+                            } else {
+                                m.scroll_accum = 0.0;
+                                break;
+                            }
+                        }
+                        if m.scroll_row == 0 && m.scroll_accum > 0.0 {
+                            m.scroll_accum = 0.0;
+                        } else if m.scroll_row == max_scroll && m.scroll_accum < 0.0 {
+                            m.scroll_accum = 0.0;
+                        }
+                        if prev_row != m.scroll_row {
+                            if let Some(ref gpu) = self.gpu {
+                                m.redraw(&mut self.text_renderer, gpu);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_mouse_button(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        button: MouseButton,
+        state: ElementState,
+    ) {
+        match self.classify_window(window_id) {
+            Some(UiWindowTarget::Char(sc)) => match (button, state) {
+                (MouseButton::Right, ElementState::Pressed) => {
+                    self.open_menu_near_cursor(sc);
+                }
+                (MouseButton::Left, ElementState::Pressed) => {
+                    self.hide_menu();
+                    let cw = if sc == Scope::Sakura { self.sakura.as_mut() } else { self.kero.as_mut() };
+                    if let Some(c) = cw {
+                        c.sync_pos_from_window();
+                        c.dragging = true;
+                        c.drag_moved = false;
+                        c.drag_start_win_pos = c.logical_pos;
+                        if let Mouse::Position { x, y } = Mouse::get_mouse_position() {
+                            #[cfg(target_os = "macos")]
+                            {
+                                c.drag_start_cursor_global = (x as f64, y as f64);
+                            }
+                            #[cfg(not(target_os = "macos"))]
+                            {
+                                let scale = c.ws.window.scale_factor().max(1.0);
+                                c.drag_start_cursor_global = (x as f64 / scale, y as f64 / scale);
+                            }
+                        } else if c.ws.window.outer_position().is_err() {
+                            let _ = c.ws.window.drag_window();
+                        }
+                    }
+                }
+                (MouseButton::Left, ElementState::Released) => {
+                    let mut open_chat = false;
+                    let mut touch_region = None;
+                    {
+                        let cw = if sc == Scope::Sakura { self.sakura.as_mut() } else { self.kero.as_mut() };
+                        if let Some(c) = cw {
+                            let was_drag = c.drag_moved;
+                            c.dragging = false;
+                            c.drag_moved = false;
+                            if !was_drag {
+                                let now = Instant::now();
+                                let is_dbl = c
+                                    .last_click_at
+                                    .is_some_and(|t| now.duration_since(t) <= Duration::from_millis(380));
+                                c.last_click_at = if is_dbl { None } else { Some(now) };
+                                if is_dbl {
+                                    if let Some((lx, ly)) = c.last_local_cursor {
+                                        let ix = (lx * c.display_scale).floor() as i32;
+                                        let iy = (ly * c.display_scale).floor() as i32;
+                                        let m = self.manifest.lock().expect("manifest mutex poisoned");
+                                        let col = c.base_bmp.as_ref().and_then(|bb| {
+                                            m.hit_collision(c.surface_id, sc, bb, ix, iy)
+                                        });
+                                        if let Some(col) = col {
+                                            touch_region = Some(col.name);
+                                        } else if sc == Scope::Sakura {
+                                            open_chat = true;
+                                        } else {
+                                            touch_region = Some("Body".to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if open_chat {
+                        self.open_communicate_near_sakura();
+                    } else if let Some(reg) = touch_region {
+                        match sc {
+                            Scope::Sakura => {
+                                if let Some(ref mut s) = self.sakura {
+                                    s.trigger_bounce(0.022);
+                                }
+                            }
+                            Scope::Kero => {
+                                if let Some(ref mut k) = self.kero {
+                                    k.trigger_bounce(0.022);
+                                }
+                            }
+                        }
+                        self.spawn_touch(sc, "double_click", reg);
+                    }
+                }
+                _ => {}
+            },
+            Some(UiWindowTarget::Balloon(sb)) => {
+                if button == MouseButton::Left && state == ElementState::Pressed {
+                    let mut picked_choice: Option<(String, String)> = None;
+                    let mut should_ff = false;
+                    let mut should_hide = false;
+                    if let Some(b) = if sb == Scope::Sakura {
+                        self.sakura_balloon.as_mut()
+                    } else {
+                        self.kero_balloon.as_mut()
+                    } {
+                        if let Some(idx) = b.hovered_choice {
+                            if let Some(ch) = b.choices.get(idx) {
+                                picked_choice = Some((ch.label.clone(), ch.choice_id.clone()));
+                            }
+                        } else if !self.playback.steps.is_empty() {
+                            should_ff = true;
+                        } else {
+                            should_hide = true;
+                            b.visible = false;
+                            b.ws.window.set_visible(false);
+                        }
+                    }
+                    if let Some((lbl, cid)) = picked_choice {
+                        self.playback.sakura_choices.clear();
+                        self.playback.kero_choices.clear();
+                        self.spawn_user_chat(format!("[선택지 선택] {lbl} (id={cid})"));
+                    } else if should_ff {
+                        let imm = self.playback.fast_forward();
+                        for act in imm {
+                            if act.kind == ActionKind::Surface {
+                                if let Some(ref gpu) = self.gpu {
+                                    let mut m = self.manifest.lock().expect("manifest mutex poisoned");
+                                    if act.scope == Scope::Kero {
+                                        if let Some(ref mut k) = self.kero {
+                                            k.set_surface(&mut m, gpu, act.surface_id, false);
+                                        }
+                                    } else if let Some(ref mut s) = self.sakura {
+                                        s.set_surface(&mut m, gpu, act.surface_id, false);
+                                    }
+                                }
+                            }
+                        }
+                        self.sync_balloons_to_playback();
+                    } else if should_hide {
+                        if sb == Scope::Sakura {
+                            self.playback.sakura_show = false;
+                        } else {
+                            self.playback.kero_show = false;
+                        }
+                    }
+                }
+            }
+            Some(UiWindowTarget::Communicate) if button == MouseButton::Left && state == ElementState::Pressed => {
+                let mut submit_text: Option<String> = None;
+                let mut closed_now = false;
+                if let Some(ref mut cw) = self.communicate {
+                    let in_rect = |r: (f64, f64, f64, f64), p: (f64, f64)| -> bool {
+                        r.2 > r.0 && p.0 >= r.0 && p.0 <= r.2 && p.1 >= r.1 && p.1 <= r.3
+                    };
+                    if let Some(pos) = cw.last_local_cursor {
+                        if in_rect(cw.close_rect, pos) {
+                            cw.visible = false;
+                            cw.focused = false;
+                            cw.hovered_close = false;
+                            cw.hovered_send = false;
+                            cw.ime_preedit.clear();
+                            cw.ws.window.set_visible(false);
+                            closed_now = true;
+                        } else if in_rect(cw.send_rect, pos) {
+                            let combined = format!("{}{}", cw.text, cw.ime_preedit);
+                            let trimmed = combined.trim().to_string();
+                            if !trimmed.is_empty() {
+                                submit_text = Some(trimmed);
+                                cw.text.clear();
+                                cw.ime_preedit.clear();
+                                cw.visible = false;
+                                cw.focused = false;
+                                cw.hovered_close = false;
+                                cw.hovered_send = false;
+                                cw.ws.window.set_visible(false);
+                                closed_now = true;
+                            }
+                        }
+                    }
+                    if !closed_now {
+                        cw.focused = true;
+                        cw.cursor_on = true;
+                        cw.last_blink = Instant::now();
+                        cw.ws.window.focus_window();
+                        if let Some(ref gpu) = self.gpu {
+                            cw.redraw(&self.balloon_skin, &mut self.text_renderer, gpu);
+                        }
+                    }
+                }
+                if let Some(msg) = submit_text {
+                    self.spawn_user_chat(msg);
+                }
+            }
+            Some(UiWindowTarget::Menu) if button == MouseButton::Left && state == ElementState::Released => {
+                let chosen = self.menu.as_ref().and_then(|m| {
+                    m.hovered_idx.and_then(|i| m.rows.get(i).map(|r| r.cmd.clone()))
+                });
+                self.hide_menu();
+                if let Some(cmd) = chosen {
+                    self.execute_menu_command(event_loop, cmd);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_ime_event(&mut self, window_id: WindowId, ime_ev: Ime) {
+        if self.classify_window(window_id) != Some(UiWindowTarget::Communicate) {
+            return;
+        }
+        if let Some(ref mut cw) = self.communicate {
+            cw.focused = true;
+            cw.cursor_on = true;
+            cw.last_blink = Instant::now();
+            match ime_ev {
+                Ime::Enabled => {}
+                Ime::Preedit(s, _) => {
+                    cw.ime_preedit = s;
+                }
+                Ime::Commit(s) => {
+                    cw.ime_preedit.clear();
+                    cw.text.push_str(&s);
+                }
+                Ime::Disabled => {
+                    cw.ime_preedit.clear();
+                }
+            }
+            if let Some(ref gpu) = self.gpu {
+                cw.redraw(&self.balloon_skin, &mut self.text_renderer, gpu);
+            }
+        }
+    }
+
+    fn handle_communicate_key(&mut self, logical_key: &Key, text: Option<&str>) {
+        let mut submit_text: Option<String> = None;
+        if let Some(ref mut cw) = self.communicate {
+            cw.focused = true;
+            cw.cursor_on = true;
+            cw.last_blink = Instant::now();
+            let cmd_or_ctrl = self.modifiers.super_key() || self.modifiers.control_key();
+            match logical_key {
+                Key::Named(NamedKey::Escape) => {
+                    cw.visible = false;
+                    cw.focused = false;
+                    cw.hovered_close = false;
+                    cw.hovered_send = false;
+                    cw.ime_preedit.clear();
+                    cw.ws.window.set_visible(false);
+                }
+                Key::Named(NamedKey::Enter) => {
+                    if cw.ime_preedit.is_empty() {
+                        submit_text = Some(cw.text.clone());
+                        cw.text.clear();
+                        cw.visible = false;
+                        cw.focused = false;
+                        cw.hovered_close = false;
+                        cw.hovered_send = false;
+                        cw.ws.window.set_visible(false);
+                    }
+                }
+                Key::Named(NamedKey::Backspace) => {
+                    if cw.ime_preedit.is_empty() {
+                        cw.text.pop();
+                    }
+                }
+                Key::Character(s) if cmd_or_ctrl && s.eq_ignore_ascii_case("v") => {
+                    if let Ok(mut cb) = Clipboard::new() {
+                        if let Ok(pasted) = cb.get_text() {
+                            cw.text.push_str(&pasted.replace(['\r', '\n'], " "));
+                        }
+                    }
+                }
+                Key::Named(NamedKey::Space) => {
+                    if cw.ime_preedit.is_empty() {
+                        cw.text.push(' ');
+                    }
+                }
+                _ => {
+                    if !cmd_or_ctrl && cw.ime_preedit.is_empty() {
+                        if let Some(t) = text {
+                            for ch in t.chars() {
+                                if !ch.is_control() {
+                                    cw.text.push(ch);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if cw.visible {
+                if let Some(ref gpu) = self.gpu {
+                    cw.redraw(&self.balloon_skin, &mut self.text_renderer, gpu);
+                }
+            }
+        }
+        if let Some(msg) = submit_text {
+            self.spawn_user_chat(msg);
+        }
     }
 
     fn tick_playback(&mut self) {
@@ -3722,7 +4297,6 @@ impl AppRuntime {
     fn sync_balloons_to_playback(&mut self) {
         let sp_sak = self.speaker_name(Scope::Sakura);
         let sp_ker = self.speaker_name(Scope::Kero);
-        let streaming_active = !self.playback.steps.is_empty();
         if self.playback.sakura_dirty {
             self.playback.sakura_dirty = false;
             let mut need_reposition = self.playback.sakura_show;
@@ -3733,10 +4307,14 @@ impl AppRuntime {
                 sb.large = sb.text.chars().count() > 85 || !sb.choices.is_empty();
                 sb.visible = self.playback.sakura_show;
                 if sb.visible {
+                    if !was_vis {
+                        sb.scroll_px = 0.0;
+                        sb.user_scrolled_up = false;
+                    }
                     let resized = sb.redraw_content(
                         &self.balloon_skin,
                         &sp_sak,
-                        streaming_active,
+                        true,
                         &mut self.text_renderer,
                         gpu,
                     );
@@ -3764,10 +4342,14 @@ impl AppRuntime {
                 kb.large = kb.text.chars().count() > 75 || !kb.choices.is_empty();
                 kb.visible = self.playback.kero_show && show_kero;
                 if kb.visible {
+                    if !was_vis {
+                        kb.scroll_px = 0.0;
+                        kb.user_scrolled_up = false;
+                    }
                     let resized = kb.redraw_content(
                         &self.balloon_skin,
                         &sp_ker,
-                        streaming_active,
+                        true,
                         &mut self.text_renderer,
                         gpu,
                     );
@@ -4074,7 +4656,241 @@ impl AppRuntime {
                 menu_bmp.save_png(&proof_dir.join("proof-menu.png"))?;
             }
 
-            // Exercise HTTP GET /api/health, POST /api/speak, and raw TCP SSTP/1.4
+            // Phase E: Interactive GUI Operability & <= 3,000 ms Responsiveness SLA Verification
+            const SLA_MS: u128 = 3000;
+            let check_sla = |label: &str, started: Instant| -> Result<u128, String> {
+                let ms = started.elapsed().as_millis();
+                if ms > SLA_MS {
+                    Err(format!("反応性SLA超過 ({label}): {ms}ms > {SLA_MS}ms"))
+                } else {
+                    Ok(ms)
+                }
+            };
+            let sak_id = self.sakura.as_ref().ok_or("사쿠라 창 없음")?.ws.window.id();
+            let sb_id = self
+                .sakura_balloon
+                .as_ref()
+                .ok_or("사쿠라 말풍선 창 없음")?
+                .ws
+                .window
+                .id();
+            let comm_id = self.communicate.as_ref().ok_or("입력창 없음")?.ws.window.id();
+            let menu_id = self.menu.as_ref().ok_or("메뉴 창 없음")?.ws.window.id();
+
+            let closed_port = std::net::TcpListener::bind("127.0.0.1:0")
+                .and_then(|l| l.local_addr())
+                .map(|a| a.port())
+                .unwrap_or(9);
+            self.config_store.update(ConfigPatch {
+                provider: Some("ollama".to_string()),
+                model: Some("gemma4:e4b".to_string()),
+                endpoint_url: Some(format!("http://127.0.0.1:{closed_port}")),
+                ..Default::default()
+            });
+
+            let ui_t0 = Instant::now();
+
+            // E1: Right-click menu open, hover hit-test, wheel scroll, and click command execution
+            let t_menu = Instant::now();
+            self.handle_mouse_button(event_loop, sak_id, MouseButton::Right, ElementState::Pressed);
+            let menu_row_h = {
+                let m = self.menu.as_ref().ok_or("메뉴 창 없음")?;
+                if !m.visible || m.rows.len() < 10 {
+                    return Err("右クリックメニュー展開失敗".to_string());
+                }
+                m.row_h
+            };
+            check_sla("右クリックメニュー表示", t_menu)?;
+
+            self.handle_pointer_move(menu_id, (60.0, 7.0 + menu_row_h * 1.5));
+            if self.menu.as_ref().and_then(|m| m.hovered_idx) != Some(1) {
+                return Err("メニュー行ホバーヒット判定失敗".to_string());
+            }
+            if let Some(ref mut m) = self.menu {
+                m.max_visible_rows = 8;
+                if let Some(ref gpu) = self.gpu {
+                    m.redraw(&mut self.text_renderer, gpu);
+                }
+            }
+            self.handle_scroll(menu_id, -78.0);
+            if self.menu.as_ref().map(|m| m.scroll_row).unwrap_or(0) == 0 {
+                return Err("メニューホイールスクロール失敗".to_string());
+            }
+            let kero_idx = {
+                let m = self.menu.as_mut().ok_or("메뉴 창 없음")?;
+                m.max_visible_rows = 24;
+                m.scroll_row = 0;
+                m.scroll_accum = 0.0;
+                if let Some(ref gpu) = self.gpu {
+                    m.redraw(&mut self.text_renderer, gpu);
+                }
+                m.rows
+                    .iter()
+                    .position(|r| matches!(r.cmd, MenuCommand::ToggleKero))
+                    .ok_or("ToggleKero メニュー行なし")?
+            };
+            self.handle_pointer_move(menu_id, (60.0, 7.0 + menu_row_h * (kero_idx as f64 + 0.5)));
+            self.handle_mouse_button(event_loop, menu_id, MouseButton::Left, ElementState::Released);
+            if self.menu.as_ref().is_some_and(|m| m.visible) {
+                return Err("メニュークリック後にメニューが閉じませんでした".to_string());
+            }
+            if self.kero.as_ref().is_some_and(|k| k.visible) {
+                return Err("メニュー ToggleKero 実行が反映されませんでした".to_string());
+            }
+            self.execute_menu_command(event_loop, MenuCommand::ToggleKero);
+            if !self.kero.as_ref().is_some_and(|k| k.visible) {
+                return Err("ToggleKero 復元失敗".to_string());
+            }
+
+            // E2: Character double-click (outside head/face collision boxes) opens Communicate bar
+            let t_dbl = Instant::now();
+            self.handle_pointer_move(sak_id, (8.0, 8.0));
+            self.handle_mouse_button(event_loop, sak_id, MouseButton::Left, ElementState::Pressed);
+            self.handle_mouse_button(event_loop, sak_id, MouseButton::Left, ElementState::Released);
+            self.handle_mouse_button(event_loop, sak_id, MouseButton::Left, ElementState::Pressed);
+            self.handle_mouse_button(event_loop, sak_id, MouseButton::Left, ElementState::Released);
+            if !self.communicate.as_ref().is_some_and(|c| c.visible && c.focused) {
+                return Err("キャラクターダブルクリックで入力バーが開きませんでした".to_string());
+            }
+            check_sla("ダブルクリック入力バー展開", t_dbl)?;
+
+            // E3: Communicate IME Preedit/Commit, Keyboard edits, Close(×), Escape, and Send(↑) reaction
+            self.handle_ime_event(comm_id, Ime::Preedit("てすと".to_string(), None));
+            if self.communicate.as_ref().map(|c| c.ime_preedit.as_str()) != Some("てすと") {
+                return Err("IME Preedit 反映失敗".to_string());
+            }
+            self.handle_ime_event(comm_id, Ime::Commit("テスト".to_string()));
+            if !self
+                .communicate
+                .as_ref()
+                .is_some_and(|c| c.ime_preedit.is_empty() && c.text == "テスト")
+            {
+                return Err("IME Commit 反映失敗".to_string());
+            }
+            self.handle_communicate_key(&Key::Named(NamedKey::Backspace), None);
+            self.handle_communicate_key(&Key::Character("ト!".into()), Some("ト!"));
+            if self.communicate.as_ref().map(|c| c.text.as_str()) != Some("テスト!") {
+                return Err("キーボード編集 (Backspace/入力) 反映失敗".to_string());
+            }
+            let close_center = {
+                let cw = self.communicate.as_ref().ok_or("입력창 없음")?;
+                (
+                    (cw.close_rect.0 + cw.close_rect.2) * 0.5,
+                    (cw.close_rect.1 + cw.close_rect.3) * 0.5,
+                )
+            };
+            self.handle_pointer_move(comm_id, close_center);
+            if !self.communicate.as_ref().is_some_and(|c| c.hovered_close) {
+                return Err("入力バー閉じるボタン(×)ホバー失敗".to_string());
+            }
+            self.handle_mouse_button(event_loop, comm_id, MouseButton::Left, ElementState::Pressed);
+            if self.communicate.as_ref().is_some_and(|c| c.visible) {
+                return Err("入力バー閉じるボタン(×)クリックで閉じませんでした".to_string());
+            }
+            self.execute_menu_command(event_loop, MenuCommand::OpenCommunicate);
+            self.handle_communicate_key(&Key::Named(NamedKey::Escape), None);
+            if self.communicate.as_ref().is_some_and(|c| c.visible) {
+                return Err("Escape キーで入力バーが閉じませんでした".to_string());
+            }
+
+            if let Some(ref mut sb) = self.sakura_balloon {
+                sb.visible = false;
+                sb.status_line.clear();
+            }
+            self.execute_menu_command(event_loop, MenuCommand::OpenCommunicate);
+            self.handle_communicate_key(&Key::Character("こんにちは".into()), Some("こんにちは"));
+            let send_center = {
+                let cw = self.communicate.as_ref().ok_or("입력창 없음")?;
+                (
+                    (cw.send_rect.0 + cw.send_rect.2) * 0.5,
+                    (cw.send_rect.1 + cw.send_rect.3) * 0.5,
+                )
+            };
+            self.handle_pointer_move(comm_id, send_center);
+            if !self.communicate.as_ref().is_some_and(|c| c.hovered_send) {
+                return Err("入力バー送信ボタン(↑)ホバー失敗".to_string());
+            }
+            let t_send = Instant::now();
+            self.handle_mouse_button(event_loop, comm_id, MouseButton::Left, ElementState::Pressed);
+            if self.communicate.as_ref().is_some_and(|c| c.visible) {
+                return Err("送信ボタンクリック後に入力バーが閉じませんでした".to_string());
+            }
+            if !self
+                .sakura_balloon
+                .as_ref()
+                .is_some_and(|b| b.visible && b.status_line.contains("AI 応答準備中"))
+            {
+                return Err("送信ボタン押下後の即時応答ステータス（…表示）が反映されませんでした".to_string());
+            }
+            check_sla("送信ボタン即時視覚反応", t_send)?;
+
+            // E4: Balloon fast-forward, choice hover, scroll, choice click, dismiss & reset
+            if let Some(ref mut sb) = self.sakura_balloon {
+                sb.status_line.clear();
+                sb.user_scrolled_up = false;
+                sb.scroll_px = 0.0;
+            }
+            let op_script = "\\0\\s[5]操作性テスト開始！\\n\\n行1\\n行2\\n行3\\n行4\\n行5\\n行6\\n行7\\n行8\\n行9\\n行10\\n行11\\n行12\\n行13\\n行14\\n行15\\n行16\\q[選択肢A,opt_a]\\q[選択肢B,opt_b]\\e";
+            self.playback.enqueue(parse_dialogue(op_script));
+            self.tick_playback();
+            if self.playback.steps.is_empty() {
+                return Err("タイプライター再生前ステップが空です".to_string());
+            }
+            self.handle_mouse_button(event_loop, sb_id, MouseButton::Left, ElementState::Pressed);
+            if !self.playback.steps.is_empty() {
+                return Err("吹き出しクリックによる文字早送り(fast_forward)に失敗しました".to_string());
+            }
+            let (ch0_center, max_scr) = {
+                let sb = self.sakura_balloon.as_ref().ok_or("사쿠라 말풍선 창 없음")?;
+                if sb.choices.len() != 2 {
+                    return Err(format!("吹き出し選択肢数が不正: {}", sb.choices.len()));
+                }
+                let r = sb.choices[0].rect;
+                (((r.0 + r.2) * 0.5, (r.1 + r.3) * 0.5), sb.max_scroll_px)
+            };
+            self.handle_pointer_move(sb_id, ch0_center);
+            if self.sakura_balloon.as_ref().and_then(|b| b.hovered_choice) != Some(0) {
+                return Err("吹き出し選択肢ホバー判定に失敗しました".to_string());
+            }
+            if max_scr > 20.0 {
+                self.handle_scroll(sb_id, 60.0);
+                let after_up = self.sakura_balloon.as_ref().map(|b| (b.scroll_px, b.user_scrolled_up));
+                if !after_up.is_some_and(|(px, up)| up && px < max_scr) {
+                    return Err("吹き出し上方向ホイールスクロールに失敗しました".to_string());
+                }
+                self.handle_scroll(sb_id, -60.0);
+                let after_down = self.sakura_balloon.as_ref().map(|b| b.scroll_px).unwrap_or(0.0);
+                if (after_down - max_scr).abs() > 1.5 {
+                    return Err("吹き出し下方向ホイールスクロール復元失敗".to_string());
+                }
+            }
+            self.handle_mouse_button(event_loop, sb_id, MouseButton::Left, ElementState::Pressed);
+            if !self.playback.sakura_choices.is_empty() {
+                return Err("選択肢クリック後の choices クリア失敗".to_string());
+            }
+            if !self
+                .sakura_balloon
+                .as_ref()
+                .is_some_and(|b| b.visible && b.status_line.contains("AI 応答準備中"))
+            {
+                return Err("選択肢クリック後の即時反応表示失敗".to_string());
+            }
+            self.handle_pointer_move(sb_id, (2.0, 2.0));
+            if let Some(ref mut sb) = self.sakura_balloon {
+                sb.choices.clear();
+                sb.hovered_choice = None;
+            }
+            self.playback.steps.clear();
+            self.handle_mouse_button(event_loop, sb_id, MouseButton::Left, ElementState::Pressed);
+            if self.sakura_balloon.as_ref().is_some_and(|b| b.visible) {
+                return Err("吹き出しクリック非表示(dismiss)に失敗しました".to_string());
+            }
+            self.execute_menu_command(event_loop, MenuCommand::ResetPositions);
+            self.execute_menu_command(event_loop, MenuCommand::ResetDefaultSkin);
+            let ui_ops_ms = check_sla("GUI全操作スイート合計", ui_t0)?;
+
+            // Exercise HTTP GET /api/health, POST /api/speak, and raw TCP SSTP/1.4 within SLA
+            let ipc_t0 = Instant::now();
             let srv = self.server.as_ref().ok_or("서버 미기동")?;
             let client = reqwest::blocking::Client::builder()
                 .timeout(Duration::from_secs(3))
@@ -4107,10 +4923,11 @@ impl AppRuntime {
             if !sstp_buf.contains("200 OK") {
                 return Err(format!("SSTP 응답 오류: {sstp_buf}"));
             }
+            let ipc_ms = check_sla("HTTP/SSTP制御応答合計", ipc_t0)?;
 
             let safe_area = self.desktop_safe_work_area();
             Ok(format!(
-                "[SMOKE PASS] unsafe=0 shells=[{}] scale={} safe=({:.0},{:.0},{:.0},{:.0}) http={} tcp={}",
+                "[SMOKE PASS] unsafe=0 shells=[{}] scale={} safe=({:.0},{:.0},{:.0},{:.0}) http={} tcp={} ui_ms={} ipc_ms={}",
                 checked_shells.join(", "),
                 active_ds,
                 safe_area.0,
@@ -4118,7 +4935,9 @@ impl AppRuntime {
                 safe_area.2,
                 safe_area.3,
                 srv.http_port,
-                srv.tcp_port
+                srv.tcp_port,
+                ui_ops_ms,
+                ipc_ms
             ))
         })();
 
@@ -4471,33 +5290,7 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                 self.playback.enqueue(actions);
             }
             UserEvent::StatusUpdate(msg, _active) => {
-                let sp_sak = self.speaker_name(Scope::Sakura);
-                let mut need_repo = false;
-                if let Some(ref mut sb) = self.sakura_balloon {
-                    sb.status_line = msg.clone();
-                    if sb.visible {
-                        if let Some(ref gpu) = self.gpu {
-                            need_repo = sb.redraw_content(
-                                &self.balloon_skin,
-                                &sp_sak,
-                                !sb.user_scrolled_up,
-                                &mut self.text_renderer,
-                                gpu,
-                            );
-                        }
-                    } else if !msg.is_empty() {
-                        sb.scroll_px = 0.0;
-                        sb.user_scrolled_up = false;
-                        sb.utterance_min_w = 0;
-                        self.playback.sakura_buf = "…".to_string();
-                        self.playback.sakura_show = true;
-                        self.playback.sakura_dirty = true;
-                        self.sync_balloons_to_playback();
-                    }
-                }
-                if need_repo {
-                    self.reposition_balloon(Scope::Sakura);
-                }
+                self.apply_status_feedback(msg);
             }
             UserEvent::ServerGetHealth(tx) => {
                 let cfg = self.config_store.get();
@@ -4552,37 +5345,9 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
-        // Identify target window
-        let target_char = if self.sakura.as_ref().is_some_and(|w| w.ws.window.id() == window_id) {
-            Some(Scope::Sakura)
-        } else if self.kero.as_ref().is_some_and(|w| w.ws.window.id() == window_id) {
-            Some(Scope::Kero)
-        } else {
-            None
-        };
-        let target_bal = if self
-            .sakura_balloon
-            .as_ref()
-            .is_some_and(|b| b.ws.window.id() == window_id)
-        {
-            Some(Scope::Sakura)
-        } else if self
-            .kero_balloon
-            .as_ref()
-            .is_some_and(|b| b.ws.window.id() == window_id)
-        {
-            Some(Scope::Kero)
-        } else {
-            None
-        };
-        let is_comm = self
-            .communicate
-            .as_ref()
-            .is_some_and(|c| c.ws.window.id() == window_id);
-        let is_menu = self
-            .menu
-            .as_ref()
-            .is_some_and(|m| m.ws.window.id() == window_id);
+        let win_target = self.classify_window(window_id);
+        let is_comm = win_target == Some(UiWindowTarget::Communicate);
+        let is_menu = win_target == Some(UiWindowTarget::Menu);
 
         match event {
             WindowEvent::CloseRequested => {
@@ -4605,47 +5370,75 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
             }
             WindowEvent::Resized(phys) => {
                 if let Some(ref gpu) = self.gpu {
-                    if let Some(sc) = target_char {
-                        let cw = if sc == Scope::Sakura { self.sakura.as_mut() } else { self.kero.as_mut() };
-                        if let Some(c) = cw {
-                            c.ws.resize(gpu, phys);
+                    match win_target {
+                        Some(UiWindowTarget::Char(Scope::Sakura)) => {
+                            if let Some(ref mut c) = self.sakura {
+                                c.ws.resize(gpu, phys);
+                            }
                         }
-                    } else if let Some(sb) = target_bal {
-                        let bw = if sb == Scope::Sakura { self.sakura_balloon.as_mut() } else { self.kero_balloon.as_mut() };
-                        if let Some(b) = bw {
-                            b.ws.resize(gpu, phys);
+                        Some(UiWindowTarget::Char(Scope::Kero)) => {
+                            if let Some(ref mut c) = self.kero {
+                                c.ws.resize(gpu, phys);
+                            }
                         }
-                    } else if is_comm {
-                        if let Some(ref mut c) = self.communicate {
-                            c.ws.resize(gpu, phys);
+                        Some(UiWindowTarget::Balloon(Scope::Sakura)) => {
+                            if let Some(ref mut b) = self.sakura_balloon {
+                                b.ws.resize(gpu, phys);
+                            }
                         }
-                    } else if is_menu {
-                        if let Some(ref mut m) = self.menu {
-                            m.ws.resize(gpu, phys);
+                        Some(UiWindowTarget::Balloon(Scope::Kero)) => {
+                            if let Some(ref mut b) = self.kero_balloon {
+                                b.ws.resize(gpu, phys);
+                            }
                         }
+                        Some(UiWindowTarget::Communicate) => {
+                            if let Some(ref mut c) = self.communicate {
+                                c.ws.resize(gpu, phys);
+                            }
+                        }
+                        Some(UiWindowTarget::Menu) => {
+                            if let Some(ref mut m) = self.menu {
+                                m.ws.resize(gpu, phys);
+                            }
+                        }
+                        None => {}
                     }
                 }
             }
             WindowEvent::RedrawRequested => {
                 if let Some(ref gpu) = self.gpu {
-                    if let Some(sc) = target_char {
-                        let cw = if sc == Scope::Sakura { self.sakura.as_mut() } else { self.kero.as_mut() };
-                        if let Some(c) = cw {
-                            c.ws.render(gpu);
+                    match win_target {
+                        Some(UiWindowTarget::Char(Scope::Sakura)) => {
+                            if let Some(ref mut c) = self.sakura {
+                                c.ws.render(gpu);
+                            }
                         }
-                    } else if let Some(sb) = target_bal {
-                        let bw = if sb == Scope::Sakura { self.sakura_balloon.as_mut() } else { self.kero_balloon.as_mut() };
-                        if let Some(b) = bw {
-                            b.ws.render(gpu);
+                        Some(UiWindowTarget::Char(Scope::Kero)) => {
+                            if let Some(ref mut c) = self.kero {
+                                c.ws.render(gpu);
+                            }
                         }
-                    } else if is_comm {
-                        if let Some(ref mut c) = self.communicate {
-                            c.ws.render(gpu);
+                        Some(UiWindowTarget::Balloon(Scope::Sakura)) => {
+                            if let Some(ref mut b) = self.sakura_balloon {
+                                b.ws.render(gpu);
+                            }
                         }
-                    } else if is_menu {
-                        if let Some(ref mut m) = self.menu {
-                            m.ws.render(gpu);
+                        Some(UiWindowTarget::Balloon(Scope::Kero)) => {
+                            if let Some(ref mut b) = self.kero_balloon {
+                                b.ws.render(gpu);
+                            }
                         }
+                        Some(UiWindowTarget::Communicate) => {
+                            if let Some(ref mut c) = self.communicate {
+                                c.ws.render(gpu);
+                            }
+                        }
+                        Some(UiWindowTarget::Menu) => {
+                            if let Some(ref mut m) = self.menu {
+                                m.ws.render(gpu);
+                            }
+                        }
+                        None => {}
                     }
                 }
             }
@@ -4678,385 +5471,22 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                if let Some(sc) = target_char {
-                    let cw = if sc == Scope::Sakura { self.sakura.as_mut() } else { self.kero.as_mut() };
-                    if let Some(c) = cw {
-                        let scale = c.ws.window.scale_factor().max(1.0);
-                        let local = position.to_logical::<f64>(scale);
-                        c.last_local_cursor = Some((local.x, local.y));
-                        if c.dragging {
-                            if let Mouse::Position { x, y } = Mouse::get_mouse_position() {
-                                #[cfg(target_os = "macos")]
-                                let (gx, gy) = (x as f64, y as f64);
-                                #[cfg(not(target_os = "macos"))]
-                                let (gx, gy) = (x as f64 / scale, y as f64 / scale);
-                                let dx = gx - c.drag_start_cursor_global.0;
-                                let dy = gy - c.drag_start_cursor_global.1;
-                                if dx.abs() > 3.0 || dy.abs() > 3.0 {
-                                    c.drag_moved = true;
-                                }
-                                c.set_logical_pos(
-                                    c.drag_start_win_pos.0 + dx,
-                                    c.drag_start_win_pos.1 + dy,
-                                );
-                                self.reposition_balloon(sc);
-                            }
-                        }
-                    }
-                } else if let Some(sb) = target_bal {
-                    let sp_name = self.speaker_name(sb);
-                    let mut redraw = false;
-                    let mut need_repo = false;
-                    if let Some(b) = if sb == Scope::Sakura { self.sakura_balloon.as_mut() } else { self.kero_balloon.as_mut() } {
-                        let local = position.to_logical::<f64>(b.ws.window.scale_factor().max(1.0));
-                        let hovered = b.choices.iter().position(|ch| {
-                            ch.rect.2 > ch.rect.0
-                                && local.x >= ch.rect.0
-                                && local.x <= ch.rect.2
-                                && local.y >= ch.rect.1
-                                && local.y <= ch.rect.3
-                        });
-                        if b.hovered_choice != hovered {
-                            b.hovered_choice = hovered;
-                            redraw = true;
-                        }
-                        if redraw {
-                            if let Some(ref gpu) = self.gpu {
-                                need_repo = b.redraw_content(
-                                    &self.balloon_skin,
-                                    &sp_name,
-                                    false,
-                                    &mut self.text_renderer,
-                                    gpu,
-                                );
-                            }
-                        }
-                    }
-                    if need_repo {
-                        self.reposition_balloon(sb);
-                    }
-                } else if is_comm {
-                    if let Some(ref mut cw) = self.communicate {
-                        let scale = cw.ws.window.scale_factor().max(1.0);
-                        let local = position.to_logical::<f64>(scale);
-                        cw.last_local_cursor = Some((local.x, local.y));
-                        let in_rect = |r: (f64, f64, f64, f64)| -> bool {
-                            r.2 > r.0 && local.x >= r.0 && local.x <= r.2 && local.y >= r.1 && local.y <= r.3
-                        };
-                        let has_text = !cw.text.trim().is_empty() || !cw.ime_preedit.trim().is_empty();
-                        let new_close = in_rect(cw.close_rect);
-                        let new_send = has_text && in_rect(cw.send_rect);
-                        if cw.hovered_close != new_close || cw.hovered_send != new_send {
-                            cw.hovered_close = new_close;
-                            cw.hovered_send = new_send;
-                            if let Some(ref gpu) = self.gpu {
-                                cw.redraw(&self.balloon_skin, &mut self.text_renderer, gpu);
-                            }
-                        }
-                    }
-                } else if is_menu {
-                    if let Some(ref mut m) = self.menu {
-                        let local = position.to_logical::<f64>(m.ws.window.scale_factor().max(1.0));
-                        let rel_row = ((local.y - 7.0) / m.row_h).floor() as isize;
-                        let new_hover = if rel_row >= 0 {
-                            let idx = m.scroll_row + rel_row as usize;
-                            if idx < m.rows.len() && !matches!(m.rows[idx].cmd, MenuCommand::Separator) {
-                                Some(idx)
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        };
-                        if m.hovered_idx != new_hover {
-                            m.hovered_idx = new_hover;
-                            if let Some(ref gpu) = self.gpu {
-                                m.redraw(&mut self.text_renderer, gpu);
-                            }
-                        }
-                    }
-                }
+                let scale = self.window_scale_factor(window_id);
+                let local = position.to_logical::<f64>(scale);
+                self.handle_pointer_move(window_id, (local.x, local.y));
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let dy = match delta {
                     MouseScrollDelta::LineDelta(_, y) => y as f64 * 26.0,
                     MouseScrollDelta::PixelDelta(p) => p.y,
                 };
-                if let Some(sb) = target_bal {
-                    let sp_name = self.speaker_name(sb);
-                    let mut need_repo = false;
-                    if let Some(b) = if sb == Scope::Sakura { self.sakura_balloon.as_mut() } else { self.kero_balloon.as_mut() } {
-                        b.scroll_px = (b.scroll_px - dy as f32).clamp(0.0, b.max_scroll_px);
-                        b.user_scrolled_up = b.max_scroll_px > 1.0 && (b.scroll_px + 4.0) < b.max_scroll_px;
-                        if let Some(ref gpu) = self.gpu {
-                            need_repo = b.redraw_content(
-                                &self.balloon_skin,
-                                &sp_name,
-                                false,
-                                &mut self.text_renderer,
-                                gpu,
-                            );
-                        }
-                    }
-                    if need_repo {
-                        self.reposition_balloon(sb);
-                    }
-                } else if is_menu {
-                    if let Some(ref mut m) = self.menu {
-                        let max_scroll = m.rows.len().saturating_sub(m.max_visible_rows);
-                        if max_scroll == 0 {
-                            m.scroll_row = 0;
-                            m.scroll_accum = 0.0;
-                        } else {
-                            m.scroll_accum += dy;
-                            let step = 18.0;
-                            let prev_row = m.scroll_row;
-                            while m.scroll_accum <= -step {
-                                m.scroll_accum += step;
-                                if m.scroll_row < max_scroll {
-                                    m.scroll_row += 1;
-                                } else {
-                                    m.scroll_accum = 0.0;
-                                    break;
-                                }
-                            }
-                            while m.scroll_accum >= step {
-                                m.scroll_accum -= step;
-                                if m.scroll_row > 0 {
-                                    m.scroll_row -= 1;
-                                } else {
-                                    m.scroll_accum = 0.0;
-                                    break;
-                                }
-                            }
-                            if m.scroll_row == 0 && m.scroll_accum > 0.0 {
-                                m.scroll_accum = 0.0;
-                            } else if m.scroll_row == max_scroll && m.scroll_accum < 0.0 {
-                                m.scroll_accum = 0.0;
-                            }
-                            if prev_row != m.scroll_row {
-                                if let Some(ref gpu) = self.gpu {
-                                    m.redraw(&mut self.text_renderer, gpu);
-                                }
-                            }
-                        }
-                    }
-                }
+                self.handle_scroll(window_id, dy);
             }
             WindowEvent::MouseInput { state, button, .. } => {
-                if let Some(sc) = target_char {
-                    match (button, state) {
-                        (MouseButton::Right, ElementState::Pressed) => {
-                            self.open_menu_near_cursor(sc);
-                        }
-                        (MouseButton::Left, ElementState::Pressed) => {
-                            self.hide_menu();
-                            let cw = if sc == Scope::Sakura { self.sakura.as_mut() } else { self.kero.as_mut() };
-                            if let Some(c) = cw {
-                                c.sync_pos_from_window();
-                                c.dragging = true;
-                                c.drag_moved = false;
-                                c.drag_start_win_pos = c.logical_pos;
-                                if let Mouse::Position { x, y } = Mouse::get_mouse_position() {
-                                    #[cfg(target_os = "macos")]
-                                    {
-                                        c.drag_start_cursor_global = (x as f64, y as f64);
-                                    }
-                                    #[cfg(not(target_os = "macos"))]
-                                    {
-                                        let scale = c.ws.window.scale_factor().max(1.0);
-                                        c.drag_start_cursor_global = (x as f64 / scale, y as f64 / scale);
-                                    }
-                                } else if c.ws.window.outer_position().is_err() {
-                                    let _ = c.ws.window.drag_window();
-                                }
-                            }
-                        }
-                        (MouseButton::Left, ElementState::Released) => {
-                            let mut open_chat = false;
-                            let mut touch_region = None;
-                            {
-                                let cw = if sc == Scope::Sakura { self.sakura.as_mut() } else { self.kero.as_mut() };
-                                if let Some(c) = cw {
-                                    let was_drag = c.drag_moved;
-                                    c.dragging = false;
-                                    c.drag_moved = false;
-                                    if !was_drag {
-                                        let now = Instant::now();
-                                        let is_dbl = c
-                                            .last_click_at
-                                            .is_some_and(|t| now.duration_since(t) <= Duration::from_millis(380));
-                                        c.last_click_at = if is_dbl { None } else { Some(now) };
-                                        if is_dbl {
-                                            if let Some((lx, ly)) = c.last_local_cursor {
-                                                let ix = (lx * c.display_scale).floor() as i32;
-                                                let iy = (ly * c.display_scale).floor() as i32;
-                                                let m = self.manifest.lock().expect("manifest mutex poisoned");
-                                                let col = c.base_bmp.as_ref().and_then(|bb| {
-                                                    m.hit_collision(
-                                                        c.surface_id,
-                                                        sc,
-                                                        bb,
-                                                        ix,
-                                                        iy,
-                                                    )
-                                                });
-                                                if let Some(col) = col {
-                                                    touch_region = Some(col.name);
-                                                } else if sc == Scope::Sakura {
-                                                    open_chat = true;
-                                                } else {
-                                                    touch_region = Some("Body".to_string());
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            if open_chat {
-                                self.open_communicate_near_sakura();
-                            } else if let Some(reg) = touch_region {
-                                match sc {
-                                    Scope::Sakura => {
-                                        if let Some(ref mut s) = self.sakura {
-                                            s.trigger_bounce(0.022);
-                                        }
-                                    }
-                                    Scope::Kero => {
-                                        if let Some(ref mut k) = self.kero {
-                                            k.trigger_bounce(0.022);
-                                        }
-                                    }
-                                }
-                                self.spawn_touch(sc, "double_click", reg);
-                            }
-                        }
-                        _ => {}
-                    }
-                } else if let Some(sb) = target_bal {
-                    if button == MouseButton::Left && state == ElementState::Pressed {
-                        let mut picked_choice: Option<(String, String)> = None;
-                        let mut should_ff = false;
-                        let mut should_hide = false;
-                        if let Some(b) = if sb == Scope::Sakura { self.sakura_balloon.as_mut() } else { self.kero_balloon.as_mut() } {
-                            if let Some(idx) = b.hovered_choice {
-                                if let Some(ch) = b.choices.get(idx) {
-                                    picked_choice = Some((ch.label.clone(), ch.choice_id.clone()));
-                                }
-                            } else if !self.playback.steps.is_empty() {
-                                should_ff = true;
-                            } else {
-                                should_hide = true;
-                                b.visible = false;
-                                b.ws.window.set_visible(false);
-                            }
-                        }
-                        if let Some((lbl, cid)) = picked_choice {
-                            self.playback.sakura_choices.clear();
-                            self.playback.kero_choices.clear();
-                            self.spawn_user_chat(format!("[선택지 선택] {lbl} (id={cid})"));
-                        } else if should_ff {
-                            let imm = self.playback.fast_forward();
-                            for act in imm {
-                                if act.kind == ActionKind::Surface {
-                                    if let Some(ref gpu) = self.gpu {
-                                        let mut m = self.manifest.lock().expect("manifest mutex poisoned");
-                                        if act.scope == Scope::Kero {
-                                            if let Some(ref mut k) = self.kero {
-                                                k.set_surface(&mut m, gpu, act.surface_id, false);
-                                            }
-                                        } else if let Some(ref mut s) = self.sakura {
-                                            s.set_surface(&mut m, gpu, act.surface_id, false);
-                                        }
-                                    }
-                                }
-                            }
-                            self.sync_balloons_to_playback();
-                        } else if should_hide {
-                            if sb == Scope::Sakura {
-                                self.playback.sakura_show = false;
-                            } else {
-                                self.playback.kero_show = false;
-                            }
-                        }
-                    }
-                } else if is_comm && button == MouseButton::Left && state == ElementState::Pressed {
-                    let mut submit_text: Option<String> = None;
-                    let mut closed_now = false;
-                    if let Some(ref mut cw) = self.communicate {
-                        let in_rect = |r: (f64, f64, f64, f64), p: (f64, f64)| -> bool {
-                            r.2 > r.0 && p.0 >= r.0 && p.0 <= r.2 && p.1 >= r.1 && p.1 <= r.3
-                        };
-                        if let Some(pos) = cw.last_local_cursor {
-                            if in_rect(cw.close_rect, pos) {
-                                cw.visible = false;
-                                cw.focused = false;
-                                cw.hovered_close = false;
-                                cw.hovered_send = false;
-                                cw.ime_preedit.clear();
-                                cw.ws.window.set_visible(false);
-                                closed_now = true;
-                            } else if in_rect(cw.send_rect, pos) {
-                                let combined = format!("{}{}", cw.text, cw.ime_preedit);
-                                let trimmed = combined.trim().to_string();
-                                if !trimmed.is_empty() {
-                                    submit_text = Some(trimmed);
-                                    cw.text.clear();
-                                    cw.ime_preedit.clear();
-                                    cw.visible = false;
-                                    cw.focused = false;
-                                    cw.hovered_close = false;
-                                    cw.hovered_send = false;
-                                    cw.ws.window.set_visible(false);
-                                    closed_now = true;
-                                }
-                            }
-                        }
-                        if !closed_now {
-                            cw.focused = true;
-                            cw.cursor_on = true;
-                            cw.last_blink = Instant::now();
-                            cw.ws.window.focus_window();
-                            if let Some(ref gpu) = self.gpu {
-                                cw.redraw(&self.balloon_skin, &mut self.text_renderer, gpu);
-                            }
-                        }
-                    }
-                    if let Some(msg) = submit_text {
-                        self.spawn_user_chat(msg);
-                    }
-                } else if is_menu && button == MouseButton::Left && state == ElementState::Released {
-                    let chosen = self.menu.as_ref().and_then(|m| {
-                        m.hovered_idx.and_then(|i| m.rows.get(i).map(|r| r.cmd.clone()))
-                    });
-                    self.hide_menu();
-                    if let Some(cmd) = chosen {
-                        self.execute_menu_command(event_loop, cmd);
-                    }
-                }
+                self.handle_mouse_button(event_loop, window_id, button, state);
             }
             WindowEvent::Ime(ime_ev) if is_comm => {
-                if let Some(ref mut cw) = self.communicate {
-                    cw.focused = true;
-                    cw.cursor_on = true;
-                    cw.last_blink = Instant::now();
-                    match ime_ev {
-                        Ime::Enabled => {}
-                        Ime::Preedit(s, _) => {
-                            cw.ime_preedit = s;
-                        }
-                        Ime::Commit(s) => {
-                            cw.ime_preedit.clear();
-                            cw.text.push_str(&s);
-                        }
-                        Ime::Disabled => {
-                            cw.ime_preedit.clear();
-                        }
-                    }
-                    if let Some(ref gpu) = self.gpu {
-                        cw.redraw(&self.balloon_skin, &mut self.text_renderer, gpu);
-                    }
-                }
+                self.handle_ime_event(window_id, ime_ev);
             }
             WindowEvent::KeyboardInput {
                 event:
@@ -5068,70 +5498,7 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                     },
                 ..
             } if is_comm => {
-                let mut submit_text: Option<String> = None;
-                if let Some(ref mut cw) = self.communicate {
-                    cw.focused = true;
-                    cw.cursor_on = true;
-                    cw.last_blink = Instant::now();
-                    let cmd_or_ctrl = self.modifiers.super_key() || self.modifiers.control_key();
-                    match &logical_key {
-                        Key::Named(NamedKey::Escape) => {
-                            cw.visible = false;
-                            cw.focused = false;
-                            cw.hovered_close = false;
-                            cw.hovered_send = false;
-                            cw.ime_preedit.clear();
-                            cw.ws.window.set_visible(false);
-                        }
-                        Key::Named(NamedKey::Enter) => {
-                            if cw.ime_preedit.is_empty() {
-                                submit_text = Some(cw.text.clone());
-                                cw.text.clear();
-                                cw.visible = false;
-                                cw.focused = false;
-                                cw.hovered_close = false;
-                                cw.hovered_send = false;
-                                cw.ws.window.set_visible(false);
-                            }
-                        }
-                        Key::Named(NamedKey::Backspace) => {
-                            if cw.ime_preedit.is_empty() {
-                                cw.text.pop();
-                            }
-                        }
-                        Key::Character(s) if cmd_or_ctrl && s.eq_ignore_ascii_case("v") => {
-                            if let Ok(mut cb) = Clipboard::new() {
-                                if let Ok(pasted) = cb.get_text() {
-                                    cw.text.push_str(&pasted.replace(['\r', '\n'], " "));
-                                }
-                            }
-                        }
-                        Key::Named(NamedKey::Space) => {
-                            if cw.ime_preedit.is_empty() {
-                                cw.text.push(' ');
-                            }
-                        }
-                        _ => {
-                            if !cmd_or_ctrl && cw.ime_preedit.is_empty() {
-                                if let Some(t) = text {
-                                    for ch in t.chars() {
-                                        if !ch.is_control() {
-                                            cw.text.push(ch);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if cw.visible {
-                        if let Some(ref gpu) = self.gpu {
-                            cw.redraw(&self.balloon_skin, &mut self.text_renderer, gpu);
-                        }
-                    }
-                }
-                if let Some(msg) = submit_text {
-                    self.spawn_user_chat(msg);
-                }
+                self.handle_communicate_key(&logical_key, text.as_deref());
             }
             _ => {}
         }
