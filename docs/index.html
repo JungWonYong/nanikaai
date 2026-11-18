@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>何か藍 (NanikaAi) — 100% Safe Rust AI Desktop Mascot</title>
+  <style>
+    :root {
+      --bg: #0b1222;
+      --bg-card: rgba(20, 30, 52, 0.86);
+      --border: rgba(96, 165, 250, 0.28);
+      --text: #eef4ff;
+      --muted: #9fb4d9;
+      --accent: #4f8cff;
+      --accent-soft: rgba(79, 140, 255, 0.16);
+      --pill: #1e2e4f;
+      --ok: #38bdf8;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Apple SD Gothic Neo", "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at 20% 10%, rgba(79, 140, 255, 0.22), transparent 46%),
+        radial-gradient(circle at 82% 20%, rgba(56, 189, 248, 0.14), transparent 44%),
+        var(--bg);
+      color: var(--text);
+      line-height: 1.65;
+    }
+    a { color: #7dd3fc; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .wrap { max-width: 1020px; margin: 0 auto; padding: 28px 18px 64px; }
+    .topbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 1.25rem; }
+    .badge {
+      display: inline-block;
+      padding: 3px 10px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      border: 1px solid var(--border);
+      color: #93c5fd;
+      font-size: 0.78rem;
+      font-weight: 600;
+    }
+    .lang-tabs { display: flex; gap: 8px; }
+    .lang-btn {
+      background: var(--pill);
+      color: var(--muted);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 6px 14px;
+      font-size: 0.86rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .lang-btn.active {
+      background: var(--accent);
+      color: #ffffff;
+      border-color: transparent;
+    }
+    .hero {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 22px;
+      box-shadow: 0 22px 54px rgba(0, 0, 0, 0.45);
+      margin-bottom: 26px;
+    }
+    .hero h1 { margin: 0 0 8px; font-size: clamp(1.4rem, 2.8vw, 2.05rem); }
+    .hero p { margin: 0 0 14px; color: var(--muted); }
+    .sound-hint {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+      padding: 6px 12px;
+      border-radius: 10px;
+      background: rgba(56, 189, 248, 0.14);
+      border: 1px solid rgba(56, 189, 248, 0.34);
+      color: #bae6fd;
+      font-size: 0.86rem;
+      font-weight: 600;
+    }
+    .video-box {
+      position: relative;
+      border-radius: 14px;
+      overflow: hidden;
+      border: 1px solid rgba(147, 197, 253, 0.28);
+      background: #070c18;
+    }
+    video { width: 100%; height: auto; display: block; }
+    .video-actions {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-top: 12px;
+      font-size: 0.88rem;
+      color: var(--muted);
+    }
+    .btn {
+      display: inline-block;
+      padding: 9px 16px;
+      border-radius: 10px;
+      background: var(--accent);
+      color: #fff;
+      font-weight: 700;
+      font-size: 0.9rem;
+    }
+    .btn.secondary {
+      background: var(--pill);
+      border: 1px solid var(--border);
+      color: var(--text);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(225px, 1fr));
+      gap: 14px;
+      margin-bottom: 24px;
+    }
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 16px;
+    }
+    .card h3 { margin: 0 0 6px; font-size: 1rem; color: #bfdbfe; }
+    .card p { margin: 0; font-size: 0.9rem; color: var(--muted); }
+    .panel {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 18px 20px;
+      margin-bottom: 20px;
+    }
+    .panel h2 { margin: 0 0 10px; font-size: 1.15rem; }
+    pre {
+      margin: 10px 0 0;
+      padding: 12px 14px;
+      border-radius: 10px;
+      background: #070d1c;
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      overflow-x: auto;
+      font-size: 0.84rem;
+      color: #dbeafe;
+    }
+    .lang-pane { display: none; }
+    .lang-pane.active { display: block; }
+    footer {
+      margin-top: 28px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 0.84rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="topbar">
+      <div class="brand">
+        <span>✦ 何か藍 — NanikaAi</span>
+        <span class="badge">v0.1.10 · 100% Safe Rust</span>
+      </div>
+      <div class="lang-tabs" role="tablist">
+        <button class="lang-btn active" data-lang="ja">日本語</button>
+        <button class="lang-btn" data-lang="ko">한국어</button>
+        <button class="lang-btn" data-lang="en">English</button>
+      </div>
+    </div>
+
+    <section class="hero">
+      <div class="lang-pane active" data-lang="ja">
+        <h1>24+7層 Live2D モーション &amp; ヘッドレス音声会話デモ</h1>
+        <p>さくら（24パーツ）とうにゅう（7パーツ + 40%半透明サングラス）の滑らかな多層揺れ・リップシンクと、右クリックメニュー最上段「声色選択」によるリアルタイム音声切替（AivisSpeech Engine）を紹介する公式デモ動画である。</p>
+        <div class="sound-hint">▶ 再生して音声をオンにすると、まお → らせつん → コハク の実際の掛け合い音声が再生されます</div>
+      </div>
+      <div class="lang-pane" data-lang="ko">
+        <h1>24+7 레이어 Live2D 모션 &amp; 헤드리스 음성 발화 소개 동영상</h1>
+        <p>사쿠라(24파츠)와 우뉴(7파츠 + 40% 반투명 선글라스)의 부드러운 다층 스웨이·립싱크 및 우클릭 메뉴 최상단 「声色選択」 실시간 목소리 전환(AivisSpeech Engine)을 시연하는 공식 소개 영상이다.</p>
+        <div class="sound-hint">▶ 재생 버튼으로 음소거를 해제하면 まお → らせつん → コハク 실제 캐릭터 음성이 재생됩니다</div>
+      </div>
+      <div class="lang-pane" data-lang="en">
+        <h1>24+7 Layer Live2D Motion &amp; Headless Voice Demo</h1>
+        <p>Watch Sakura (24 parts) and Unyu (7 parts + 40%-translucent sunglasses) animate with smooth multi-layer Live2D sway, real-time lip-sync, and live right-click voice switching powered headlessly by AivisSpeech Engine.</p>
+        <div class="sound-hint">▶ Click Play &amp; unmute to hear まお → らせつん → コハク character voices synthesized by AivisSpeech</div>
+      </div>
+
+      <div class="video-box">
+        <video controls playsinline preload="metadata" poster="media/nanikaai_intro_poster.png">
+          <source src="media/nanikaai_intro_demo.mp4" type="video/mp4" />
+          <img src="media/nanikaai_intro_preview.gif" alt="NanikaAi Live2D Motion and Voice Demo" />
+        </video>
+      </div>
+
+      <div class="video-actions">
+        <span>MP4 (1280×720 H.264 + AAC Stereo 44.1kHz)</span>
+        <div style="display:flex; gap:10px; flex-wrap:wrap;">
+          <a class="btn" href="https://github.com/JungWonYong/nanikaai/releases/latest">GitHub Releases</a>
+          <a class="btn secondary" href="media/nanikaai_intro_demo.mp4" download>MP4 Download</a>
+          <a class="btn secondary" href="https://github.com/JungWonYong/nanikaai">GitHub Repository</a>
+        </div>
+      </div>
+    </section>
+
+    <div class="lang-pane active" data-lang="ja">
+      <div class="grid">
+        <div class="card">
+          <h3>24+7 外付け Live2D リグ</h3>
+          <p>既存 `.nar` を改変せず、部位別 PNG + `live2d.json` でC1頭部視差・多層髪揺れ・衣装連動・無欠損表情を GPU 描画。</p>
+        </div>
+        <div class="card">
+          <h3>右クリック最上段で声色選択</h3>
+          <p>AivisSpeech / VOICEVOX を手動起動なしで自動連携し、メニュー最上段から `\0` / `\1` それぞれの声色や AivisHub モデルを追加・保存。</p>
+        </div>
+        <div class="card">
+          <h3>100% Safe Rust</h3>
+          <p>`#![forbid(unsafe_code)]` 準拠の単一ネイティブバイナリ（macOS / Windows / Linux）。コード `MIT` ＋ 既定スキン `CC0-1.0`。</p>
+        </div>
+        <div class="card">
+          <h3>マルチ AI &amp; SSTP/HTTP</h3>
+          <p>ローカル Ollama・Gemini・Claude・ChatGPT 接続に加え、HTTP (`:9821`) と `SSTP/1.4` (`:9801`) を同時提供。</p>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>クイックスタート（AI エージェント自動導入）</h2>
+        <p style="margin:0;color:var(--muted);">`agy` または `claude` CLI でそのまま最新リリースの導入から Ollama 接続まで実行可能。</p>
+        <pre><code>agy -i "https://github.com/JungWonYong/nanikaai の最新リリース実行ファイルとローカルOllamaをこのPCに導入・起動し、スペックに合う無料モデル(gemma4/llama3系)を接続して動作確認まで完了して。"</code></pre>
+      </div>
+    </div>
+
+    <div class="lang-pane" data-lang="ko">
+      <div class="grid">
+        <div class="card">
+          <h3>24+7 외장 Live2D 멀티파츠</h3>
+          <p>기존 `.nar` 수정 없이 `live2d.json` + 부위별 PNG로 목/두부 시차, 다층 머리카락, 리본·스커트 스웨이, 무결손 표정을 GPU 합성.</p>
+        </div>
+        <div class="card">
+          <h3>우클릭 최상단 목소리 선택</h3>
+          <p>AivisSpeech / VOICEVOX를 수동 실행 없이 자동 연동하며, 우클릭 첫 화면에서 `\0`·`\1` 화자 선택과 AivisHub 모델 추가 지원.</p>
+        </div>
+        <div class="card">
+          <h3>100% Safe Rust 아키텍처</h3>
+          <p>`#![forbid(unsafe_code)]` 단일 네이티브 바이너리(macOS / Windows / Linux). 소스 `MIT` + 기본 스킨 `CC0-1.0` 완전 분리.</p>
+        </div>
+        <div class="card">
+          <h3>멀티 AI &amp; HTTP/SSTP API</h3>
+          <p>Ollama·Gemini·Claude·ChatGPT 연결 및 HTTP JSON(`:9821`)과 클래식 `SSTP/1.4`(`:9801`) 동시 지원.</p>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>빠른 설치 (AI 에이전트 1줄 자동 세팅)</h2>
+        <p style="margin:0;color:var(--muted);">터미널에서 `agy` 또는 `claude` CLI로 최신 릴리스 다운로드와 Ollama 연동을 일괄 실행한다.</p>
+        <pre><code>agy -i "https://github.com/JungWonYong/nanikaai 의 최신 릴리스 실행 파일과 로컬 Ollama를 내 PC에 설치·실행하고, 내 PC 사양에 맞는 무료 모델(gemma4/llama3 계열)을 연결해 동작 확인까지 끝내줘."</code></pre>
+      </div>
+    </div>
+
+    <div class="lang-pane" data-lang="en">
+      <div class="grid">
+        <div class="card">
+          <h3>24+7 External Sidecar Live2D</h3>
+          <p>Drives anatomical C1 head joints, layered hair/coat sway, unbroken expressions, and 40%-translucent glasses via GPU multipass.</p>
+        </div>
+        <div class="card">
+          <h3>Instant Top-of-Menu Voice Picker</h3>
+          <p>Zero-manual-launch headless AivisSpeech / VOICEVOX engine with per-shell `\0`/`\1` voice selection right at the top of the right-click menu.</p>
+        </div>
+        <div class="card">
+          <h3>100% Safe Rust</h3>
+          <p>`#![forbid(unsafe_code)]` single native binary for macOS, Windows, and Linux with clean `MIT` code and `CC0-1.0` skins.</p>
+        </div>
+        <div class="card">
+          <h3>Multi-AI &amp; Dual API</h3>
+          <p>Connects Ollama, Gemini, Claude, and ChatGPT with built-in HTTP JSON (`:9821`) and classic `SSTP/1.4` (`:9801`).</p>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>Quick Start via AI Agent</h2>
+        <pre><code>agy -i "Install and launch the latest NanikaAi release from https://github.com/JungWonYong/nanikaai with local Ollama, pull a compatible model, and verify it speaks."</code></pre>
+      </div>
+    </div>
+
+    <footer>
+      何か藍 (NanikaAi) · MIT License &amp; CC0-1.0 Default Skins · Zero External CDN
+    </footer>
+  </div>
+
+  <script>
+    const btns = document.querySelectorAll(".lang-btn");
+    const panes = document.querySelectorAll(".lang-pane");
+    btns.forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const lang = btn.dataset.lang;
+        btns.forEach((b) => b.classList.toggle("active", b.dataset.lang === lang));
+        panes.forEach((p) => p.classList.toggle("active", p.dataset.lang === lang));
+      });
+    });
+  </script>
+</body>
+</html>

@@ -1301,11 +1301,16 @@ fn spec_l2d_01_02_external_sidecar_parts_and_path_safety() {
     let mut unyu_rig =
         discover_and_load_rig("neo_default", &shell_dir, &user_dir, &assets, Scope::Kero)
             .expect("bundled neo_default Unyu sidecar rig");
-    assert!(sak_rig.parts.len() >= 18, "expected >=18 anatomical Sakura parts");
+    assert!(
+        sak_rig.parts.len() >= 18 && sak_rig.parts.len() <= 32,
+        "expected 18..=32 anatomical Sakura parts (got {})",
+        sak_rig.parts.len()
+    );
     assert!(unyu_rig.parts.len() >= 6, "expected >=6 Unyu parts");
     for required_id in [
         "neck",
         "head_base",
+        "crown_hair",
         "face_features",
         "hair_bangs_center",
         "hair_wing_l",
@@ -1313,6 +1318,7 @@ fn spec_l2d_01_02_external_sidecar_parts_and_path_safety() {
         "coat_flap_l",
         "coat_flap_r",
         "skirt",
+        "forearm_front",
         "arm_r",
         "chest_bow",
         "waist_bow",
@@ -1341,7 +1347,35 @@ fn spec_l2d_01_02_external_sidecar_parts_and_path_safety() {
         .count_opaque_pixels();
     assert_eq!(star_plain_px, 0, "star_hairpin must be empty when bindgroup50 is off");
 
-    // Regression guard: chest_bow interior & buttons & outfit boundaries must stay crisp and opaque without white halo bleed
+    // Regression guard: closed-contour bows, buttons, Sato+Livewire hair cuts, neck, and full-body rest composite must stay crisp
+    let ahoge_bmp =
+        load_ukagaka_rgba(&assets.join("live2d/neo_default/parts/sakura_ahoge.png"), None)
+            .expect("sakura_ahoge.png must load");
+    let mut max_ahoge_crown = 0u8;
+    for y in 120..=160u32 {
+        for x in 325..=400u32 {
+            let idx = ((y * ahoge_bmp.width + x) * 4) as usize;
+            max_ahoge_crown = max_ahoge_crown.max(ahoge_bmp.data[idx + 3]);
+        }
+    }
+    assert_eq!(
+        max_ahoge_crown, 0,
+        "sakura_ahoge must stay transparent in right crown dome [325..400, 120..160] (got alpha={max_ahoge_crown})"
+    );
+    let neck_bmp =
+        load_ukagaka_rgba(&assets.join("live2d/neo_default/parts/sakura_neck.png"), None)
+            .expect("sakura_neck.png must load");
+    let mut max_neck_left_chin = 0u8;
+    for y in 360..=390u32 {
+        for x in 290..=318u32 {
+            let idx = ((y * neck_bmp.width + x) * 4) as usize;
+            max_neck_left_chin = max_neck_left_chin.max(neck_bmp.data[idx + 3]);
+        }
+    }
+    assert_eq!(
+        max_neck_left_chin, 0,
+        "sakura_neck must stay transparent in left under-chin shadow [290..318, 360..390] (got alpha={max_neck_left_chin})"
+    );
     let bow_bmp =
         load_ukagaka_rgba(&assets.join("live2d/neo_default/parts/sakura_chest_bow.png"), None)
             .expect("sakura_chest_bow.png must load");
@@ -1351,6 +1385,26 @@ fn spec_l2d_01_02_external_sidecar_parts_and_path_safety() {
         &[135, 142, 210, 255],
         "chest_bow highlight pixel (309,508) must match opaque surface0 RGB"
     );
+    let bow_finger_idx = ((476 * bow_bmp.width + 272) * 4) as usize;
+    assert_eq!(
+        bow_bmp.data[bow_finger_idx + 3],
+        255,
+        "chest_bow under raised-hand grip (272,476) must remain completed and opaque (alpha=255)"
+    );
+    let skirt_bmp =
+        load_ukagaka_rgba(&assets.join("live2d/neo_default/parts/sakura_skirt.png"), None)
+            .expect("sakura_skirt.png must load");
+    let mut min_skirt_waist_alpha = 255u8;
+    for y in 685..=725u32 {
+        for x in 305..=345u32 {
+            let idx = ((y * skirt_bmp.width + x) * 4) as usize;
+            min_skirt_waist_alpha = min_skirt_waist_alpha.min(skirt_bmp.data[idx + 3]);
+        }
+    }
+    assert_eq!(
+        min_skirt_waist_alpha, 255,
+        "sakura_skirt under coat-slit overlap [305..345, 685..725] must have no U-shaped cutout (got min alpha={min_skirt_waist_alpha})"
+    );
     sak_rig.reset();
     let sak_rest = sak_rig.render_cpu_rgba();
     let btn_idx = ((668 * sak_rest.width + 328) * 4) as usize;
@@ -1359,9 +1413,9 @@ fn spec_l2d_01_02_external_sidecar_parts_and_path_safety() {
         255,
         "lower-right coat button (328,668) must remain opaque (alpha=255)"
     );
-    let mut bad_outfit_px = 0usize;
-    for y in 400..890u32 {
-        for x in 140..520u32 {
+    let mut bad_full_px = 0usize;
+    for y in 0..sak_rest.height {
+        for x in 0..sak_rest.width {
             let idx = ((y * sak_rest.width + x) * 4) as usize;
             let ra = sak_rest.data[idx + 3] as f32 / 255.0;
             let pa = sak_plain.data[idx + 3] as f32 / 255.0;
@@ -1372,13 +1426,13 @@ fn spec_l2d_01_02_external_sidecar_parts_and_path_safety() {
                 max_d = max_d.max((rp - pp).abs());
             }
             if max_d > 28.0 {
-                bad_outfit_px += 1;
+                bad_full_px += 1;
             }
         }
     }
     assert!(
-        bad_outfit_px < 250,
-        "rest-pose Live2D outfit premultiplied diff > 28 must stay < 250 px vs surface0.png (got {bad_outfit_px})"
+        bad_full_px < 200,
+        "rest-pose full-body [0..660, 0..1350] Live2D premultiplied diff > 28 must stay < 200 px vs surface0.png (got {bad_full_px})"
     );
 
     let sak_ovs = manifest.collect_bind_overlays(0, &[50]);

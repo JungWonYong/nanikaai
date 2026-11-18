@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Generate anatomical CC0-1.0 multi-layer Live2D part PNGs and sidecar live2d.json for neo_default.
+"""Generate complete unoccluded CC0-1.0 Live2D part PNGs and live2d.json for neo_default.
 
-Uses strict Neumann-boundary Laplace diffusion (preventing adjacent white/outline bleed)
-to separate Sakura (\0) into anatomically articulated joints (neck, C1 skull head,
-floating facial features, multi-layer bangs/curls/back hair, swinging coat flaps/collar/arm,
-and redesigned cute frilly ribbon socks + feminine Mary Jane dress shoes) and Unyu (\1) into
-unbroken expression bases (`surface_overrides`), flapping paws, and crisp 40%-translucent
-sunglasses floating independently on top.
+Combines Visible-Pixel Lock (preserving exact surface0.png silhouettes & line-art)
+with Occluder-Bounded Amodal Completion from aligned See-Through & clean repair plates
+(`assets/live2d/neo_default/plates/*.png`) so every separated layer (`head_base`,
+`crown_hair`, `hair_back_l/r`, `neck`, `upper_torso`, `forearm_front`, `chest_bow`,
+`coat_flap_l/r`, `skirt`, `leg_l/r`, `arm_r`) is a complete closed silhouette without
+cutouts, missing bites, or leftover foreground shadows.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import argparse
 import json
 from pathlib import Path
 
+import cv2
 import numpy as np
 from PIL import Image, ImageDraw
 from scipy.ndimage import (
@@ -25,11 +26,14 @@ from scipy.ndimage import (
     gaussian_filter,
     label,
 )
+from skimage.filters import sato
+from skimage.graph import route_through_array
 
 ROOT = Path(__file__).resolve().parent.parent
 SHELL_DIR = ROOT / "assets" / "shells" / "neo_default"
 OUT_DIR = ROOT / "assets" / "live2d" / "neo_default"
 PARTS_DIR = OUT_DIR / "parts"
+PLATES_DIR = OUT_DIR / "plates"
 
 CC0_NOTICE = """\
 CC0 1.0 Universal (Public Domain Dedication)
@@ -93,6 +97,56 @@ def diffuse_from_known(
     return np.clip(np.round(work), 0, 255).astype(np.uint8)
 
 
+def match_rgb_to_ref(
+    plate_rgb: np.ndarray,
+    ref_rgb: np.ndarray,
+    anchor_mask: np.ndarray,
+) -> np.ndarray:
+    """Match channel mean & scale of a generated plate to `ref_rgb` over shared visible anchors."""
+    if int(anchor_mask.sum()) < 200:
+        return plate_rgb
+    p_vals = plate_rgb[anchor_mask].astype(np.float32)
+    r_vals = ref_rgb[anchor_mask].astype(np.float32)
+    out = plate_rgb.astype(np.float32).copy()
+    for c in range(3):
+        pm, ps = float(p_vals[:, c].mean()), max(float(p_vals[:, c].std()), 1.0)
+        rm, rs = float(r_vals[:, c].mean()), max(float(r_vals[:, c].std()), 1.0)
+        gain = np.clip(rs / ps, 0.78, 1.28)
+        out[:, :, c] = (out[:, :, c] - pm) * gain + rm
+    return np.clip(np.round(out), 0, 255).astype(np.uint8)
+
+
+def decontaminate_outer_aa(
+    rgba: np.ndarray,
+    solid_threshold: int = 230,
+    scope_mask: np.ndarray | None = None,
+) -> np.ndarray:
+    """Strip bright white/sky background fringe strictly along outer cuts; skip interior fades."""
+    if scope_mask is not None:
+        return rgba.copy()
+    out = rgba.copy()
+    a = out[:, :, 3]
+    solid = a >= solid_threshold
+    edge = (a > 0) & (a < solid_threshold)
+    if scope_mask is not None:
+        edge &= scope_mask
+    if not np.any(solid) or not np.any(edge):
+        return out
+    _, (ni, nj) = distance_transform_edt(~solid, return_indices=True)
+    luma = (
+        0.299 * out[:, :, 0].astype(np.float32)
+        + 0.587 * out[:, :, 1].astype(np.float32)
+        + 0.114 * out[:, :, 2].astype(np.float32)
+    )
+    halo = edge & (luma > 185.0)
+    for c in range(3):
+        nearest_c = out[:, :, c][ni, nj].astype(np.float32)
+        orig_c = out[:, :, c].astype(np.float32)
+        blended = np.clip(np.round(0.25 * orig_c + 0.75 * nearest_c), 0, 255).astype(np.uint8)
+        out[:, :, c][halo] = blended[halo]
+    return out
+
+
 def x_grid(h: int, w: int) -> np.ndarray:
     return np.broadcast_to(np.arange(w, dtype=np.int32)[None, :], (h, w))
 
@@ -150,490 +204,810 @@ def alpha_composite_np(dst: np.ndarray, src: np.ndarray) -> np.ndarray:
     return res
 
 
+def build_strand_seam_cost(s0: np.ndarray, is_skin: np.ndarray) -> np.ndarray:
+    """Build Sato black-ridge + luminance cost map so Livewire cuts hug dark ink hair creases."""
+    h, w = s0.shape[:2]
+    yg = y_grid(h, w)
+    rgb_f = s0[:, :, :3].astype(np.float32)
+    r_f, g_f, b_f = rgb_f[:, :, 0], rgb_f[:, :, 1], rgb_f[:, :, 2]
+    opaque = s0[:, :, 3] > 16
+    luma = 0.299 * r_f + 0.587 * g_f + 0.114 * b_f
+    is_hi = opaque & (yg <= 265) & (luma > 202) & (b_f > r_f + 5.0)
+    ridge = sato(luma / 255.0, sigmas=[1.0, 1.8], black_ridges=True)
+    ridge = ridge / max(float(ridge.max()), 1e-6)
+    return (
+        0.04
+        + 1.8 * np.clip((luma - 85.0) / 115.0, 0.0, 1.5)
+        + 2.2 * (1.0 - np.clip(ridge * 3.5, 0.0, 1.0))
+        + 80.0 * is_hi.astype(np.float32)
+        + 120.0 * is_skin.astype(np.float32)
+        + 40.0 * (~opaque).astype(np.float32)
+    )
+
+
+def trace_strand_seam(
+    seam_cost: np.ndarray,
+    waypoints: list[tuple[int, int]],
+    pad: int = 12,
+    smooth_win: int = 5,
+) -> list[tuple[float, float]]:
+    """Trace an 8-connected chord-guided smooth curve along drawn dark hair strand valleys."""
+    h, w = seam_cost.shape
+    pts: list[tuple[float, float]] = []
+    for (x0, y0), (x1, y1) in zip(waypoints[:-1], waypoints[1:]):
+        ry0, ry1 = max(0, min(y0, y1) - pad), min(h, max(y0, y1) + pad + 1)
+        rx0, rx1 = max(0, min(x0, x1) - pad), min(w, max(x0, x1) + pad + 1)
+        sub_c = seam_cost[ry0:ry1, rx0:rx1].copy()
+        yy, xx = np.mgrid[ry0:ry1, rx0:rx1].astype(np.float32)
+        dx, dy = float(x1 - x0), float(y1 - y0)
+        seg_len2 = max(dx * dx + dy * dy, 1.0)
+        t = np.clip(((xx - x0) * dx + (yy - y0) * dy) / seg_len2, 0.0, 1.0)
+        dist = np.hypot(xx - (x0 + t * dx), yy - (y0 + t * dy))
+        sub_c = sub_c + 0.18 * dist
+        path, _ = route_through_array(
+            sub_c,
+            (y0 - ry0, x0 - rx0),
+            (y1 - ry0, x1 - rx0),
+            fully_connected=True,
+            geometric=True,
+        )
+        seg = [(float(px + rx0), float(py + ry0)) for py, px in path]
+        if pts:
+            seg = seg[1:]
+        pts.extend(seg)
+    if smooth_win >= 3 and len(pts) > smooth_win * 2:
+        arr = np.array(pts, dtype=np.float32)
+        k = smooth_win // 2
+        sm = arr.copy()
+        for i in range(k, len(arr) - k):
+            sm[i] = arr[i - k : i + k + 1].mean(axis=0)
+        pts = [(float(x), float(y)) for x, y in sm]
+    return pts
+
+
 def build_sakura_parts() -> list[dict]:
     s0 = load_rgba(SHELL_DIR / "surface0.png")
     h, w = s0.shape[:2]
     alpha = s0[:, :, 3]
     opaque = alpha > 16
+    solid_inner = binary_erosion(opaque, iterations=1)
+    solid_inner2 = binary_erosion(opaque, iterations=2)
+    solid_full = binary_erosion(alpha >= 245, iterations=1)
     rgb = s0[:, :, :3].astype(np.int16)
     r, g, b = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
     xg, yg = x_grid(h, w), y_grid(h, w)
 
-    # Interior color predicates (strict separation so coat white, dark line-art, and bows stay isolated)
-    is_pure_hair = opaque & (b >= r + 22) & (b >= 155) & (r >= 92) & (g >= 115) & (yg <= 415)
+    # Load offline aligned completion plates (generated once from See-Through + image-generator)
+    p_back_hair = load_rgba(PLATES_DIR / "plate_back_hair.png")
+    st_back_hair = load_rgba(PLATES_DIR / "st_back_hair.png")
+    p_bald_head = load_rgba(PLATES_DIR / "plate_bald_head.png")
+    st_face = load_rgba(PLATES_DIR / "st_face.png")
+    st_ear_l = load_rgba(PLATES_DIR / "st_ear_l.png")
+    st_ear_r = load_rgba(PLATES_DIR / "st_ear_r.png")
+    st_neck = load_rgba(PLATES_DIR / "st_neck.png")
+    p_coat_free = load_rgba(PLATES_DIR / "plate_coat_bow_free.png")
+    p_torso_fit = load_rgba(PLATES_DIR / "plate_torso_bodice.png")
+    st_topwear = load_rgba(PLATES_DIR / "st_topwear.png")
+    p_skirt_full = load_rgba(PLATES_DIR / "plate_skirt_full.png")
+    st_arm_r = load_rgba(PLATES_DIR / "st_arm_r.png")
+    st_forearm = load_rgba(PLATES_DIR / "st_forearm_front.png")
+    st_legwear = load_rgba(PLATES_DIR / "st_legwear.png")
+
+    # Interior color predicates
+    is_pure_hair = opaque & (b >= r + 22) & (b >= 155) & (r >= 88) & (g >= 95) & (yg <= 415)
     is_hair_like = opaque & (yg <= 415) & ((b > r + 10) | ((r < 118) & (b < 148)))
     is_pure_navy_skirt = opaque & (b >= r + 24) & (b <= 218) & (r >= 76) & (r <= 160) & (g >= 78) & (g <= 170) & (yg >= 662)
     is_yellow_ribbon = opaque & (r >= 195) & (g >= 188) & (b >= 105) & (b <= 195) & (r - b >= 28)
-    # Strict saturated periwinkle bow predicate (never matches white coat cool shading!)
-    is_purple_bow = opaque & (b >= r + 26) & (b - g >= 20) & (r <= 178) & (g <= 175) & (b <= 238)
     is_pure_white_coat = opaque & (r >= 224) & (g >= 226) & (b >= 232) & (b >= r - 2) & (b - r <= 24)
     is_skin = opaque & (r >= 208) & (g >= 160) & (r >= b + 12)
-    is_dark_line = opaque & (r < 110) & (g < 115) & (b < 155)
+    is_cyan_trim = opaque & (g >= 182) & (b >= 205) & (r <= 192) & ((g - r) >= 22)
+    is_dark_crisp = opaque & (r < 125) & (g < 130) & (b < 170)
 
-    # 1) Ahoge (z=80) strictly above crown dome arc
-    dome_cut_y = 123.5 + 0.0045 * ((xg - 318.0) ** 2)
-    ahoge_region = opaque & (yg <= dome_cut_y) & (xg >= 272) & (xg <= 388) & (yg >= 44)
-    save_rgba(extract_layer(s0, soft_weight(ahoge_region, 0.7)), PARTS_DIR / "sakura_ahoge.png")
+    seam_cost = build_strand_seam_cost(s0, is_skin)
 
-    # 2) Central forehead bang lock (z=69) hanging between eyebrows
-    bang_center_poly = poly_mask(
-        (h, w),
-        [
-            (286, 146),
-            (338, 146),
-            (346, 198),
-            (340, 248),
-            (329, 272),
-            (318, 281),
-            (296, 268),
-            (277, 246),
-            (274, 198),
-        ],
+    # ── 1) Ahoge (z=80) ─────────────────────────────────────────────────
+    ah_up = opaque.copy()
+    ah_up[123:, :] = False
+    lbl_a, _ = label(ah_up)
+    ah_cc = lbl_a == lbl_a[80, 305]
+    ah_stem_l = trace_strand_seam(seam_cost, [(300, 122), (308, 130), (316, 136)])
+    ah_stem_r = trace_strand_seam(seam_cost, [(316, 136), (318, 129), (314, 122)])
+    ah_stem_poly = poly_mask((h, w), ah_stem_l + ah_stem_r)
+    ah_mask = opaque & (ah_cc | (ah_stem_poly & solid_inner2 & (yg >= 123)))
+    ah_outer_allow = opaque & (yg < 123) & (xg <= 380)
+    save_rgba(extract_layer(s0, crisp_mask_weight(ah_mask, ah_outer_allow, 0.35)), PARTS_DIR / "sakura_ahoge.png")
+
+    # ── 2) Hair Bangs Center (z=69) & Wing L/R (z=66, 67) ───────────────
+    # Strictly curve-cut along drawn strand valleys from crown whorl (312,134) down to pointed tips!
+    whorl_fade = np.clip((np.hypot(xg.astype(np.float32) - 312.0, yg.astype(np.float32) - 133.0) - 3.0) / 7.0, 0.0, 1.0)
+    eye_lash_excl_r = ellipse_mask((h, w), 362.0, 278.0, 23.0, 32.0) | (opaque & (xg >= 380) & (xg <= 390) & (yg >= 274) & (yg <= 292) & (~is_pure_hair))
+
+    bc_l = trace_strand_seam(
+        seam_cost,
+        [(312, 134), (295, 150), (286, 172), (279, 195), (275, 218), (276, 238), (281, 254), (291, 270), (296, 272), (304, 270), (318, 281)],
+        pad=10,
     )
-    bang_center_mask = opaque & bang_center_poly & is_hair_like & (~is_skin)
-    top_fade_bc = np.clip((yg.astype(np.float32) - 146.0) / 20.0, 0.0, 1.0)
-    bang_center_w = np.clip(soft_weight(bang_center_mask, 0.7) * top_fade_bc, 0.0, 1.0)
-    save_rgba(extract_layer(s0, bang_center_w), PARTS_DIR / "sakura_hair_bangs_center.png")
+    bc_r = trace_strand_seam(
+        seam_cost,
+        [(318, 281), (328, 270), (334, 250), (338, 224), (346, 248), (358, 272), (355, 244), (348, 215), (341, 185), (330, 156), (312, 134)],
+        pad=10,
+    )
+    bang_center_poly = poly_mask((h, w), bc_l + bc_r)
+    bang_center_mask = binary_fill_holes(opaque & bang_center_poly & (~is_skin) & (~eye_lash_excl_r)) & bang_center_poly & (~is_skin) & (~eye_lash_excl_r) & solid_full
+    bang_center_w = crisp_mask_weight(bang_center_mask, solid_full & bang_center_poly & (~is_skin), 0.35) * whorl_fade
+    save_rgba(decontaminate_outer_aa(extract_layer(s0, bang_center_w), scope_mask=solid_inner), PARTS_DIR / "sakura_hair_bangs_center.png")
 
-    bang_excl_rgba = np.zeros_like(s0)
-    bang_excl_rgba[:, :, :3] = 255
-    bang_excl_rgba[:, :, 3] = np.clip(
-        np.round(soft_weight(binary_erosion(bang_center_mask, iterations=2), 0.7) * 255.0),
+    chin_pts = [
+        (262, 334), (264, 338), (268, 345), (272, 349),
+        (276, 353), (280, 356), (284, 358), (288, 361), (292, 363), (296, 365),
+        (300, 367), (304, 369), (308, 371), (312, 372), (316, 374), (320, 374),
+        (324, 373), (328, 372), (332, 370), (336, 369), (340, 368), (344, 366),
+        (348, 365), (352, 363), (356, 361), (360, 359), (364, 357), (368, 355),
+        (372, 352), (376, 349), (380, 344), (384, 329), (390, 320),
+    ]
+    chin_y = np.interp(xg, [p[0] for p in chin_pts], [p[1] for p in chin_pts])
+    cheek_jaw_zone = (xg >= 256) & (xg <= 390) & (yg >= 280) & (yg <= 375)
+    is_blue_hair_strict = is_pure_hair | ((b >= r + 14) & (r <= 195))
+    is_pale_cheek_skin_bleed = (r >= 192) & (g >= 165) & ((b - r) < 10)
+    left_jaw_ink_owner = (xg >= 275) & (xg <= 322) & (yg >= 352) & (yg <= chin_y + 0.5) & (r >= 125)
+    hair_cheek_clean = (~(cheek_jaw_zone & is_pale_cheek_skin_bleed)) & (~left_jaw_ink_owner)
+
+    def _clean_hair_cheek(rgba: np.ndarray) -> np.ndarray:
+        out = rgba.copy()
+        out[(out[:, :, 3] > 0) & cheek_jaw_zone & (~hair_cheek_clean)] = 0
+        return out
+
+    lw_seam = trace_strand_seam(
+        seam_cost,
+        [
+            (308, 134), (275, 156), (260, 178), (253, 202), (249, 228), (246, 258), (249, 286), (266, 314),
+            (245, 306), (232, 294), (221, 278), (214, 256), (212, 238), (218, 218),
+            (207, 242), (202, 265), (206, 285),
+        ],
+        pad=7,
+    )
+    wing_l_poly = poly_mask((h, w), lw_seam + [(185.0, 285.0), (185.0, 128.0), (308.0, 128.0)])
+    wing_l_outer = (yg >= 134) & (yg <= 286) & (xg <= 238)
+    wing_l_mask = binary_fill_holes(opaque & wing_l_poly & (~is_skin)) & wing_l_poly & (~is_skin) & hair_cheek_clean & (wing_l_outer | solid_full)
+    wing_l_w = np.where(hair_cheek_clean, crisp_mask_weight(wing_l_mask, opaque & wing_l_poly & hair_cheek_clean & (wing_l_outer | solid_full), 0.35), 0.0) * whorl_fade
+    save_rgba(_clean_hair_cheek(decontaminate_outer_aa(extract_layer(s0, wing_l_w), scope_mask=solid_inner)), PARTS_DIR / "sakura_hair_wing_l.png")
+
+    rw_seam = trace_strand_seam(
+        seam_cost,
+        [
+            (316, 134), (330, 156), (341, 185), (348, 215), (355, 244), (370, 258), (382, 272), (386, 286), (376, 304),
+            (392, 294), (401, 272), (404, 244), (398, 222),
+            (412, 244), (427, 268), (444, 280), (464, 276),
+            (452, 260), (465, 266), (482, 270), (497, 266),
+        ],
+        pad=7,
+    )
+    wing_r_poly = poly_mask((h, w), rw_seam + [(508.0, 266.0), (508.0, 128.0), (316.0, 128.0)])
+    wing_r_outer = (yg >= 134) & (yg <= 280) & (xg >= 425)
+    wing_r_mask = binary_fill_holes(opaque & wing_r_poly & (~is_skin) & (~eye_lash_excl_r)) & wing_r_poly & (~is_skin) & (~eye_lash_excl_r) & hair_cheek_clean & (wing_r_outer | solid_full)
+    wing_r_w = np.where(hair_cheek_clean, crisp_mask_weight(wing_r_mask, opaque & wing_r_poly & (~eye_lash_excl_r) & hair_cheek_clean & (wing_r_outer | solid_full), 0.35), 0.0) * whorl_fade
+    save_rgba(_clean_hair_cheek(decontaminate_outer_aa(extract_layer(s0, wing_r_w), scope_mask=solid_inner)), PARTS_DIR / "sakura_hair_wing_r.png")
+
+    # ── 3) Lower Wavy Curls L (z=63, over ears/head) & R (z=64) ─────────
+    # Separate inner eye/mouth inpaint guard (head_base) from wider cheek guard (curls) to avoid chin shading steps.
+    eye_and_cheek_guard = binary_dilation(
+        ((ellipse_mask((h, w), 278.0, 280.0, 22.0, 32.0) | ellipse_mask((h, w), 366.0, 279.0, 21.0, 32.0)) & (yg <= 300))
+        | poly_mask((h, w), [(263, 236), (382, 236), (366, 322), (342, 346), (298, 348), (268, 322)]),
+        iterations=1,
+    )
+    curl_cheek_guard = eye_and_cheek_guard | (
+        poly_mask((h, w), [(265, 240), (377, 240), (372, 312), (364, 348), (344, 362), (322, 370), (298, 360), (274, 342), (265, 316)])
+        & (~is_blue_hair_strict)
+        & (~((r < 92) & (g < 80) & (b < 148)))
+    )
+
+    real_collar_yellow = (yg >= 380) & ((xg <= 316) | (xg >= 375)) & is_yellow_ribbon & (~is_skin)
+    collar_guard = (
+        real_collar_yellow
+        | (opaque & (yg >= 382) & (r >= 185) & (g >= 180) & (r >= b + 12))
+        | (opaque & (yg >= 384) & is_pure_white_coat)
+        | is_skin
+        | curl_cheek_guard
+    )
+
+    cl_seam = trace_strand_seam(
+        seam_cost,
+        [(204, 262), (214, 212), (234, 186), (254, 206), (252, 248), (250, 290), (245, 310), (255, 330), (268, 350), (316, 374), (316, 398), (252, 404)],
+        pad=8,
+    )
+    curl_l_poly = poly_mask((h, w), cl_seam + [(188.0, 404.0), (188.0, 262.0)]) | (ellipse_mask((h, w), 236.0, 232.0, 28.0, 48.0) & solid_full)
+    wing_l_aa_owned = wing_l_mask & (~solid_full) & wing_l_outer
+    curl_l_mask = opaque & curl_l_poly & (~collar_guard) & hair_cheek_clean & (is_hair_like | is_dark_crisp | (xg <= 265)) & (~wing_l_aa_owned)
+    curl_l_outer = opaque & curl_l_poly & (~collar_guard) & hair_cheek_clean & (~wing_l_aa_owned) & solid_full
+    curl_l_w = np.where(hair_cheek_clean, crisp_mask_weight(curl_l_mask, curl_l_outer, 0.35), 0.0)
+    save_rgba(_clean_hair_cheek(decontaminate_outer_aa(extract_layer(s0, curl_l_w), scope_mask=solid_inner)), PARTS_DIR / "sakura_hair_curl_l.png")
+
+    cr_seam = trace_strand_seam(
+        seam_cost,
+        [(472, 256), (452, 212), (426, 188), (402, 208), (400, 248), (392, 285), (378, 306), (374, 326), (372, 346), (370, 370), (378, 388), (402, 402)],
+        pad=8,
+    )
+    curl_r_poly = poly_mask((h, w), cr_seam + [(515.0, 404.0), (515.0, 256.0)]) | (ellipse_mask((h, w), 426.0, 236.0, 32.0, 48.0) & solid_full)
+    eye_corner_r_guard = ellipse_mask((h, w), 365.0, 278.0, 26.0, 23.0) | ((xg >= 350) & (xg <= 390) & (yg >= 260) & (yg <= 300))
+    temple_r_sliver = (xg >= 383) & (xg <= 390) & (yg >= 260) & (yg <= 300) & is_pure_hair
+    wing_r_aa_owned = wing_r_mask & (~solid_full) & wing_r_outer
+    curl_r_mask = opaque & curl_r_poly & (~collar_guard) & hair_cheek_clean & (is_hair_like | is_dark_crisp | (xg >= 380)) & (~wing_r_aa_owned) & (~eye_corner_r_guard)
+    curl_r_outer = opaque & curl_r_poly & (~collar_guard) & hair_cheek_clean & (~wing_r_aa_owned) & solid_full & (~eye_corner_r_guard)
+    curl_r_w = np.where(hair_cheek_clean, crisp_mask_weight(curl_r_mask, curl_r_outer, 0.35), 0.0)
+    save_rgba(_clean_hair_cheek(decontaminate_outer_aa(extract_layer(s0, curl_r_w), scope_mask=solid_inner)), PARTS_DIR / "sakura_hair_curl_r.png")
+
+    # ── 4) Complete Round Bald Oval Head + Ears (`head_base`, z=58) ─────
+    # Solid lower-face jawline down to `chin_y` with full un-notched ears, unbroken dark chin ink, and zero halo/shadow step.
+    st_ears_bin = ((st_ear_l[:, :, 3] > 110) | (st_ear_r[:, :, 3] > 110))
+    st_head_alpha = np.maximum(st_face[:, :, 3], np.maximum(st_ear_l[:, :, 3], st_ear_r[:, :, 3]))
+    st_head_bin = binary_fill_holes(st_head_alpha > 110)
+    pa_head_bin = p_bald_head[:, :, 3] > 140
+    left_ear_jaw_bridge = poly_mask((h, w), [(250, 295), (266, 295), (266, 338), (255, 326)]) & solid_full & (curl_l_mask | st_head_bin)
+    below_chin_neck = (xg >= 262) & (xg <= 386) & (yg > chin_y + 0.5) & (~st_ears_bin) & (~left_ear_jaw_bridge)
+    jaw_solid_poly = poly_mask((h, w), [(258, 250), (388, 250)] + list(reversed(chin_pts))) & solid_full & (~below_chin_neck)
+    vis_face_skin = is_skin & (yg >= 250) & (yg <= chin_y + 0.5) & (xg >= 255) & (xg <= 395) & solid_full & (~below_chin_neck)
+    bald_dome_oval = ellipse_mask((h, w), 322.0, 242.0, 62.0, 82.0) & solid_full
+    head_shape_core = (st_head_bin | vis_face_skin | jaw_solid_poly | left_ear_jaw_bridge | (pa_head_bin & bald_dome_oval)) & (~below_chin_neck)
+    ear_under_curls = ((st_ear_l[:, :, 3] > 128) | (st_ear_r[:, :, 3] > 128)) & (curl_l_mask | curl_r_mask) & solid_full & (~below_chin_neck)
+    head_max_env = (
+        bald_dome_oval
+        | jaw_solid_poly
+        | left_ear_jaw_bridge
+        | vis_face_skin
+        | ear_under_curls
+        | (st_ears_bin & solid_full)
+    ) & (~below_chin_neck)
+    head_oval = binary_fill_holes(head_shape_core) & head_max_env & solid_full & (~below_chin_neck)
+
+    pa_head_matched = match_rgb_to_ref(p_bald_head[:, :, :3], s0[:, :, :3], head_oval & is_skin & (~eye_and_cheek_guard))
+    chin_ink_keep = (r < 128) & (g < 88) & (yg >= chin_y - 3.5) & (yg <= chin_y + 0.5) & (xg >= 262) & (xg <= 384) & (~is_pure_hair)
+    s0_jaw_lock = (
+        head_oval
+        & opaque
+        & (((is_skin | ((r >= b - 2) & (yg >= 290))) & (~(b >= r + 8))) | (is_dark_crisp & (~is_pure_hair)) | chin_ink_keep)
+        & (~eye_and_cheek_guard)
+        & (~is_pure_hair)
+        & (yg >= 265)
+    )
+    forehead_skin_seed = (
+        head_oval
+        & is_skin
+        & (~binary_dilation(eye_and_cheek_guard, iterations=2))
+        & (~binary_dilation(is_dark_crisp, iterations=2))
+        & (~is_pure_hair)
+        & (yg >= 225)
+        & (yg <= 355)
+    )
+    smooth_skin_fill = diffuse_from_known(s0[:, :, :3], head_oval & (~s0_jaw_lock), forehead_skin_seed, iters=180)
+    dome_mix = np.clip((255.0 - yg.astype(np.float32)) / 50.0, 0.0, 0.65)[:, :, None]
+    pa_valid = ((p_bald_head[:, :, 3] > 180) & (p_bald_head[:, :, 0] > 80))[:, :, None]
+    dome_rgb = np.where(
+        pa_valid,
+        np.clip(np.round(smooth_skin_fill.astype(np.float32) * (1.0 - dome_mix) + pa_head_matched.astype(np.float32) * dome_mix), 0, 255).astype(np.uint8),
+        smooth_skin_fill,
+    )
+    ear_mask = ((st_ear_l[:, :, 3] > 128) | (st_ear_r[:, :, 3] > 128)) & head_oval
+    st_ears_rgb = np.where((st_ear_l[:, :, 3] >= st_ear_r[:, :, 3])[:, :, None], st_ear_l[:, :, :3], st_ear_r[:, :, :3])
+    head_rgb = np.where(s0_jaw_lock[:, :, None], s0[:, :, :3], np.where(ear_mask[:, :, None] & (~s0_jaw_lock[:, :, None]), st_ears_rgb, dome_rgb))
+    ear_dark_ink = (ear_mask | (xg <= 262) | (xg >= 376)) & (head_rgb[:, :, 0] < 115) & (head_rgb[:, :, 1] < 85)
+    # Scrub corrupt near-black [0,0,0], neck-shadow leak on right chin, or pale/gray jawline fringe while preserving dark ear/chin outlines
+    hr_i = head_rgb[:, :, 0].astype(np.int16)
+    hg_i = head_rgb[:, :, 1].astype(np.int16)
+    hb_i = head_rgb[:, :, 2].astype(np.int16)
+    right_chin_shadow_leak = (xg >= 316) & (yg >= 340) & (~chin_ink_keep) & (hg_i < 192) & ((hr_i - hg_i) >= 48)
+    jaw_zone_hb = (yg >= 325) & (yg >= chin_y - 4.0) & (xg >= 262) & (xg <= 382)
+    head_white_fringe = head_oval & (~chin_ink_keep) & (~ear_dark_ink) & (
+        ((~s0_jaw_lock) & (yg <= 265) & (hr_i >= 215) & (hb_i >= hr_i - 2))
+        | (jaw_zone_hb & (((hr_i >= 165) & ((hr_i - hb_i) < 22)) | right_chin_shadow_leak))
+    )
+    head_dark_leak = (head_oval & (~chin_ink_keep) & (~ear_dark_ink) & (hr_i < 35)) | head_white_fringe
+    head_warm_ref = (
+        head_oval
+        & (~chin_ink_keep)
+        & (~ear_dark_ink)
+        & (~right_chin_shadow_leak)
+        & (hr_i >= 220)
+        & (hg_i >= 180)
+        & ((hr_i - hb_i) >= 24)
+        & ((hr_i - hg_i) >= 10)
+        & (~head_white_fringe)
+    )
+    if np.any(head_dark_leak) and np.any(head_warm_ref):
+        _, (ni, nj) = distance_transform_edt(~head_warm_ref, return_indices=True)
+        for c in range(3):
+            head_rgb[:, :, c][head_dark_leak] = head_rgb[:, :, c][ni, nj][head_dark_leak]
+
+    head_a = crisp_mask_weight(head_oval, head_oval | solid_full, 0.35) * 255.0
+    head_a_u8 = np.clip(np.round(head_a), 0, 255).astype(np.uint8)
+    # Propagate clean interior head_rgb (chin ink / skin) into 1px outer AA feather so raw s0 background/halo never bleeds
+    outer_aa_hb = (head_a_u8 > 0) & (~head_oval)
+    if np.any(outer_aa_hb) and np.any(head_oval):
+        _, (ni, nj) = distance_transform_edt(~head_oval, return_indices=True)
+        for c in range(3):
+            head_rgb[:, :, c][outer_aa_hb] = head_rgb[:, :, c][ni, nj][outer_aa_hb]
+
+    sakura_head_base = np.zeros_like(s0)
+    sakura_head_base[:, :, :3] = head_rgb
+    sakura_head_base[:, :, 3] = head_a_u8
+    sakura_head_base[sakura_head_base[:, :, 3] == 0, :3] = 0
+    save_rgba(decontaminate_outer_aa(sakura_head_base, scope_mask=solid_inner), PARTS_DIR / "sakura_head_base.png")
+
+    eye_brow_mouth_keep = (
+        ellipse_mask((h, w), 278.0, 274.0, 41.0, 36.0)
+        | ellipse_mask((h, w), 366.0, 272.0, 41.0, 36.0)
+        | poly_mask((h, w), [(254, 228), (294, 228), (294, 248), (254, 248)])
+        | poly_mask((h, w), [(334, 228), (386, 228), (386, 250), (334, 250)])
+        | poly_mask((h, w), [(296, 305), (344, 305), (344, 348), (296, 348)])
+    )
+
+    # ── 5) Crown Scalp Hair Cap (`crown_hair`, z=61, underneath curls/bangs/wings) ──
+    # Smooth cosine scalp arch + elliptical forehead cutout: zero straight horizontal or vertical cuts!
+    eye_clear_for_crown = (
+        ellipse_mask((h, w), 278.0, 278.0, 32.0, 34.0)
+        | ellipse_mask((h, w), 366.0, 276.0, 28.0, 34.0)
+    ) & (~((yg <= 256) & is_pure_hair)) & (~temple_r_sliver)
+    arch_y = 218.0 + 68.0 * (1.0 - np.cos(np.clip((xg.astype(np.float32) - 318.0) / 145.0, -1.0, 1.0) * (np.pi / 2.0)))
+    forehead_arch_cut = ellipse_mask((h, w), 320.0, 298.0, 52.0, 80.0)
+    crown_raw_mask = (
+        opaque
+        & (yg >= 122)
+        & (yg.astype(np.float32) <= arch_y)
+        & (~ah_cc)
+        & (~forehead_arch_cut)
+        & (~eye_and_cheek_guard)
+        & (~eye_clear_for_crown)
+        & (~is_skin)
+        & (is_hair_like | solid_inner)
+        & (xg >= 198)
+        & (xg <= 462)
+    ) | (opaque & temple_r_sliver)
+    front_fringes_opaque = wing_l_mask | wing_r_mask | bang_center_mask | curl_l_mask | curl_r_mask
+    fg_outer_aa = (~solid_full) & (wing_l_mask | wing_r_mask | curl_l_mask | curl_r_mask | bang_center_mask)
+    crown_vis = crown_raw_mask & (~front_fringes_opaque) & (~fg_outer_aa) & (~is_skin)
+    crown_fill = crown_raw_mask & (~crown_vis) & solid_full
+    crown_mask = crown_vis | crown_fill
+    crown_known = crown_mask & is_pure_hair & (~front_fringes_opaque) & (~binary_dilation(is_skin, iterations=2)) & (yg >= 127) & (yg <= 265)
+    crown_rgb = diffuse_from_known(s0[:, :, :3], crown_fill, crown_known, iters=120)
+    sakura_crown = np.zeros_like(s0)
+    sakura_crown[:, :, :3] = np.where(crown_vis[:, :, None], s0[:, :, :3], crown_rgb)
+    crown_w = crisp_mask_weight(crown_mask, crown_vis | solid_full, 0.35)
+    sakura_crown[:, :, 3] = np.clip(
+        np.round(np.where(crown_vis, s0[:, :, 3].astype(np.float32), np.where(crown_fill, 255.0 * crown_w, 0.0))),
         0,
         255,
     ).astype(np.uint8)
-    save_rgba(bang_excl_rgba, PARTS_DIR / "sakura_bang_center_excl.png")
+    sakura_crown[sakura_crown[:, :, 3] == 0, :3] = 0
+    save_rgba(decontaminate_outer_aa(sakura_crown, scope_mask=solid_inner), PARTS_DIR / "sakura_crown_hair.png")
 
-    # 3) Outer upper temple wings (z=66, z=67)
-    wing_l_poly = poly_mask((h, w), [(185, 165), (242, 165), (246, 232), (225, 294), (185, 294)])
-    wing_r_poly = poly_mask((h, w), [(424, 170), (506, 170), (506, 304), (432, 304), (414, 242)])
-    wing_l_mask = opaque & wing_l_poly & is_hair_like & (~is_skin)
-    wing_r_mask = opaque & wing_r_poly & is_hair_like & (~is_skin)
-    wl_top = np.clip((yg.astype(np.float32) - 165.0) / 22.0, 0.0, 1.0)
-    wr_top = np.clip((yg.astype(np.float32) - 170.0) / 22.0, 0.0, 1.0)
-    wl_in = np.clip((244.0 - xg.astype(np.float32)) / 14.0, 0.0, 1.0)
-    wr_in = np.clip((xg.astype(np.float32) - 418.0) / 14.0, 0.0, 1.0)
-    wing_l_w = np.clip(soft_weight(wing_l_mask, 0.7) * wl_top * wl_in, 0.0, 1.0)
-    wing_r_w = np.clip(soft_weight(wing_r_mask, 0.7) * wr_top * wr_in, 0.0, 1.0)
-    save_rgba(extract_layer(s0, wing_l_w), PARTS_DIR / "sakura_hair_wing_l.png")
-    save_rgba(extract_layer(s0, wing_r_w), PARTS_DIR / "sakura_hair_wing_r.png")
+    # ── 6) Complete Rounded Back Hair L/R (`hair_back_l/r`, z=14, 16) ──
+    # Rounded See-Through cranium top + continuous curtain behind chin/neck/curls + curved S-wave L/R blend
+    st_bh_mask = st_back_hair[:, :, 3] > 64
+    white_coat_collar = (yg >= 382) & is_pure_white_coat
+    hb_outer_s0 = opaque & (yg >= 123) & (yg <= 405) & is_hair_like & (~real_collar_yellow) & (~is_skin) & (~eye_and_cheek_guard)
+    hb_curtain = poly_mask((h, w), [(230, 210), (428, 210), (428, 402), (276, 402), (230, 378)]) & solid_full & (~real_collar_yellow) & (~white_coat_collar)
+    hb_inner_tuck = (st_bh_mask & solid_inner & (yg >= 125) & (yg <= 406) & (~((xg <= 275) & (yg > 378 + (xg - 230) * 24.0 / 46.0)))) | hb_curtain
+    hb_full_shape = binary_fill_holes(hb_outer_s0 | hb_inner_tuck) & opaque & (yg >= 123) & (yg <= 406) & (~real_collar_yellow) & (~white_coat_collar)
 
-    # 4) Lower cyan-tipped wavy curls:
-    # - hair_curl_l at z=56 (BEHIND head_base z=58 so crisp cheek jawline renders cleanly on top!)
-    # - hair_curl_r at z=64 (IN FRONT on right jaw, strictly guarded outside eye/lash/cheek bbox!)
-    eye_and_cheek_guard = binary_dilation(
-        ellipse_mask((h, w), 275.0, 282.0, 34.0, 42.0)
-        | ellipse_mask((h, w), 367.0, 282.0, 34.0, 42.0)
-        | poly_mask((h, w), [(252, 220), (392, 220), (386, 342), (346, 366), (294, 364), (258, 332)]),
-        iterations=2,
-    )
-    collar_guard = is_yellow_ribbon | is_pure_white_coat | is_skin | eye_and_cheek_guard
-    curl_l_poly = poly_mask((h, w), [(188, 240), (249, 240), (250, 306), (264, 340), (300, 405), (188, 405)])
-    curl_r_poly = poly_mask((h, w), [(396, 238), (488, 238), (488, 406), (358, 406), (378, 348), (394, 308)])
-    curl_l_raw = (curl_l_poly & opaque & is_hair_like & (~collar_guard)).astype(np.float32)
-    curl_r_raw = (curl_r_poly & opaque & is_hair_like & (~collar_guard)).astype(np.float32)
-    cl_top = np.clip((yg.astype(np.float32) - 240.0) / 26.0, 0.0, 1.0)
-    cr_top = np.clip((yg.astype(np.float32) - 238.0) / 26.0, 0.0, 1.0)
-    cr_in = np.where(yg < 312, np.clip((xg.astype(np.float32) - 392.0) / 8.0, 0.0, 1.0), 1.0)
-    curl_l_w = np.clip(gaussian_filter(curl_l_raw, 0.7) * cl_top, 0.0, 1.0)
-    curl_r_w = np.clip(gaussian_filter(curl_r_raw, 0.7) * cr_top * cr_in, 0.0, 1.0)
-    save_rgba(extract_layer(s0, curl_l_w), PARTS_DIR / "sakura_hair_curl_l.png")
-    save_rgba(extract_layer(s0, curl_r_w), PARTS_DIR / "sakura_hair_curl_r.png")
+    hb_owns_outer = hb_outer_s0 & (~curl_l_mask) & (~curl_r_mask) & (~crown_mask) & (~wing_l_mask) & (~wing_r_mask) & (~bang_center_mask) & (~((yg >= 382) & (~solid_full) & (xg >= 215) & (xg <= 440)))
+    hb_fill_only = hb_full_shape & (~hb_owns_outer) & solid_full
 
-    # 5) Back hair behind neck/ears (solid interior tuck inside opaque silhouette, zero sky alpha leaks!)
-    hb_zone = poly_mask((h, w), [(208, 248), (468, 248), (470, 396), (416, 402), (252, 402), (206, 386)])
-    inner_op = binary_erosion(opaque, iterations=1)
-    hb_shape = hb_zone & (
-        (opaque & is_hair_like & (yg >= 256))
-        | (inner_op & poly_mask((h, w), [(254, 272), (402, 272), (402, 398), (254, 398)]))
-    )
-    hb_known = hb_zone & is_pure_hair & ((xg <= 264) | (xg >= 388))
-    hb_rgb = diffuse_from_known(s0[:, :, :3], hb_shape & (~hb_known), hb_known, iters=140)
-    hb_full = np.zeros_like(s0)
-    hb_full[:, :, :3] = hb_rgb
-    hb_edge_a = np.where(hb_zone & opaque & is_hair_like & (yg >= 256), s0[:, :, 3].astype(np.float32), 255.0)
-    hb_w = crisp_mask_weight(hb_shape, hb_zone & opaque, 0.45)
-    split_l = np.clip((346.0 - xg.astype(np.float32)) / 8.0, 0.0, 1.0)
-    split_r = np.clip((xg.astype(np.float32) - 326.0) / 8.0, 0.0, 1.0)
-    hb_l = hb_full.copy()
-    hb_l[:, :, 3] = np.clip(np.round(hb_edge_a * hb_w * split_l), 0, 255).astype(np.uint8)
-    hb_r = hb_full.copy()
-    hb_r[:, :, 3] = np.clip(np.round(hb_edge_a * hb_w * split_r), 0, 255).astype(np.uint8)
-    save_rgba(hb_l, PARTS_DIR / "sakura_hair_back_l.png")
-    save_rgba(hb_r, PARTS_DIR / "sakura_hair_back_r.png")
+    pb_matched = match_rgb_to_ref(p_back_hair[:, :, :3], st_back_hair[:, :, :3], (p_back_hair[:, :, 3] > 180) & st_bh_mask)
+    pb_inside = (p_back_hair[:, :, 3] > 180) & hb_fill_only
+    s0_hair_src = (curl_l_mask | curl_r_mask | wing_l_mask | wing_r_mask | crown_mask | bang_center_mask) & is_pure_hair & solid_full
+    hb_inner_rgb = np.where(s0_hair_src[:, :, None], s0[:, :, :3], np.where(pb_inside[:, :, None], pb_matched, st_back_hair[:, :, :3]))
+    hb_blue_valid = (hb_inner_rgb[:, :, 2].astype(np.int16) >= hb_inner_rgb[:, :, 0].astype(np.int16) + 18) & (hb_inner_rgb[:, :, 0] <= 165)
+    hb_known_seed = hb_fill_only & (st_bh_mask | (p_back_hair[:, :, 3] > 180) | s0_hair_src) & hb_blue_valid
+    hb_inner_rgb = diffuse_from_known(hb_inner_rgb, hb_fill_only & (~hb_known_seed), hb_known_seed, iters=120)
+    center_ao = 1.0 - 0.14 * np.exp(-(((xg.astype(np.float32) - 332.0) / 72.0) ** 2 + ((yg.astype(np.float32) - 275.0) / 85.0) ** 2))[:, :, None]
+    hb_inner_shaded = np.clip(np.round(hb_inner_rgb.astype(np.float32) * center_ao), 0, 255).astype(np.uint8)
 
-    # 6) Anatomical Head Base (z=58):
-    # - Strictly follows the crisp dark jawline `(256,332)->(272,350)->(292,363)->(318,374)->(345,367)->(365,355)->(376,342)`
-    #   with ZERO lower neck skin!
-    # - Smooth curved outer boundary (ZERO rectangular holes!) gently tucked behind wing_l/wing_r/curl_r
-    # - Complete skin inpaint under eyes, eyebrows, blush/mouth, and lower central bang lock
-    jaw_poly = poly_mask(
-        (h, w),
-        [
-            (196, 118),
-            (462, 118),
-            (456, 238),
-            (416, 254),
-            (388, 286),
-            (380, 338),
-            (366, 357),
-            (345, 369),
-            (320, 376),
-            (292, 365),
-            (272, 351),
-            (256, 332),
-            (242, 278),
-            (226, 250),
-            (196, 240),
-        ],
-    )
-    outer_wing_trim_l = poly_mask((h, w), [(170, 165), (228, 215), (222, 315), (170, 315)])
-    outer_wing_trim_r = poly_mask((h, w), [(428, 215), (510, 175), (510, 325), (422, 325)])
-    head_base_mask = opaque & jaw_poly & (~(yg < 122)) & (~ahoge_region) & (~outer_wing_trim_l) & (~outer_wing_trim_r)
+    hb_rgb = np.where(hb_owns_outer[:, :, None], s0[:, :, :3], hb_inner_shaded)
+    x_split = 332.0 + 14.0 * np.sin((yg.astype(np.float32) - 130.0) / 68.0)
+    split_l = np.clip((x_split + 18.0 - xg.astype(np.float32)) / 36.0, 0.0, 1.0)
+    split_r = np.clip((xg.astype(np.float32) - (x_split - 18.0)) / 36.0, 0.0, 1.0)
+    hb_w = crisp_mask_weight(hb_fill_only, hb_owns_outer & solid_full, 0.35)
+    hb_base_a = np.where(hb_owns_outer, s0[:, :, 3].astype(np.float32), np.where(hb_fill_only, 255.0 * hb_w, 0.0))
 
-    eye_l_wipe = ellipse_mask((h, w), 278.0, 276.0, 37.0, 38.0)
-    eye_r_wipe = ellipse_mask((h, w), 366.0, 274.0, 37.0, 38.0)
-    brows_wipe = poly_mask((h, w), [(252, 224), (300, 224), (300, 246), (252, 246)]) | poly_mask(
-        (h, w), [(338, 224), (390, 224), (390, 246), (338, 246)]
-    )
-    nose_mouth_wipe = poly_mask((h, w), [(296, 296), (346, 296), (346, 352), (296, 352)])
-    # Exclude tiny isolated dark lash pixels inside face interior
-    face_int_poly = poly_mask((h, w), [(252, 224), (390, 224), (382, 344), (320, 358), (258, 342)])
-    stray_dark_face = face_int_poly & is_dark_line & (yg >= 224) & (yg <= 346)
-    curved_hairline = 226.0 + 0.008 * ((xg.astype(np.float32) - 312.0) ** 2)
-    bang_lower_wipe = binary_dilation(bang_center_mask, iterations=4) & (yg >= curved_hairline)
-    face_skin_wipe = (eye_l_wipe | eye_r_wipe | brows_wipe | nose_mouth_wipe | stray_dark_face | bang_lower_wipe) & poly_mask(
-        (h, w), [(244, 190), (398, 190), (384, 354), (320, 366), (256, 344)]
-    )
-    forehead_skin_known = (
-        jaw_poly
-        & is_skin
-        & (~binary_dilation(face_skin_wipe, iterations=3))
-        & (~binary_dilation(is_dark_line, iterations=2))
-        & (~binary_dilation(bang_center_mask, iterations=3))
-        & (yg >= 220)
-        & (yg <= 362)
-    )
-    bang_crown_wipe = binary_dilation(bang_center_mask, iterations=3) & (yg < curved_hairline) & jaw_poly
-    bang_crown_known = jaw_poly & is_pure_hair & (~bang_crown_wipe) & (~bang_center_mask) & (yg >= 124) & (yg <= 212)
+    hb_l = np.zeros_like(s0)
+    hb_l[:, :, :3] = hb_rgb
+    hb_l[:, :, 3] = np.clip(np.round(hb_base_a * split_l), 0, 255).astype(np.uint8)
+    hb_r = np.zeros_like(s0)
+    hb_r[:, :, :3] = hb_rgb
+    hb_r[:, :, 3] = np.clip(np.round(hb_base_a * split_r), 0, 255).astype(np.uint8)
+    save_rgba(decontaminate_outer_aa(hb_l, scope_mask=solid_inner), PARTS_DIR / "sakura_hair_back_l.png")
+    save_rgba(decontaminate_outer_aa(hb_r, scope_mask=solid_inner), PARTS_DIR / "sakura_hair_back_r.png")
 
-    head_rgb = diffuse_from_known(s0[:, :, :3], face_skin_wipe, forehead_skin_known, iters=180)
-    head_rgb = diffuse_from_known(head_rgb, bang_crown_wipe, bang_crown_known, iters=110)
-
-    sakura_head = s0.copy()
-    sakura_head[:, :, :3] = head_rgb
-    sakura_head = extract_layer(sakura_head, soft_weight(head_base_mask, 0.7))
-    save_rgba(sakura_head, PARTS_DIR / "sakura_head_base.png")
-
-    # 7) Floating 2.5D Face Features rest texture + smooth AlphaMask + Pin ref
+    # ── 7) Pure Hair-Free Face Features (`face_features`, z=60) + Masks ──
     face_poly = poly_mask(
         (h, w),
-        [
-            (248, 212),
-            (396, 212),
-            (396, 306),
-            (380, 336),
-            (356, 354),
-            (320, 363),
-            (284, 352),
-            (262, 332),
-            (250, 302),
-        ],
+        [(250, 222), (393, 222), (392, 304), (368, 322), (344, 346), (320, 350), (298, 346), (274, 322), (250, 302)],
     )
-    face_mask_f = soft_weight(face_poly, 3.2) * (
-        1.0 - np.clip(soft_weight(binary_erosion(bang_center_mask, iterations=2), 0.7), 0.0, 1.0)
+    temple_hair_guard = is_pure_hair | bang_center_mask | wing_l_mask | wing_r_mask | curl_l_mask | curl_r_mask | crown_mask
+    brow_hair_strip = (yg <= 257) & (bang_center_mask | crown_mask | wing_l_mask | wing_r_mask) & (b >= r + 10) & (b >= 155) & (r >= 80)
+    face_hair_excl = (
+        binary_dilation(temple_hair_guard & (~eye_brow_mouth_keep) & (~is_skin), iterations=1)
+        | temple_r_sliver
+        | brow_hair_strip
     )
-    sakura_face = extract_layer(s0, face_mask_f)
-    save_rgba(sakura_face, PARTS_DIR / "sakura_face_features.png")
+    brow_preserve = (yg >= 232) & (yg <= 248) & ((xg <= 284) | (xg >= 334)) & (~bang_center_mask)
+    excl_all = (binary_erosion(bang_center_mask | wing_l_mask | wing_r_mask | crown_mask, iterations=1) | (face_hair_excl & (yg <= 238))) & (~brow_preserve) & (~is_skin) & (~eye_brow_mouth_keep)
+
+    bang_excl_rgba = np.zeros_like(s0)
+    bang_excl_rgba[:, :, :3] = 255
+    bang_excl_rgba[:, :, 3] = np.clip(np.round(crisp_mask_weight(excl_all, face_hair_excl & (~is_skin), 0.35) * 255.0), 0, 255).astype(np.uint8)
+    save_rgba(bang_excl_rgba, PARTS_DIR / "sakura_bang_center_excl.png")
+
+    face_hair_excl_eff = (face_hair_excl & (yg >= 235) & (~eye_brow_mouth_keep)) | temple_r_sliver | brow_hair_strip
+    eye_ink_lock = eye_brow_mouth_keep & opaque & (~is_pure_hair) & (~temple_r_sliver) & (~brow_hair_strip)
+    face_region_w = np.where(
+        eye_ink_lock,
+        soft_weight(face_poly, 1.8),
+        soft_weight(face_poly, 1.8) * (1.0 - np.clip(soft_weight(face_hair_excl_eff, 0.7), 0.0, 1.0)),
+    )
+    face_mask_f = face_region_w * (1.0 - bang_excl_rgba[:, :, 3].astype(np.float32) / 255.0)
+    face_rgba = extract_layer(s0, face_mask_f)
+    # Strip any pale/gray cheek-border halo pixels below eyes outside mouth box
+    fr_i = face_rgba[:, :, 0].astype(np.int16)
+    fb_i = face_rgba[:, :, 2].astype(np.int16)
+    mouth_box = (xg >= 302) & (xg <= 340) & (yg >= 308) & (yg <= 346)
+    face_cheek_halo = (face_rgba[:, :, 3] > 0) & (~eye_brow_mouth_keep) & (~mouth_box) & (yg >= 310) & (fr_i >= 135) & ((fr_i - fb_i) < 22)
+    face_rgba[face_cheek_halo] = 0
+    save_rgba(face_rgba, PARTS_DIR / "sakura_face_features.png")
 
     fmask_rgba = np.zeros_like(s0)
     fmask_rgba[:, :, :3] = 255
-    fmask_rgba[:, :, 3] = np.clip(np.round(soft_weight(face_poly, 3.2) * 255.0), 0, 255).astype(np.uint8)
+    fmask_rgba[:, :, 3] = np.clip(np.round(face_region_w * 255.0), 0, 255).astype(np.uint8)
     save_rgba(fmask_rgba, PARTS_DIR / "sakura_face_mask.png")
 
     save_rgba(s0, PARTS_DIR / "sakura_hairpin_ref.png")
     save_rgba(np.zeros_like(s0), PARTS_DIR / "sakura_hairpin_slot.png")
 
-    # 8) Neck column (z=38) between jawline y=336 and sailor collar V-lapels y=428
-    neck_poly = poly_mask((h, w), [(296, 336), (376, 336), (374, 428), (294, 428)])
-    neck_skin_known = neck_poly & is_skin & (~binary_dilation(is_dark_line, iterations=1)) & (yg >= 372) & (yg <= 416)
-    neck_fill = neck_poly & (~neck_skin_known)
-    neck_rgb = diffuse_from_known(s0[:, :, :3], neck_fill, neck_skin_known, iters=110)
-    submental_shade = np.clip((380.0 - yg.astype(np.float32)) / 32.0, 0.0, 1.0) * 0.08
-    neck_rgb_f = neck_rgb.astype(np.float32)
-    neck_rgb_f[:, :, 0] *= 1.0 - submental_shade * 0.45
-    neck_rgb_f[:, :, 1] *= 1.0 - submental_shade * 0.85
-    neck_rgb_f[:, :, 2] *= 1.0 - submental_shade * 0.65
-    neck_rgb = np.clip(np.round(neck_rgb_f), 0, 255).astype(np.uint8)
-    neck_shape = poly_mask((h, w), [(306, 344), (368, 344), (366, 426), (304, 426)])
+    # ── 8) Anatomically Complete Rounded Neck (`sakura_neck.png`, z=38) ─
+    # Combines ST 05_neck rounded upper mushroom dome & wide collarbone base with Visible-Pixel Lock on s0 throat
+    # Guarantees [290..318, 360..390] stays strictly alpha=0 (regression guard).
+    st_neck_shape = (st_neck[:, :, 3] > 110) & (xg >= 306) & (yg >= 332) & (yg <= 448)
+    # Smoothly trim any intrusion into left chin guard [290..318, 360..390]
+    left_chin_guard = (xg >= 289) & (xg <= 318) & (yg >= 359) & (yg <= 390)
+    neck_shape_raw = (
+        binary_fill_holes(st_neck_shape | poly_mask((h, w), [(324, 344), (360, 344), (363, 376), (372, 412), (350, 442), (314, 434), (318, 392)]))
+        & (~left_chin_guard)
+        & (~(opaque & (b >= r + 8) & (yg <= 395) & (~curl_r_mask) & (~curl_l_mask)))
+    )
+    is_warm_throat_skin = opaque & (r >= 195) & (g >= 140) & (r >= g + 10) & (r >= b + 12)
+    is_neutral_white_px = (r >= 135) & ((r - b) < 22)
+    neck_vis = (
+        neck_shape_raw
+        & opaque
+        & (~head_oval)
+        & (yg > chin_y)
+        & (yg <= 408)
+        & (xg >= 308)
+        & (xg <= 370)
+        & (~is_yellow_ribbon)
+        & (~is_pure_white_coat)
+        & (~is_neutral_white_px)
+        & (~is_pure_hair)
+        & (~(b >= r + 8))
+        & (~curl_l_mask)
+        & (~curl_r_mask)
+    )
+    neck_shape = (neck_vis | (neck_shape_raw & solid_full & (yg <= 418) & (xg >= 308) & (xg <= 372))) & (~left_chin_guard)
+    neck_skin_seed = neck_vis & is_warm_throat_skin & (~binary_dilation(is_dark_crisp, iterations=1))
+    neck_fill_rgb = diffuse_from_known(s0[:, :, :3], neck_shape & (~neck_vis), neck_skin_seed, iters=120)
+    neck_rgb = np.where(neck_vis[:, :, None], s0[:, :, :3], neck_fill_rgb)
+    neck_a = np.clip(
+        np.round(np.where(neck_vis, s0[:, :, 3].astype(np.float32), crisp_mask_weight(neck_shape, (neck_vis | solid_full) & (~left_chin_guard), 0.35) * 255.0)),
+        0,
+        255,
+    ).astype(np.uint8)
+    neck_outer_aa = (neck_a > 0) & (~neck_shape) & (~neck_vis)
+    if np.any(neck_outer_aa) and np.any(neck_shape):
+        _, (ni, nj) = distance_transform_edt(~neck_shape, return_indices=True)
+        for c in range(3):
+            neck_rgb[:, :, c][neck_outer_aa] = neck_rgb[:, :, c][ni, nj][neck_outer_aa]
     sakura_neck = np.zeros_like(s0)
     sakura_neck[:, :, :3] = neck_rgb
-    sakura_neck[:, :, 3] = np.clip(np.round(soft_weight(neck_shape, 1.0) * 255.0), 0, 255).astype(np.uint8)
-    save_rgba(sakura_neck, PARTS_DIR / "sakura_neck.png")
+    sakura_neck[:, :, 3] = neck_a
+    sakura_neck[sakura_neck[:, :, 3] == 0, :3] = 0
+    save_rgba(decontaminate_outer_aa(sakura_neck, scope_mask=solid_inner), PARTS_DIR / "sakura_neck.png")
 
-    # Helper guards so coat buttons, cyan trim, and dark outlines never get eroded or hole-punched
-    is_cyan_trim = opaque & (g >= 182) & (b >= 205) & (r <= 192) & ((g - r) >= 22)
-    is_dark_crisp = opaque & (r < 125) & (g < 130) & (b < 170)
+    # Helper masks for outfit, bows, arms, and buttons
     btn_guard = (
         poly_mask((h, w), [(259, 575), (277, 575), (277, 595), (259, 595)])
         | poly_mask((h, w), [(321, 578), (343, 578), (343, 598), (321, 598)])
         | poly_mask((h, w), [(242, 649), (260, 649), (260, 669), (242, 669)])
         | poly_mask((h, w), [(319, 658), (338, 658), (338, 678), (319, 678)])
     )
-    hand_skin = is_skin & (yg <= 504) & (xg <= 336)
+    hand_front_skin = is_skin & (yg >= 442) & (yg <= 506) & (xg <= 300)
 
-    # 9) Back Yellow Sailor Collar corner (z=24, x=450..484, y=444..506, tucked under right sleeve outline!)
+    # ── 9) Back Yellow Sailor Collar (`sakura_collar_back.png`, z=24) ────
     collar_b_poly = poly_mask((h, w), [(450, 444), (484, 444), (484, 506), (452, 506)])
-    cb_mask = opaque & collar_b_poly & (is_yellow_ribbon | (binary_dilation(is_yellow_ribbon, iterations=2) & is_dark_crisp))
-    save_rgba(extract_layer(s0, crisp_mask_weight(cb_mask, opaque & collar_b_poly, 0.45)), PARTS_DIR / "sakura_collar_back.png")
+    cb_vis = opaque & collar_b_poly & (is_yellow_ribbon | (binary_dilation(is_yellow_ribbon, iterations=2) & is_dark_crisp))
+    cb_tuck_zone = poly_mask((h, w), [(436, 442), (460, 442), (464, 502), (446, 502)]) & (~cb_vis) & solid_full
+    cb_all = cb_vis | cb_tuck_zone
+    cb_rgb = diffuse_from_known(s0[:, :, :3], cb_tuck_zone, cb_vis & is_yellow_ribbon, iters=90)
+    cb_out = np.zeros_like(s0)
+    cb_out[:, :, :3] = np.where(cb_vis[:, :, None], s0[:, :, :3], cb_rgb)
+    cb_out[:, :, 3] = np.clip(np.round(np.where(cb_tuck_zone, 255.0, s0[:, :, 3].astype(np.float32)) * crisp_mask_weight(cb_all, cb_vis | solid_full, 0.35)), 0, 255).astype(np.uint8)
+    cb_out[cb_out[:, :, 3] == 0, :3] = 0
+    save_rgba(decontaminate_outer_aa(cb_out, scope_mask=solid_inner), PARTS_DIR / "sakura_collar_back.png")
 
-    # 10) Closed-contour Chest & Waist Ribbons (z=50, z=54) — ZERO interior alpha loss, ZERO button/coat leakage!
+    # ── 10) Complete Symmetrical Chest Bow (`chest_bow`, z=50) ───────────
     bow_c_poly = poly_mask(
         (h, w),
-        [(242, 464), (356, 464), (356, 510), (348, 550), (320, 574), (272, 574), (242, 532), (242, 486)],
+        [(238, 460), (358, 460), (358, 512), (348, 550), (320, 574), (272, 574), (238, 534), (238, 480)],
     )
-    bow_purple = opaque & bow_c_poly & (b >= r + 18) & (b >= g + 12) & (~is_cyan_trim) & (~is_skin)
-    lbl_b, _ = label(binary_dilation(bow_purple, iterations=1))
-    main_lbl = lbl_b[495, 300]
-    bow_main = (lbl_b == main_lbl) if main_lbl > 0 else bow_purple
-    cbow_filled = binary_fill_holes(bow_main) & bow_c_poly & (~hand_skin)
-    hand_edge = binary_dilation(hand_skin, iterations=1)
-    cbow_mask = binary_fill_holes(
-        cbow_filled | (binary_dilation(cbow_filled, iterations=2) & is_dark_crisp & bow_c_poly & (~hand_edge))
-    ) & (~hand_skin)
-    cbow_w = crisp_mask_weight(cbow_mask, opaque & bow_c_poly & (~hand_skin) & (~is_pure_white_coat), 0.40)
-    save_rgba(extract_layer(s0, cbow_w), PARTS_DIR / "sakura_chest_bow.png")
+    pc_r, pc_g, pc_b, pc_a = p_coat_free[:, :, 0].astype(np.int16), p_coat_free[:, :, 1].astype(np.int16), p_coat_free[:, :, 2].astype(np.int16), p_coat_free[:, :, 3]
+    pc_purple = (pc_a > 128) & bow_c_poly & (pc_b >= pc_r + 18) & (pc_b >= pc_g + 12) & (pc_r <= 185)
+    lbl_pc, _ = label(binary_dilation(pc_purple, iterations=1))
+    pc_main_l = lbl_pc[495, 300]
+    pc_bow_fill = ((lbl_pc == pc_main_l) & pc_purple) if pc_main_l > 0 else pc_purple
+    pc_dark = (pc_a > 128) & (pc_r < 125) & (pc_g < 130) & (pc_b < 170) & bow_c_poly
+    pc_bow_mask = binary_fill_holes(pc_bow_fill | (binary_dilation(pc_bow_fill, iterations=1) & pc_dark))
 
-    bow_w_poly = poly_mask(
-        (h, w),
-        [(320, 582), (426, 580), (434, 650), (416, 684), (344, 686), (336, 640), (320, 616)],
-    )
+    s0_bow_purple = opaque & bow_c_poly & (b >= r + 18) & (b >= g + 12) & (~is_cyan_trim) & (~is_skin)
+    lbl_b, _ = label(binary_dilation(s0_bow_purple, iterations=1))
+    main_lbl = lbl_b[495, 300]
+    s0_bow_main = ((lbl_b == main_lbl) & s0_bow_purple) if main_lbl > 0 else s0_bow_purple
+    s0_bow_vis = binary_fill_holes(s0_bow_main | (binary_dilation(s0_bow_main, iterations=1) & is_dark_crisp & bow_c_poly)) & (~binary_dilation(hand_front_skin, iterations=2))
+
+    pc_bow_matched = match_rgb_to_ref(p_coat_free[:, :, :3], s0[:, :, :3], s0_bow_vis & s0_bow_purple)
+    full_bow_mask = binary_fill_holes(pc_bow_mask | s0_bow_vis) & bow_c_poly & solid_inner & (~is_pure_white_coat)
+    use_s0_bow = s0_bow_vis & opaque
+    cbow_out = np.zeros_like(s0)
+    cbow_out[:, :, :3] = np.where(use_s0_bow[:, :, None], s0[:, :, :3], pc_bow_matched)
+    cbow_src_a = np.where(use_s0_bow, s0[:, :, 3].astype(np.float32), p_coat_free[:, :, 3].astype(np.float32))
+    cbow_w = crisp_mask_weight(full_bow_mask, bow_c_poly & solid_inner & (~is_pure_white_coat), 0.35)
+    cbow_out[:, :, 3] = np.clip(np.round(cbow_src_a * cbow_w), 0, 255).astype(np.uint8)
+    cbow_out[cbow_out[:, :, 3] == 0, :3] = 0
+    save_rgba(decontaminate_outer_aa(cbow_out, scope_mask=solid_inner), PARTS_DIR / "sakura_chest_bow.png")
+
+    # ── 11) Complete Waist Bow (`waist_bow`, z=54) ──────────────────────
+    bow_w_poly = poly_mask((h, w), [(320, 582), (426, 580), (434, 650), (416, 684), (344, 686), (336, 640), (320, 616)])
     wbow_yel = opaque & bow_w_poly & (r >= 190) & (g >= 182) & (b <= 212) & ((r - b) >= 20)
-    lbl_w, _ = label(binary_dilation(wbow_yel, iterations=1))
+    lbl_w, _ = label(binary_dilation(wbow_yel, iterations=2))
     wmain_lbl = lbl_w[615, 375]
     wbow_main = (lbl_w == wmain_lbl) if wmain_lbl > 0 else wbow_yel
     wbow_filled = binary_fill_holes(wbow_main) & bow_w_poly & (~btn_guard)
-    wbow_mask = binary_fill_holes(
-        wbow_filled | (binary_dilation(wbow_filled, iterations=2) & is_dark_crisp & bow_w_poly & (~btn_guard))
-    ) & (~btn_guard)
-    wbow_w = crisp_mask_weight(wbow_mask, opaque & bow_w_poly & (~btn_guard) & (~is_pure_white_coat), 0.40)
-    save_rgba(extract_layer(s0, wbow_w), PARTS_DIR / "sakura_waist_bow.png")
+    wbow_mask = binary_fill_holes(wbow_filled | (binary_dilation(wbow_filled, iterations=3) & is_dark_crisp & bow_w_poly & (~btn_guard) & (~is_pure_white_coat))) & (~btn_guard)
+    wbow_w = crisp_mask_weight(wbow_mask, opaque & bow_w_poly & (~btn_guard) & (~is_pure_white_coat), 0.35)
+    save_rgba(decontaminate_outer_aa(extract_layer(s0, wbow_w), scope_mask=solid_inner), PARTS_DIR / "sakura_waist_bow.png")
 
-    # 11) Right Hanging Arm + Sleeve + Hand (z=44) — keep sleeve cool shadows, cleanly trace skin fingers!
+    # ── 12) Raised Right Forearm (`forearm_front`, z=52 — IN FRONT of chest_bow!) ──
+    raised_arm_poly = poly_mask(
+        (h, w),
+        [(168, 442), (242, 434), (294, 464), (294, 514), (242, 540), (222, 608), (168, 608)],
+    )
+    arm_f_diff = (
+        np.max(np.abs(s0[:, :, :3].astype(np.int16) - p_coat_free[:, :, :3].astype(np.int16)), axis=2) > 26
+    ) | hand_front_skin
+    front_collar_top_l = opaque & (yg <= 454) & (xg >= 220) & (xg <= 316) & is_yellow_ribbon & (~hand_front_skin)
+    arm_f_seed = opaque & raised_arm_poly & (arm_f_diff | (xg <= 212)) & (~front_collar_top_l) & (yg >= 434)
+    st_f_mask = (st_forearm[:, :, 3] > 140) & (yg >= 440) & (yg <= 609) & (xg <= 293) & solid_inner
+    is_purple_bow_rgb = opaque & (b >= r + 18) & (b >= g + 12) & (r <= 185) & (xg >= 235) & (yg >= 464)
+    bow_right_of_arm = (
+        (s0_bow_vis & is_purple_bow_rgb)
+        | (binary_dilation(s0_bow_vis & is_purple_bow_rgb, iterations=1) & (~binary_dilation(hand_front_skin, iterations=3)) & (~is_pure_white_coat) & (xg >= 248) & (yg >= 466))
+    )
+    arm_f_core = binary_fill_holes((arm_f_seed & (~bow_right_of_arm)) | (st_f_mask & (~front_collar_top_l) & (~bow_right_of_arm))) & raised_arm_poly & (~front_collar_top_l) & (~bow_right_of_arm) & opaque
+    shoulder_l_fade = np.where(solid_full & (xg >= 241), np.clip((yg.astype(np.float32) - 432.0) / 8.0, 0.0, 1.0), 1.0)
+    arm_f_w = crisp_mask_weight(arm_f_core, opaque & raised_arm_poly & (~front_collar_top_l) & (~bow_right_of_arm) & (yg >= 434), 0.35) * shoulder_l_fade
+    forearm_out = extract_layer(s0, arm_f_w)
+    save_rgba(decontaminate_outer_aa(forearm_out, scope_mask=solid_inner), PARTS_DIR / "sakura_forearm_front.png")
+
+    # ── 13) Right Hanging Arm + Sleeve + Hand (`arm_r`, z=44) ──────────
     front_collar_guard = binary_dilation(opaque & (yg <= 454) & (xg <= 438) & is_yellow_ribbon, iterations=2)
     arm_r_poly = poly_mask(
         (h, w),
         [
-            (402, 422),
-            (462, 422),
-            (536, 690),
-            (536, 828),
-            (484, 826),
-            (465, 792),
+            (396, 412),
+            (462, 412),
+            (544, 690),
+            (546, 856),
+            (480, 856),
+            (464, 794),
             (466, 750),
             (455, 740),
             (447, 730),
             (438, 720),
             (432, 690),
-            (424, 650),
-            (400, 585),
-            (396, 488),
+            (422, 650),
+            (394, 585),
+            (394, 488),
         ],
     )
     hand_r_skin = opaque & (yg >= 742) & (xg >= 458) & arm_r_poly & is_skin
-    hand_r_dil = binary_dilation(hand_r_skin, iterations=2) | (
-        (xg >= 496) & binary_dilation(hand_r_skin, iterations=3)
-    )
-    hand_r_solid = binary_fill_holes(
-        hand_r_dil & opaque & arm_r_poly & (is_skin | is_dark_crisp | (r >= 200) | (g < 80))
-    )
-    # Include the subtle cool cuff transition above wrist without catching skirt or lower-right coat edge
-    arm_sleeve_region = opaque & arm_r_poly & ((yg <= 752) | ((xg >= 474) & (yg <= 758)))
-    arm_r_mask = (arm_sleeve_region | hand_r_solid) & (~cb_mask) & (~wbow_mask) & (~front_collar_guard)
-    arm_top_fade = np.clip((yg.astype(np.float32) - 438.0) / 14.0, 0.0, 1.0)
-    arm_r_w = crisp_mask_weight(arm_r_mask, opaque & arm_r_poly & (~cb_mask) & (~front_collar_guard) & ((yg <= 748) | hand_r_solid), 0.40) * arm_top_fade
-    save_rgba(extract_layer(s0, arm_r_w), PARTS_DIR / "sakura_arm_r.png")
+    hand_r_dil = binary_dilation(hand_r_skin, iterations=3) | ((xg >= 490) & binary_dilation(hand_r_skin, iterations=5))
+    hand_r_solid = binary_fill_holes(hand_r_dil & opaque & arm_r_poly & (is_skin | is_dark_crisp | (r >= 195) | (g < 85)))
+    arm_sleeve_vis = opaque & arm_r_poly & ((yg <= 752) | ((xg >= 464) & (yg <= 758))) & (~front_collar_guard) & (~cb_vis) & (~wbow_mask)
+    arm_r_st_cap = (st_arm_r[:, :, 3] > 140) & (yg >= 416) & (yg <= 465) & arm_r_poly & (~cb_vis) & solid_inner
+    arm_r_mask = (arm_sleeve_vis | hand_r_solid | arm_r_st_cap) & (~cb_vis) & (~wbow_mask)
+    arm_r_vis = arm_sleeve_vis | hand_r_solid
+    st_arm_matched = match_rgb_to_ref(st_arm_r[:, :, :3], s0[:, :, :3], arm_r_vis & (st_arm_r[:, :, 3] > 200))
+    arm_r_out = np.zeros_like(s0)
+    arm_r_out[:, :, :3] = np.where(arm_r_vis[:, :, None], s0[:, :, :3], st_arm_matched)
+    arm_r_src_a = np.where(arm_r_vis, s0[:, :, 3].astype(np.float32), np.where(arm_r_st_cap, st_arm_r[:, :, 3].astype(np.float32), 0.0))
+    arm_r_w = crisp_mask_weight(arm_r_mask, opaque & arm_r_poly & (~cb_vis) & ((yg <= 756) | hand_r_solid | arm_r_st_cap), 0.35)
+    arm_r_out[:, :, 3] = np.clip(np.round(arm_r_src_a * arm_r_w), 0, 255).astype(np.uint8)
+    arm_r_out[arm_r_out[:, :, 3] == 0, :3] = 0
+    save_rgba(decontaminate_outer_aa(arm_r_out, scope_mask=solid_inner), PARTS_DIR / "sakura_arm_r.png")
 
-    # 12) Pleated Navy Skirt (z=28) — keep original s0 edge alpha intact + fill ONLY behind overlapping flaps/hand!
+    # ── 14) Anatomically Complete Armless Sailor Bodice (`upper_torso`, z=40) ──
+    torso_poly = poly_mask(
+        (h, w),
+        [
+            (182, 392),
+            (232, 380),
+            (258, 378),
+            (322, 378),
+            (322, 405),
+            (356, 405),
+            (369, 378),
+            (412, 382),
+            (448, 398),
+            (456, 434),
+            (420, 488),
+            (414, 588),
+            (418, 628),
+            (172, 628),
+        ],
+    )
+    hb_vis_only = hb_owns_outer & (~curl_l_mask) & (~curl_r_mask)
+    shoulder_hair_excl = curl_l_mask | curl_r_mask | hb_vis_only | (
+        (yg <= 396) & (~real_collar_yellow) & (~is_pure_white_coat) & is_pure_hair
+    )
+    collar_top_pts = [
+        (180, 404), (225, 400), (260, 398), (275, 395), (290, 391),
+        (305, 385), (315, 381), (320, 381), (368, 381), (375, 389),
+        (385, 397), (398, 400), (415, 398), (430, 403), (456, 410),
+    ]
+    collar_top_y = np.interp(xg, [p[0] for p in collar_top_pts], [p[1] for p in collar_top_pts])
+    vneck_skin_only = neck_vis & is_warm_throat_skin & (xg >= 310) & (xg <= 366) & (yg <= 406)
+    curl_notch_white = (yg < collar_top_y) & ((xg <= 316) | (xg >= 370)) & (~is_yellow_ribbon)
+    shoulder_hair_excl = shoulder_hair_excl | curl_notch_white
+    pc_torso_ok = (p_coat_free[:, :, 3] > 140) & torso_poly & (yg >= collar_top_y) & (~vneck_skin_only) & (~arm_r_mask) & opaque & (~hb_vis_only)
+    st_bodice_env = (st_topwear[:, :, 3] > 128) & torso_poly & (yg >= collar_top_y) & (~vneck_skin_only) & solid_inner & (~hb_vis_only)
+    torso_base_mask = binary_fill_holes(pc_torso_ok | (opaque & torso_poly & (yg >= collar_top_y) & (~vneck_skin_only) & (~arm_r_mask) & (~arm_f_core) & (~hb_vis_only)) | (st_bodice_env & (yg >= 384) & (yg <= 622))) & torso_poly & (yg >= collar_top_y) & (~vneck_skin_only) & (~arm_r_mask) & (~cb_vis) & (~hb_vis_only) & opaque
+    torso_collar_tuck = (
+        torso_poly
+        & (yg >= collar_top_y)
+        & (yg <= 412)
+        & (((xg >= 245) & (xg <= 318)) | ((xg >= 368) & (xg <= 424)))
+        & (~vneck_skin_only)
+        & (~neck_vis)
+        & (~hb_vis_only)
+        & solid_full
+    )
+
+    torso_rgb = match_rgb_to_ref(p_coat_free[:, :, :3], s0[:, :, :3], opaque & torso_poly & is_pure_white_coat & (~arm_f_core) & (~full_bow_mask))
+    s0_torso_vis = opaque & torso_poly & (~vneck_skin_only) & (~arm_f_core) & (~full_bow_mask) & (~wbow_mask) & (~arm_r_mask) & (~shoulder_hair_excl) & (~((~solid_full) & (yg >= 580) & wbow_mask))
+    torso_mask = s0_torso_vis | ((torso_base_mask | torso_collar_tuck) & solid_full)
+    torso_rgb = np.where(s0_torso_vis[:, :, None], s0[:, :, :3], torso_rgb)
+    true_collar_yellow = opaque & torso_poly & (yg >= 384) & (yg <= 440) & ((xg <= 322) | (xg >= 368)) & is_yellow_ribbon & (g >= r - 18)
+    collar_inpaint = torso_mask & (~s0_torso_vis) & (yg <= 415) & (is_hair_like | (~true_collar_yellow) | torso_collar_tuck)
+    collar_known = (
+        true_collar_yellow
+        & (~shoulder_hair_excl)
+        & (~binary_dilation(is_hair_like, iterations=1))
+    )
+    torso_rgb = diffuse_from_known(torso_rgb, collar_inpaint, collar_known, iters=120)
+    # Remove any leaked blue hair or white curl-notch fringe along upper collar (y<=406) without altering visible purple collar stripes
+    torso_white_collar_leak = torso_mask & (yg <= 406) & ((xg <= 316) | (xg >= 368)) & (torso_rgb[:, :, 0] >= 215) & (torso_rgb[:, :, 1] >= 215) & (torso_rgb[:, :, 2] >= 208) & ((torso_rgb[:, :, 0].astype(np.int16) - torso_rgb[:, :, 2].astype(np.int16)) < 22)
+    torso_blue_leak = (torso_mask & (~s0_torso_vis) & (torso_rgb[:, :, 2].astype(np.int16) >= torso_rgb[:, :, 0].astype(np.int16) + 15) & (yg <= 415)) | torso_white_collar_leak
+    torso_collar_seed = torso_mask & (yg >= 384) & (yg <= 435) & (torso_rgb[:, :, 0].astype(np.int16) >= 195) & (torso_rgb[:, :, 1].astype(np.int16) >= 188) & ((torso_rgb[:, :, 0].astype(np.int16) - torso_rgb[:, :, 2].astype(np.int16)) >= 25) & (~torso_blue_leak)
+    torso_rgb = diffuse_from_known(torso_rgb, torso_blue_leak, torso_collar_seed, iters=90)
+    bow_under = full_bow_mask & torso_mask & (~btn_guard) & (yg >= 464) & (p_torso_fit[:, :, 3] > 180)
+    pa_torso_matched = match_rgb_to_ref(p_torso_fit[:, :, :3], torso_rgb, (yg >= 520) & (yg <= 610) & (~full_bow_mask) & (p_torso_fit[:, :, 3] > 200) & torso_mask)
+    bow_blend = soft_weight(binary_erosion(full_bow_mask, iterations=1), 2.5)[:, :, None] * bow_under[:, :, None].astype(np.float32)
+    torso_rgb = np.clip(np.round(torso_rgb.astype(np.float32) * (1.0 - bow_blend) + pa_torso_matched.astype(np.float32) * bow_blend), 0, 255).astype(np.uint8)
+    torso_leftover_hole = full_bow_mask & torso_mask & (~bow_under) & (~s0_torso_vis) & (yg >= 464)
+    coat_known_t = torso_mask & is_pure_white_coat & (~full_bow_mask) & (~arm_f_core) & (yg >= 455)
+    torso_rgb = diffuse_from_known(torso_rgb, torso_leftover_hole, coat_known_t, iters=120)
+
+    waist_bot_w = np.clip((626.0 - yg.astype(np.float32)) / 12.0, 0.0, 1.0)
+    torso_src_a = np.where(s0_torso_vis, s0[:, :, 3].astype(np.float32), np.where(torso_mask, 255.0, 0.0))
+    torso_w = crisp_mask_weight(torso_mask, s0_torso_vis | solid_full, 0.35) * waist_bot_w
+    sakura_torso = np.zeros_like(s0)
+    sakura_torso[:, :, :3] = torso_rgb
+    sakura_torso[:, :, 3] = np.clip(np.round(torso_src_a * torso_w), 0, 255).astype(np.uint8)
+    sakura_torso[sakura_torso[:, :, 3] == 0, :3] = 0
+    save_rgba(decontaminate_outer_aa(sakura_torso, scope_mask=solid_inner), PARTS_DIR / "sakura_upper_torso.png")
+
+    # ── 15) Complete Unbitten Pleated Skirt (`sakura_skirt.png`, z=28) ──
     is_thigh_skin = opaque & (yg >= 845) & (r >= 210) & (g >= 165) & (r >= b + 14)
     skirt_comp_cand = (
-        opaque
-        & (yg >= 677)
-        & (yg <= 884)
-        & (~arm_r_mask)
-        & (~btn_guard)
-        & (b >= r + 24)
-        & (r >= 48)
-        & (r <= 165)
-        & (g >= 54)
-        & (g <= 172)
-        & (b <= 222)
+        opaque & (yg >= 677) & (yg <= 884) & (~arm_r_mask) & (~btn_guard)
+        & (b >= r + 24) & (r >= 48) & (r <= 165) & (g >= 54) & (g <= 172) & (b <= 222)
     )
     lbl_sk, n_sk = label(skirt_comp_cand)
     sk_vis = np.zeros((h, w), dtype=bool)
     for k in range(1, n_sk + 1):
         comp = lbl_sk == k
-        # Include smaller navy skirt wedge trapped beside thumb (x=475..505, y=785..820) when >= 40 px!
         if int(comp.sum()) >= 40:
             sk_vis |= comp
-    sk_border_cand = is_dark_crisp | ((yg >= 855) & (b >= r - 4) & (r <= 200))
     sk_vis_full = binary_fill_holes(
         sk_vis
-        | (
-            binary_dilation(sk_vis, iterations=3)
-            & sk_border_cand
-            & (yg >= 677)
-            & (~arm_r_mask)
-            & (~is_thigh_skin)
-        )
-    )
-    skirt_known = sk_vis & is_pure_navy_skirt
-    dist_skirt = distance_transform_edt(~sk_vis)
-    skirt_tuck_zone = poly_mask((h, w), [(120, 648), (476, 648), (512, 884), (118, 884)])
-    solid_inner = binary_erosion(opaque, iterations=1)
-    coat_hand_occluders = binary_dilation(
-        (opaque & (yg >= 596) & (yg <= 816) & (~sk_vis) & (~is_thigh_skin)) | hand_r_solid,
-        iterations=2,
-    )
-    skirt_fill = (
-        solid_inner
-        & skirt_tuck_zone
-        & coat_hand_occluders
-        & (yg >= 650)
-        & (yg <= 872)
-        & (dist_skirt <= 22.0)
-        & (~sk_vis_full)
-        & (~is_thigh_skin)
-    )
-    skirt_rgb = diffuse_from_known(s0[:, :, :3], skirt_fill, skirt_known, iters=180)
-    skirt_mask = sk_vis_full | skirt_fill
-    # Preserve exact original anti-aliased silhouette alpha on visible skirt pixels; only solidify synthetic under-tuck fill!
-    sakura_skirt = np.zeros_like(s0)
-    sakura_skirt[:, :, :3] = np.where(skirt_fill[:, :, None], skirt_rgb, s0[:, :, :3])
-    sk_src_a = np.where(skirt_fill, 255.0, s0[:, :, 3].astype(np.float32))
-    sk_w = crisp_mask_weight(skirt_mask, sk_vis_full, 0.35)
-    sakura_skirt[:, :, 3] = np.clip(np.round(sk_src_a * sk_w), 0, 255).astype(np.uint8)
-    save_rgba(sakura_skirt, PARTS_DIR / "sakura_skirt.png")
+        | (binary_dilation(sk_vis, iterations=6) & (is_dark_crisp | ((yg >= 855) & (b >= r - 4) & (r <= 200))) & (yg >= 677) & (~arm_r_mask) & (~is_thigh_skin))
+    ) | (binary_dilation(sk_vis, iterations=9) & opaque & (yg >= 840) & (yg <= 884) & (~arm_r_mask) & (~is_thigh_skin))
 
-    # 13) Coat Flaps (L z=36, R z=34) — ZERO button holes, crisp dark slit/hem outlines, 14px hidden waist tuck!
-    arm_r_below_shoulder = arm_r_mask & (yg >= 445)
-    hand_r_guard = binary_dilation(hand_r_solid, iterations=1)
-    coat_all = (
-        (
-            opaque
-            & (yg >= 596)
-            & (yg <= 816)
-            & (~sk_vis)
-            & (~hand_r_guard)
-            & (~arm_r_below_shoulder)
-            & (~is_thigh_skin)
-        )
+    pd_r, pd_g, pd_b, pd_a = p_skirt_full[:, :, 0].astype(np.int16), p_skirt_full[:, :, 1].astype(np.int16), p_skirt_full[:, :, 2].astype(np.int16), p_skirt_full[:, :, 3]
+    pd_navy = (pd_a > 128) & (yg >= 602) & (yg <= 885) & (pd_b >= pd_r + 18) & (pd_b <= 230)
+    lbl_pd, _ = label(binary_dilation(pd_navy, iterations=1))
+    pd_main = (lbl_pd == lbl_pd[780, 300]) if lbl_pd[780, 300] > 0 else pd_navy
+    pd_skirt_mask = binary_fill_holes(pd_main | (binary_dilation(pd_main, iterations=2) & (pd_r < 120) & (pd_g < 120) & (pd_b < 170) & (yg >= 602) & (yg <= 885)))
+
+    coat_waist_guard = binary_erosion(opaque & (yg >= 600) & (yg <= 884) & (~is_thigh_skin), iterations=2)
+    skirt_full_mask = sk_vis_full | (pd_skirt_mask & coat_waist_guard)
+    pd_matched = match_rgb_to_ref(p_skirt_full[:, :, :3], s0[:, :, :3], sk_vis & pd_navy)
+    sakura_skirt = np.zeros_like(s0)
+    sakura_skirt[:, :, :3] = np.where(sk_vis_full[:, :, None], s0[:, :, :3], pd_matched)
+    sk_src_a = np.where(sk_vis_full, s0[:, :, 3].astype(np.float32), 255.0)
+    sk_w = crisp_mask_weight(skirt_full_mask, sk_vis_full, 0.35)
+    sakura_skirt[:, :, 3] = np.clip(np.round(sk_src_a * sk_w), 0, 255).astype(np.uint8)
+    sakura_skirt[sakura_skirt[:, :, 3] == 0, :3] = 0
+    save_rgba(decontaminate_outer_aa(sakura_skirt, scope_mask=solid_inner), PARTS_DIR / "sakura_skirt.png")
+
+    # ── 16) Clean Yellow-Bow-Free Coat Flaps L (`z=36`) & R (`z=34`) ────
+    coat_vis_area = (
+        (opaque & (yg >= 596) & (yg <= 816) & (~sk_vis_full) & (~arm_r_mask) & (~arm_f_core) & (~is_thigh_skin) & (~(wbow_mask & (~solid_full))))
         | (btn_guard & opaque & (yg >= 596))
     )
-    # Keep outer 1px AA silhouette strictly on upper_torso (y <= 626) so composited alpha never doubles along waist edge!
-    coat_outer_trim = ~((yg <= 626) & (~solid_inner))
+    coat_outer_trim = (~((yg <= 612) & (~solid_full))) & (~(sk_vis_full & (~solid_full)))
     x_mid_slit = 358.0 + 0.13 * np.maximum(yg.astype(np.float32) - 678.0, 0.0)
-    flap_l_mask = coat_all & coat_outer_trim & (xg.astype(np.float32) <= x_mid_slit) & (xg >= 134)
-    tuck_ext = np.where(yg <= 676, 14.0, 0.0)
-    flap_r_base = coat_all & coat_outer_trim & (xg.astype(np.float32) >= x_mid_slit - tuck_ext) & (xg <= 478)
+
+    pc_coat_matched = match_rgb_to_ref(p_coat_free[:, :, :3], s0[:, :, :3], coat_vis_area & is_pure_white_coat & (~wbow_mask))
+    wbow_clean_patch = binary_dilation(wbow_mask, iterations=2) & (p_coat_free[:, :, 3] > 140) & solid_full & (~sk_vis_full)
+
+    flap_l_mask = (coat_vis_area | wbow_clean_patch) & coat_outer_trim & (xg.astype(np.float32) <= x_mid_slit) & (xg >= 134)
+    use_s0_flap_l = coat_vis_area & (~wbow_mask)
+    flap_l_out = np.zeros_like(s0)
+    flap_l_out[:, :, :3] = np.where(use_s0_flap_l[:, :, None], s0[:, :, :3], pc_coat_matched)
+    flap_l_src_a = np.where(use_s0_flap_l, s0[:, :, 3].astype(np.float32), 255.0)
+    flap_l_w = crisp_mask_weight(flap_l_mask, (use_s0_flap_l & coat_outer_trim & (xg.astype(np.float32) <= x_mid_slit + 1.0)) | solid_full, 0.35)
+    flap_l_out[:, :, 3] = np.clip(np.round(flap_l_src_a * flap_l_w), 0, 255).astype(np.uint8)
+    flap_l_out[flap_l_out[:, :, 3] == 0, :3] = 0
+    save_rgba(decontaminate_outer_aa(flap_l_out, scope_mask=solid_inner), PARTS_DIR / "sakura_coat_flap_l.png")
+
+    tuck_ext = np.where(yg <= 676, 16.0, 0.0)
+    flap_r_base = (coat_vis_area | wbow_clean_patch) & coat_outer_trim & (xg.astype(np.float32) >= x_mid_slit - tuck_ext) & (xg <= 478)
     flap_r_base &= ~((yg <= 676) & (xg.astype(np.float32) < x_mid_slit) & (~solid_inner))
-    # Tuck 6px of clean coat white under arm_r's sleeve border (y=650..758) so arm sway never opens a gap or ghost seam!
+    arm_r_below = arm_r_mask & (yg >= 445)
     flap_r_under_arm = (
-        solid_inner
-        & arm_r_below_shoulder
-        & binary_dilation(flap_r_base & (yg >= 650) & (yg <= 758), iterations=6)
-        & (yg >= 650)
-        & (yg <= 758)
-        & (~wbow_mask)
+        solid_full & arm_r_below & binary_dilation(flap_r_base & (yg >= 650) & (yg <= 758), iterations=7) & (yg >= 650) & (yg <= 758) & (~wbow_mask)
     )
     flap_r_mask = flap_r_base | flap_r_under_arm
-
-    flap_r_inpaint = (
-        flap_r_mask
-        & (
-            binary_erosion(wbow_mask, iterations=1)
-            | ((yg <= 676) & (xg.astype(np.float32) < x_mid_slit + 2.0))
-            | flap_r_under_arm
-        )
-        & (~btn_guard)
-    )
-    coat_known_r = flap_r_base & is_pure_white_coat & (~wbow_mask) & (~flap_r_inpaint)
-    flap_r_rgb = diffuse_from_known(s0[:, :, :3], flap_r_inpaint, coat_known_r, iters=120)
-
-    flap_l_w = crisp_mask_weight(flap_l_mask, coat_all & coat_outer_trim & (xg.astype(np.float32) <= x_mid_slit + 1.0), 0.35)
-    flap_r_w = crisp_mask_weight(flap_r_mask, coat_all & coat_outer_trim & (xg.astype(np.float32) >= x_mid_slit - tuck_ext - 1.0), 0.35)
-    save_rgba(extract_layer(s0, flap_l_w), PARTS_DIR / "sakura_coat_flap_l.png")
-    flap_r_full = s0.copy()
-    flap_r_full[:, :, :3] = flap_r_rgb
-    flap_r_src_a = np.where(flap_r_under_arm, 255.0, s0[:, :, 3].astype(np.float32))
-    flap_r_out = flap_r_full.copy()
+    use_s0_flap_r = coat_vis_area & (~wbow_mask) & (~flap_r_under_arm) & (xg.astype(np.float32) >= x_mid_slit)
+    coat_known_r = flap_r_base & is_pure_white_coat & (~wbow_mask) & (~flap_r_under_arm)
+    under_arm_rgb = diffuse_from_known(pc_coat_matched, flap_r_under_arm, coat_known_r, iters=120)
+    flap_r_rgb = np.where(use_s0_flap_r[:, :, None], s0[:, :, :3], np.where(flap_r_under_arm[:, :, None], under_arm_rgb, pc_coat_matched))
+    flap_r_src_a = np.where(use_s0_flap_r, s0[:, :, 3].astype(np.float32), np.where(flap_r_mask, 255.0, 0.0))
+    flap_r_w = crisp_mask_weight(flap_r_mask, (use_s0_flap_r & coat_outer_trim & (xg.astype(np.float32) >= x_mid_slit - tuck_ext - 1.0)) | solid_full, 0.35)
+    flap_r_out = np.zeros_like(s0)
+    flap_r_out[:, :, :3] = flap_r_rgb
     flap_r_out[:, :, 3] = np.clip(np.round(flap_r_src_a * flap_r_w), 0, 255).astype(np.uint8)
-    save_rgba(flap_r_out, PARTS_DIR / "sakura_coat_flap_r.png")
+    flap_r_out[flap_r_out[:, :, 3] == 0, :3] = 0
+    save_rgba(decontaminate_outer_aa(flap_r_out, scope_mask=solid_inner), PARTS_DIR / "sakura_coat_flap_r.png")
 
-    # 14) Upper Torso (z=40): collar + chest bodice + solid shoulder sleeve cap + BOTH upper buttons (ZERO bow-halo bleed!)
-    torso_poly = poly_mask(
-        (h, w),
-        [
-            (166, 392),
-            (256, 392),
-            (308, 386),
-            (314, 408),
-            (356, 408),
-            (360, 386),
-            (446, 398),
-            (464, 448),
-            (468, 482),
-            (402, 482),
-            (414, 588),
-            (420, 628),
-            (166, 628),
-        ],
-    )
-    torso_mask = opaque & torso_poly & (~cb_mask)
-    hair_scrap_top = torso_mask & is_hair_like & (yg <= 395)
-    torso_mask &= ~hair_scrap_top
-
-    # Inpaint STRICTLY inside eroded bow interiors so cyan piping, outlines, and upper buttons stay 100% intact!
-    torso_inpaint = (
-        torso_mask
-        & (binary_erosion(cbow_mask, iterations=1) | binary_erosion(wbow_mask, iterations=1))
-        & (~hand_skin)
-        & (~btn_guard)
-        & (yg >= 464)
-    )
-    coat_known_t = torso_mask & is_pure_white_coat & (~cbow_mask) & (~wbow_mask) & (~torso_inpaint) & (yg >= 460)
-    torso_rgb = diffuse_from_known(s0[:, :, :3], torso_inpaint, coat_known_t, iters=150)
-
-    # Smooth fade below waist (y=612..626, over coat_flap) & right shoulder arm tuck (y=462..478, under arm_r)
-    waist_bot_w = np.clip((626.0 - yg.astype(np.float32)) / 14.0, 0.0, 1.0)
-    shoulder_bot_w = np.where((xg >= 402) & (yg >= 455) & (yg <= 484), np.clip((478.0 - yg.astype(np.float32)) / 16.0, 0.0, 1.0), 1.0)
-    torso_outer_trim = ~((xg >= 402) & (yg >= 450) & (~solid_inner))
-    torso_w = crisp_mask_weight(torso_mask & torso_outer_trim, opaque & torso_poly & (~cb_mask) & torso_outer_trim, 0.35) * waist_bot_w * shoulder_bot_w
-    sakura_torso = s0.copy()
-    sakura_torso[:, :, :3] = torso_rgb
-    sakura_torso = extract_layer(sakura_torso, torso_w)
-    save_rgba(sakura_torso, PARTS_DIR / "sakura_upper_torso.png")
-
-    # 15) Cute Legs + Frilly Ribbon Socks + Mary Jane Shoes (solid under-skirt tuck & under-leg overlap, ZERO hem ghost!)
+    # ── 17) Complete Legs + Frilly Ribbon Socks + Mary Jane Shoes (`z=18, 19`) ──
     legs_zone = opaque & (yg >= 862)
-    skirt_hem_overlap = (yg <= 885) & (binary_dilation(sk_vis_full, iterations=1) | ((b > r + 14) & (r < 175)))
+    skirt_hem_overlap = (yg <= 883) & sk_vis_full
     legs_clean = legs_zone & (~skirt_hem_overlap)
-    thigh_env = poly_mask((h, w), [(234, 836), (400, 836), (402, 886), (236, 886)])
-    thigh_extend = thigh_env & (~legs_clean) & (yg <= 886) & solid_inner
-    thigh_seed = legs_clean & (yg >= 878) & (yg <= 935) & (r >= 225) & (g >= 180) & (r >= b + 20)
-    legs_rgb = diffuse_from_known(s0[:, :, :3], thigh_extend, thigh_seed, iters=110)
+    st_thigh_env = (st_legwear[:, :, 3] > 140) & (yg >= 752) & (yg <= 885) & (xg >= 220) & (xg <= 415) & solid_inner
+    thigh_extend = st_thigh_env & (~legs_clean) & (yg <= 885)
+    thigh_seed = legs_clean & (yg >= 878) & (yg <= 945) & (r >= 225) & (g >= 180) & (r >= b + 20)
+    legs_rgb = diffuse_from_known(s0[:, :, :3], thigh_extend, thigh_seed, iters=140)
     legs_all_mask = legs_clean | thigh_extend
 
     x_sep = np.where(yg < 995, 323.0, 325.0 + 0.10 * np.maximum(yg.astype(np.float32) - 995.0, 0.0))
-    # leg_l (z=18, behind leg_r z=19) extends 10px right under leg_r for zero alpha dip at thigh overlap
     leg_base_w = crisp_mask_weight(legs_all_mask, opaque | thigh_extend, 0.35)
-    mask_l_f = np.clip((x_sep + 10.0 - xg.astype(np.float32)) / 4.0, 0.0, 1.0) * np.where(xg.astype(np.float32) >= x_sep - 2.0, solid_inner.astype(np.float32), leg_base_w)
-    mask_r_f = np.clip((xg.astype(np.float32) - (x_sep - 2.0)) / 4.0, 0.0, 1.0) * leg_base_w
+    mask_l_f = leg_base_w * np.clip((x_sep + 10.0 - xg.astype(np.float32)) / 4.0, 0.0, 1.0) * np.where(xg.astype(np.float32) >= x_sep - 2.0, solid_full.astype(np.float32), 1.0)
+    mask_r_f = np.clip((xg.astype(np.float32) - (x_sep - 4.0)) / 4.0, 0.0, 1.0) * leg_base_w
 
-    legs_full = s0.copy()
+    legs_full = np.zeros_like(s0)
     legs_full[:, :, :3] = legs_rgb
-    save_rgba(extract_layer(legs_full, mask_l_f), PARTS_DIR / "sakura_leg_l.png")
-    save_rgba(extract_layer(legs_full, mask_r_f), PARTS_DIR / "sakura_leg_r.png")
+    legs_full[:, :, 3] = np.where(legs_clean, s0[:, :, 3], np.where(thigh_extend, st_legwear[:, :, 3], 0))
+    save_rgba(decontaminate_outer_aa(extract_layer(legs_full, mask_l_f), scope_mask=solid_inner), PARTS_DIR / "sakura_leg_l.png")
+    save_rgba(decontaminate_outer_aa(extract_layer(legs_full, mask_r_f), scope_mask=solid_inner), PARTS_DIR / "sakura_leg_r.png")
 
     return [
         {
@@ -815,6 +1189,22 @@ def build_sakura_parts() -> list[dict]:
             "phase_offset": 0.25,
         },
         {
+            "id": "forearm_front",
+            "parent": "upper_torso",
+            "texture": "parts/sakura_forearm_front.png",
+            "z": 52,
+            "pivot_px": [212.0, 442.0],
+            "role": "arm",
+            "parallax": [0.16, 0.12],
+            "rot_deg": 1.6,
+            "bend_px": 2.2,
+            "breath_px": [0.0, -1.2],
+            "scale_breath": [0.0, 0.0],
+            "spring_omega": 8.0,
+            "spring_zeta": 0.44,
+            "phase_offset": 0.15,
+        },
+        {
             "id": "waist_bow",
             "parent": "coat_flap_r",
             "texture": "parts/sakura_waist_bow.png",
@@ -834,12 +1224,12 @@ def build_sakura_parts() -> list[dict]:
             "id": "hair_curl_l",
             "parent": "head_base",
             "texture": "parts/sakura_hair_curl_l.png",
-            "z": 56,
-            "pivot_px": [232.0, 242.0],
+            "z": 63,
+            "pivot_px": [246.0, 188.0],
             "role": "hair_side_l",
             "parallax": [0.40, 0.20],
-            "rot_deg": 4.4,
-            "bend_px": 7.5,
+            "rot_deg": 3.6,
+            "bend_px": 6.2,
             "breath_px": [0.0, 0.0],
             "scale_breath": [0.0, 0.0],
             "spring_omega": 9.2,
@@ -883,11 +1273,11 @@ def build_sakura_parts() -> list[dict]:
             "parent": "head_base",
             "texture": "parts/sakura_hair_curl_r.png",
             "z": 64,
-            "pivot_px": [420.0, 236.0],
+            "pivot_px": [412.0, 188.0],
             "role": "hair_side_r",
             "parallax": [0.40, 0.20],
-            "rot_deg": 4.6,
-            "bend_px": 7.8,
+            "rot_deg": 3.8,
+            "bend_px": 6.4,
             "breath_px": [0.0, 0.0],
             "scale_breath": [0.0, 0.0],
             "spring_omega": 9.8,
@@ -895,11 +1285,24 @@ def build_sakura_parts() -> list[dict]:
             "phase_offset": 0.72,
         },
         {
+            "id": "crown_hair",
+            "parent": "head_base",
+            "texture": "parts/sakura_crown_hair.png",
+            "z": 61,
+            "pivot_px": [330.0, 170.0],
+            "role": "head",
+            "parallax": [0.0, 0.0],
+            "rot_deg": 0.0,
+            "bend_px": 0.0,
+            "breath_px": [0.0, 0.0],
+            "scale_breath": [0.0, 0.0],
+        },
+        {
             "id": "hair_wing_l",
             "parent": "head_base",
             "texture": "parts/sakura_hair_wing_l.png",
             "z": 66,
-            "pivot_px": [232.0, 162.0],
+            "pivot_px": [266.0, 166.0],
             "role": "hair_bangs",
             "parallax": [0.50, 0.30],
             "rot_deg": 3.4,
@@ -915,7 +1318,7 @@ def build_sakura_parts() -> list[dict]:
             "parent": "head_base",
             "texture": "parts/sakura_hair_wing_r.png",
             "z": 67,
-            "pivot_px": [426.0, 168.0],
+            "pivot_px": [392.0, 156.0],
             "role": "hair_bangs",
             "parallax": [0.50, 0.30],
             "rot_deg": 3.4,
@@ -931,7 +1334,7 @@ def build_sakura_parts() -> list[dict]:
             "parent": "head_base",
             "texture": "parts/sakura_hair_bangs_center.png",
             "z": 69,
-            "pivot_px": [314.0, 148.0],
+            "pivot_px": [314.0, 140.0],
             "role": "hair_bangs",
             "parallax": [0.90, 0.65],
             "rot_deg": 3.6,
@@ -965,7 +1368,7 @@ def build_sakura_parts() -> list[dict]:
             "parent": "head_base",
             "texture": "parts/sakura_ahoge.png",
             "z": 80,
-            "pivot_px": [314.0, 125.0],
+            "pivot_px": [312.0, 130.0],
             "role": "ahoge",
             "parallax": [0.22, -0.18],
             "rot_deg": 7.0,
@@ -1003,14 +1406,12 @@ def _render_unyu_glasses_4x(shape: tuple[int, int]) -> np.ndarray:
     im = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
 
     frame_col = (27, 29, 62, 255)
-    # 40% translucent charcoal-indigo lenses (102/255 = 40.0%)
     lens_col = (30, 36, 62, 102)
     glare_col = (150, 170, 222, 118)
 
     lx, ly, lr_out, lr_in = 180.0, 201.5, 27.6, 22.8
     rx, ry, rr_out, rr_in = 277.5, 195.0, 26.8, 22.2
 
-    # 1. Left & right lenses (separate glare layer clipped strictly to each circular lens)
     lens_layer = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
     ld = ImageDraw.Draw(lens_layer)
     _draw_ss_circle(ld, lx, ly, lr_in, ss, fill=lens_col)
@@ -1032,7 +1433,6 @@ def _render_unyu_glasses_4x(shape: tuple[int, int]) -> np.ndarray:
     lens_layer = Image.alpha_composite(lens_layer, glare_clipped)
     im = Image.alpha_composite(im, lens_layer)
 
-    # 2. Crisp 100% opaque bridge, temples & circular rims
     d = ImageDraw.Draw(im)
     d.line([(39 * ss, 173 * ss), (49 * ss, 168 * ss), (153 * ss, 196 * ss)], fill=frame_col, width=4 * ss, joint="curve")
     d.line([(303 * ss, 192 * ss), (332 * ss, 155 * ss)], fill=frame_col, width=4 * ss)
@@ -1171,20 +1571,16 @@ def build_unyu_parts(clean_sources: dict[str, np.ndarray] | None = None) -> tupl
     is_pure_periwinkle = opaque & (b >= r + 48) & (b >= 195) & (r >= 115) & (g >= 120) & ((r <= 195) | (b >= 235))
     is_pink_blush = opaque & (r >= 165) & (r > b + 8) & (yg >= 165) & (yg <= 238)
 
-    # 1) Tuft (z=20)
+    # 1) Tuft (z=20) with smooth inner root overlap so swaying tuft never peels away from dome
     tuft_poly = poly_mask((h, w), [(10, 26), (114, 26), (112, 66), (102, 102), (92, 132), (10, 148)])
     tuft_mask = opaque & tuft_poly
     save_rgba(extract_layer(u10, soft_weight(tuft_mask, 0.8)), PARTS_DIR / "unyu_tuft.png")
 
-    # Clean Spotless Mochi Body (z=10):
-    # First fit smooth monotonic body boundary through tuft shoulder -> waist and right dome -> waist
-    # so temple cutouts & smooth dome behind tuft have 100% continuous anti-aliased #161854 border!
+    # 2) Clean Spotless Round Mochi Body (z=10) with continuous left curve behind tuft
     interior_body = binary_erosion(opaque, iterations=3)
     interior_1px = binary_erosion(opaque, iterations=1) & (~((r < 80) & (g < 80) & (b < 140)))
     gloss_preserve = poly_mask((h, w), [(220, 45), (365, 45), (365, 118), (220, 118)])
-    eyebrow_erase = poly_mask((h, w), [(132, 112), (314, 112), (314, 150), (132, 150)]) & binary_dilation(
-        r < 105, iterations=2
-    )
+    eyebrow_erase = poly_mask((h, w), [(132, 112), (314, 112), (314, 150), (132, 150)]) & binary_dilation(r < 105, iterations=2)
     face_wipe = poly_mask((h, w), [(104, 148), (322, 148), (322, 260), (104, 260)])
     paw_wipe = poly_mask((h, w), [(116, 232), (212, 232), (212, 330), (116, 330)]) | poly_mask(
         (h, w), [(246, 226), (340, 226), (340, 326), (246, 326)]
@@ -1194,15 +1590,12 @@ def build_unyu_parts(clean_sources: dict[str, np.ndarray] | None = None) -> tupl
     temple_erase = (temple_l_wipe | temple_r_wipe) & binary_dilation((~is_pure_periwinkle) & (r < 135), iterations=2)
     blush_body_wipe = ellipse_mask((h, w), 318.0, 202.0, 34.0, 24.0) & binary_dilation(is_pink_blush, iterations=3)
 
-    body_erase = (
-        ((eyebrow_erase | face_wipe | paw_wipe | temple_erase) & interior_body) | (blush_body_wipe & interior_1px)
-    ) & (~gloss_preserve)
+    body_erase = (((eyebrow_erase | face_wipe | paw_wipe | temple_erase) & interior_body) | (blush_body_wipe & interior_1px)) & (~gloss_preserve)
     pure_periwinkle_core = binary_erosion(is_pure_periwinkle, iterations=2)
     not_right_rim = ~((xg >= 272) & (yg <= 212) & (r >= 160))
     body_known = binary_erosion(opaque, iterations=3) & pure_periwinkle_core & not_right_rim & (~body_erase) & (~tuft_mask)
     body_rgb = diffuse_from_known(u10[:, :, :3], body_erase, body_known, iters=220)
 
-    # Sample strictly on oval torso below tuft (y=150..162 and y=198..232 on left; y=124..140 and y=182..216 on right)
     border_l_band = (yg >= 146) & (yg <= 234) & (xg <= 75) & opaque
     ys_sample_l, xs_sample_l = [], []
     for yy_i in list(range(149, 164)) + list(range(196, 232)):
@@ -1223,18 +1616,28 @@ def build_unyu_parts(clean_sources: dict[str, np.ndarray] | None = None) -> tupl
     poly_r = np.poly1d(np.polyfit(ys_sample_r, xs_sample_r, 2))
     fit_x_r = poly_r(yg.astype(np.float32))
 
-    smooth_dome_cut = poly_mask((h, w), [(6, 20), (96, 20), (88, 66), (72, 118), (52, 152), (6, 152)])
+    # Smooth rounded top-left cranium behind tuft (replaces angular diagonal slice at y=48..148)
+    dome_pts_l = [
+        (134.0, 52.0),
+        (110.0, 62.0),
+        (90.0, 82.0),
+        (74.0, 108.0),
+        (60.0, 134.0),
+        (51.0, 154.0),
+    ]
+    smooth_dome_cut = poly_mask((h, w), [(4, 20), (134, 20)] + dome_pts_l + [(4, 156)])
     patch_l = (yg >= 164) & (yg <= 196) & (xg <= 64)
     patch_r = (yg >= 142) & (yg <= 178) & (xg >= 316)
-    body_mask = opaque & (~smooth_dome_cut)
+    body_mask = (opaque | (xg >= 90) & (xg <= 140) & (yg >= 52) & (yg <= 145)) & (~smooth_dome_cut)
+    body_mask = body_mask & (opaque | tuft_mask | poly_mask((h, w), [(134, 52), (134, 154), (51, 154)] + dome_pts_l))
     body_mask = np.where(patch_l, xg.astype(np.float32) >= fit_x_l, body_mask)
     body_mask = np.where(patch_r, xg.astype(np.float32) <= fit_x_r, body_mask)
 
     body_rgb = diffuse_from_known(
         body_rgb,
-        body_mask & (patch_l | patch_r) & (~pure_periwinkle_core),
+        body_mask & (patch_l | patch_r | ((~opaque) & tuft_mask) | ((yg <= 156) & (xg <= 136) & (~pure_periwinkle_core))) & (~pure_periwinkle_core),
         body_known,
-        iters=120,
+        iters=140,
     )
 
     unyu_body = np.zeros_like(u10)
@@ -1242,7 +1645,7 @@ def build_unyu_parts(clean_sources: dict[str, np.ndarray] | None = None) -> tupl
     unyu_body[:, :, 3] = np.clip(np.round(soft_weight(body_mask, 0.8) * 255.0), 0, 255).astype(np.uint8)
     contour_im = Image.fromarray(unyu_body)
     draw_c = ImageDraw.Draw(contour_im)
-    draw_c.line([(96, 56), (86, 86), (72, 118), (52, 150)], fill=(22, 22, 82, 255), width=4, joint="curve")
+    draw_c.line(dome_pts_l, fill=(22, 22, 82, 255), width=4, joint="curve")
     pts_l = [(float(poly_l(yy_f)) + 1.8, float(yy_f)) for yy_f in range(160, 201, 3)]
     pts_r = [(float(poly_r(yy_f)) - 1.8, float(yy_f)) for yy_f in range(138, 183, 3)]
     draw_c.line(pts_l, fill=(22, 22, 82, 255), width=4, joint="curve")
@@ -1252,29 +1655,23 @@ def build_unyu_parts(clean_sources: dict[str, np.ndarray] | None = None) -> tupl
     unyu_body[unyu_body[:, :, 3] == 0, :3] = 0
     save_rgba(unyu_body, PARTS_DIR / "unyu_body.png")
 
-    # 3) 4x-supersampled clean standalone Paws (matching exact `unyu_body` gradient!) & 40%-Translucent Sunglasses
     paw_l, paw_r = _render_unyu_paws_4x((h, w), unyu_body)
     save_rgba(paw_l, PARTS_DIR / "unyu_paw_l.png")
     save_rgba(paw_r, PARTS_DIR / "unyu_paw_r.png")
     unyu_glasses = _render_unyu_glasses_4x((h, w))
     save_rgba(unyu_glasses, PARTS_DIR / "unyu_glasses.png")
 
-    # 4) Clean sunglasses-free, paw-free expression bases (`unyu_clean_s10/11/12.png`)
-    # Built directly on `unyu_body` so outer rim/gloss are 100% identical to `unyu_body.png`
-    # and `mochi_face` DiffOverlay NEVER copies a single border/rim outline pixel!
     def clean_base_for(expr_arr: np.ndarray, mode: str) -> np.ndarray:
         out = unyu_body.copy()
         out[tuft_mask] = u10[tuft_mask]
         er = expr_arr[:, :, 0].astype(np.int16)
         eb = expr_arr[:, :, 2].astype(np.int16)
 
-        # Graft crisp dark eyebrows without disturbing surrounding body shading/gloss
         brow_l = poly_mask((h, w), [(142, 116), (195, 116), (195, 149), (142, 149)])
         brow_r = poly_mask((h, w), [(252, 112), (303, 112), (303, 149), (252, 149)])
         brow_mask = (brow_l | brow_r) & binary_dilation((er < 115) & (eb < 155), iterations=1)
         out[brow_mask] = expr_arr[brow_mask]
 
-        # Graft clean mouth
         if mode == "s11":
             m_box = ellipse_mask((h, w), 230.5, 226.5, 20.5, 23.0)
             mouth_keep = m_box & binary_dilation((er < 120) | (er > eb + 10), iterations=2)
@@ -1286,7 +1683,6 @@ def build_unyu_parts(clean_sources: dict[str, np.ndarray] | None = None) -> tupl
             mouth_keep = m_box & binary_dilation((er < 105) | (er > eb + 10), iterations=1)
         out[mouth_keep] = expr_arr[mouth_keep]
 
-        # Graft or draw eyes (100% free of glasses rim/lens smudge)
         if mode == "s10":
             is_lens_tint = (er >= 95) & (er <= 185) & (eb - er < 36)
             eye_boxes = (
@@ -1320,12 +1716,10 @@ def build_unyu_parts(clean_sources: dict[str, np.ndarray] | None = None) -> tupl
             eyes_down = np.array(eye_im.resize((w, h), Image.Resampling.LANCZOS), dtype=np.uint8)
             out = alpha_composite_np(out, eyes_down)
 
-        # Fresh crisp soft coral-pink blushes positioned cleanly beside eyes & outside mouth
         out = _paint_blush_ellipse(out, 140.0, 205.0, 22.5, 10.5)
         out = _paint_blush_ellipse(out, 308.0, 196.0, 20.5, 9.8)
         return out
 
-    # Also build crisp glasses-free blink overlay (`surface111.png`) so SERIKO blink never stamps old sunglasses!
     ss = 4
     blink_im = Image.new("RGBA", (w * ss, h * ss), (0, 0, 0, 0))
     bd = ImageDraw.Draw(blink_im)
@@ -1352,7 +1746,6 @@ def build_unyu_parts(clean_sources: dict[str, np.ndarray] | None = None) -> tupl
     save_rgba(clean_s11, PARTS_DIR / "unyu_clean_s11.png")
     save_rgba(clean_s12, PARTS_DIR / "unyu_clean_s12.png")
 
-    # 5) Clean Unyu Face rest frame (eyebrows/eyes/blush/`:3` mouth, ZERO glasses!)
     face_patch_box = poly_mask((h, w), [(106, 106), (332, 106), (332, 260), (106, 260)])
     interior_face = binary_erosion(opaque, iterations=10)
     face_diff = face_patch_box & interior_face & (
@@ -1363,7 +1756,6 @@ def build_unyu_parts(clean_sources: dict[str, np.ndarray] | None = None) -> tupl
 
     save_rgba(np.zeros_like(u10), PARTS_DIR / "unyu_crown_slot.png")
 
-    # 6) Overwrite static `surface10.png`, `surface11.png`, `surface12.png` with clean composited versions
     for fname, clean_src in (("surface10.png", clean_s10), ("surface11.png", clean_s11), ("surface12.png", clean_s12)):
         comp = alpha_composite_np(clean_src, paw_l)
         comp = alpha_composite_np(comp, paw_r)
@@ -1503,7 +1895,6 @@ def main() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     PARTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Preserve existing clean Unyu bases before wiping so repeated runs remain 100% idempotent
     cached_clean: dict[str, np.ndarray] = {}
     for key, fname in (("s10", "unyu_clean_s10.png"), ("s11", "unyu_clean_s11.png"), ("s12", "unyu_clean_s12.png")):
         p = PARTS_DIR / fname

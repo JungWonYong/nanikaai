@@ -330,6 +330,34 @@
         "phase_offset": 0.25
       },
       {
+        "id": "forearm_front",
+        "parent": "upper_torso",
+        "texture": "parts/sakura_forearm_front.png",
+        "z": 52,
+        "pivot_px": [
+          212.0,
+          442.0
+        ],
+        "role": "arm",
+        "parallax": [
+          0.16,
+          0.12
+        ],
+        "rot_deg": 1.6,
+        "bend_px": 2.2,
+        "breath_px": [
+          0.0,
+          -1.2
+        ],
+        "scale_breath": [
+          0.0,
+          0.0
+        ],
+        "spring_omega": 8.0,
+        "spring_zeta": 0.44,
+        "phase_offset": 0.15
+      },
+      {
         "id": "waist_bow",
         "parent": "coat_flap_r",
         "texture": "parts/sakura_waist_bow.png",
@@ -361,18 +389,18 @@
         "id": "hair_curl_l",
         "parent": "head_base",
         "texture": "parts/sakura_hair_curl_l.png",
-        "z": 56,
+        "z": 63,
         "pivot_px": [
-          232.0,
-          242.0
+          246.0,
+          188.0
         ],
         "role": "hair_side_l",
         "parallax": [
           0.4,
           0.2
         ],
-        "rot_deg": 4.4,
-        "bend_px": 7.5,
+        "rot_deg": 3.6,
+        "bend_px": 6.2,
         "breath_px": [
           0.0,
           0.0
@@ -452,16 +480,16 @@
         "texture": "parts/sakura_hair_curl_r.png",
         "z": 64,
         "pivot_px": [
-          420.0,
-          236.0
+          412.0,
+          188.0
         ],
         "role": "hair_side_r",
         "parallax": [
           0.4,
           0.2
         ],
-        "rot_deg": 4.6,
-        "bend_px": 7.8,
+        "rot_deg": 3.8,
+        "bend_px": 6.4,
         "breath_px": [
           0.0,
           0.0
@@ -475,13 +503,38 @@
         "phase_offset": 0.72
       },
       {
+        "id": "crown_hair",
+        "parent": "head_base",
+        "texture": "parts/sakura_crown_hair.png",
+        "z": 61,
+        "pivot_px": [
+          330.0,
+          170.0
+        ],
+        "role": "head",
+        "parallax": [
+          0.0,
+          0.0
+        ],
+        "rot_deg": 0.0,
+        "bend_px": 0.0,
+        "breath_px": [
+          0.0,
+          0.0
+        ],
+        "scale_breath": [
+          0.0,
+          0.0
+        ]
+      },
+      {
         "id": "hair_wing_l",
         "parent": "head_base",
         "texture": "parts/sakura_hair_wing_l.png",
         "z": 66,
         "pivot_px": [
-          232.0,
-          162.0
+          266.0,
+          166.0
         ],
         "role": "hair_bangs",
         "parallax": [
@@ -508,8 +561,8 @@
         "texture": "parts/sakura_hair_wing_r.png",
         "z": 67,
         "pivot_px": [
-          426.0,
-          168.0
+          392.0,
+          156.0
         ],
         "role": "hair_bangs",
         "parallax": [
@@ -537,7 +590,7 @@
         "z": 69,
         "pivot_px": [
           314.0,
-          148.0
+          140.0
         ],
         "role": "hair_bangs",
         "parallax": [
@@ -599,8 +652,8 @@
         "texture": "parts/sakura_ahoge.png",
         "z": 80,
         "pivot_px": [
-          314.0,
-          125.0
+          312.0,
+          130.0
         ],
         "role": "ahoge",
         "parallax": [

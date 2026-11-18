@@ -1,4 +1,4 @@
-# 何か藍 — NanikaAi (`nanikaai` `v0.1.9`)
+# 何か藍 — NanikaAi (`nanikaai` `v0.1.10`)
 
 > 🌐 **Language**: **[日本語 (Default)](#日本語)** | **[English (Default)](#english)** | **[한국어 (Optional)](README.ko.md)**
 >
@@ -19,11 +19,18 @@
 AI エージェントによる自律開発・継続保守で構築された、**100% Safe Rust（`#![forbid(unsafe_code)]`）** 製のマルチ OS 対応 AI デスクトップマスコット基盤（ベースウェア）である。
 macOS・Windows・Linux 環境において、外部ランタイムの導入や OS ネイティブハンドルの `unsafe` 呼び出しを一切行わず、単一ネイティブバイナリとして動作する。
 
+### 🎬 デモ映像（Live2D モーション＆音声読み上げ）
+
+[![何か藍 NanikaAi Live2D モーション＆音声デモ](docs/media/nanikaai_intro_preview.gif)](docs/media/nanikaai_intro_demo.mp4)
+
+- ▶️ **[音声付き紹介動画 (`nanikaai_intro_demo.mp4`, 1280×720 / AivisSpeech 音声入り)](docs/media/nanikaai_intro_demo.mp4)** · 🌐 **[専用紹介ページ (`docs/index.html`)](docs/index.html)**
+- さくら（24パーツ）とうにゅう（7パーツ + 40%半透明サングラス）の滑らかな揺れ・リップシンク、および右クリックメニュー最上段 **`[🎤 声色選択]`** から声色を即座に切り替える動作（`まお` → `らせつん` → `コハク`）を実音声付きで収録している。
+
 ### 主な特徴
 
 | 領域 | 仕様・実装内容 |
 | :--- | :--- |
-| **Zero `unsafe` ネイティブ GUI・外付け Live2D マルチパーツリグ & Siri 風入力** | `winit 0.30` + `wgpu 24` 透過アルファ合成（既存 `.nar` を無改変のまま外付けサイドカー `live2d.json`＋部位別パーツ PNG で `\0` 22層・`\1` 7層の解剖学的 C1 首・頭部視差・多層髪・衣装/リボン・前足・40%半透明サングラスの独立階層ボーン・減衰バネ・`surface_overrides` 無欠損表情/目パチ/口パク/着せ替え合成を GPU マルチパス描画、サイドカー未同梱シェルは足元固定 WGSL 単層リグへ自動切替、同梱オフライン編集ツール `tools/live2d_studio.html` 搭載）と `cosmic-text 0.12` CJK 文字描画を採用している。文字量連動で自動伸縮し上限超え時はマウスホイールで滑らかにスクロールできる吹き出し、サファイアブルー基調・点滅キャレット・IME 下線・送信/閉じるボタン付きの Siri 風 `Communicate` 入力バー（既定 UI 日・英表記）、スクロール可能な右クリックメニュー（最上段にワンクリック既定スキン復帰配置）、OS 別ワークエリア自動接地、トレイ統合を備える。 |
+| **Zero `unsafe` ネイティブ GUI・外付け Live2D マルチパーツリグ & Siri 風入力** | `winit 0.30` + `wgpu 24` 透過アルファ合成（既存 `.nar` を無改変のまま外付けサイドカー `live2d.json`＋部位別パーツ PNG で `\0` 24層・`\1` 7層の解剖学的 C1 首・頭部視差・多層髪・衣装/リボン・前足・40%半透明サングラスの独立階層ボーン・減衰バネ・`surface_overrides` 無欠損表情/目パチ/口パク/着せ替え合成を GPU マルチパス描画、サイドカー未同梱シェルは足元固定 WGSL 単層リグへ自動切替、同梱オフライン編集ツール `tools/live2d_studio.html` 搭載）と `cosmic-text 0.12` CJK 文字描画を採用している。文字量連動で自動伸縮し上限超え時はマウスホイールで滑らかにスクロールできる吹き出し、サファイアブルー基調・点滅キャレット・IME 下線・送信/閉じるボタン付きの Siri 風 `Communicate` 入力バー（既定 UI 日・英表記）、スクロール可能な右クリックメニュー（最上段にワンクリック既定スキン復帰および `[🎤 声色選択]` 配置）、OS 別ワークエリア自動接地、トレイ統合を備える。 |
 | **厳格なスコープ分離（`\0` / `\1`）＆スキン連動ゴースト・着せ替え** | Sakura Script の `\0`（メイン側）と `\1`（パートナー側）のサーフェス解決・会話履歴・長期記憶をアクティブなシェルごとに完全分離し、スキン切替と同時にゴーストの人格・記憶・あいさつ（`OnGhostChanged`）および `bindgroup` 着せ替え状態も切り替える。既存の伺か `.nar` / `.zip` アーカイブのドラッグ＆ドロップおよびメニュー導入に対応し、`.png` / `.pna` アルファマスク合成、`seriko.use_self_alpha`, SERIKO `overlayf` / `replace` / `alternativestart` / `bind`, Shift-JIS `descript.txt`・`surfaces.txt` との高い互換性を備える。汎用ファイル／画像／URL ショートカットのドロップ反応（機密パス事前遮断＋`<untrusted_data>` 隔離）、毎時00分の時報・リマインダー・`OnClose` 終了あいさつ、クリック可能な `\_a` リンク・`\_q` 即時表示、導入済み AivisSpeech (`:10101`) / VOICEVOX `vv-engine` (`:50021`) の手動起動不要な自動ヘッドレス音声読み上げ＆ゴースト別声色選択（＋OS TTS フォールバック）、GitHub Releases 更新確認を搭載。 |
 | **クリーンな資産分離（`MIT` + `CC0-1.0`）** | 同梱の既定スキン（`neo_default`、`clean_default`）は本プロジェクトで独自制作した **CC0-1.0** パブリックドメイン資産のみを含む。`\0`（正統派萌えテイストの紺白リボン衣装＋レースフリルリボン靴下＆メリージェーン風女性用パンプス、`330x675 pt` `@2x`）、`\1`（鮮明なペリウィンクルブルー `#94A3FF` の丸もち体型と独立 40% 半透明丸サングラス＋無欠損の表情目元 `@2x`）、半透明パール調グラス吹き出し（`@2x`）で構成する。個人所有のクラシックシェル／バルーンは各 OS のユーザー領域から自動読み込みする。 |
 | **マルチ AI 接続 & SSTP/HTTP 二重サーバー** | ローカル・リモート Ollama（`gemma4` 等）、Gemini CLI/API、Claude CLI/API、ChatGPT Codex、OpenAI 互換先に対応し、中国製 LLM 遮断保護を内蔵する。HTTP JSON（`127.0.0.1:9821`）とクラシック `SSTP/1.4` TCP（`127.0.0.1:9801`）を同時提供する。 |
@@ -151,11 +158,18 @@ Named **`何か藍 (NanikaAi)`** by combining **`何か (Nanika)`** — the pred
 An **AI-developed and AI-maintained**, **100% Safe Rust (`#![forbid(unsafe_code)]`)** cross-platform AI desktop mascot baseware.
 It compiles into a single native binary for macOS, Windows, and Linux without external runtime dependencies or any `unsafe` OS handle calls.
 
+### 🎬 Live2D Motion & Voice Demo
+
+[![NanikaAi Live2D Motion and Voice Demo](docs/media/nanikaai_intro_preview.gif)](docs/media/nanikaai_intro_demo.mp4)
+
+- ▶️ **[Full HD Demo Video with Audio (`nanikaai_intro_demo.mp4`, 1280×720 / AivisSpeech TTS)](docs/media/nanikaai_intro_demo.mp4)** · 🌐 **[Interactive Showcase Page (`docs/index.html`)](docs/index.html)**
+- Demonstrates smooth 24+7 multi-part Live2D sway, RMS-synchronized lip-sync, speech balloons, and switching voices (`まお` → `らせつん` → `コハク`) directly from the top of the right-click context menu.
+
 ### Key Features
 
 | Area | Capabilities |
 | :--- | :--- |
-| **Zero `unsafe` Native GUI, External-Sidecar Multi-Part Live2D Rig & Siri-Style Chat** | Built on `winit 0.30` + `wgpu 24` transparent compositing (external sidecar `live2d.json` + individual part PNGs keep classic `.nar` packages untouched while driving 22 Sakura anatomical & 7 Unyu layers with C1 neck-head-face joints, multi-layer hair/coat-flaps/ribbons, independent damped-spring pendulums, `surface_overrides` unbroken expressions, and 40%-translucent layered sunglasses in 100% Safe Rust multi-pass GPU compositing — gracefully falling back to the single-texture WGSL rig for sidecar-free shells; includes bundled offline rig editor `tools/live2d_studio.html`) and `cosmic-text 0.12` CJK shaping. Features dynamically auto-sizing & scrollable speech balloons, a sapphire Siri-style `Communicate` glass bar with blinking caret, IME preedit underline, Send/Close buttons and Japanese/English default chrome, a scrollable context menu with 1-click default skin restore at the top, OS work-area snapping, and `tray-icon`. |
+| **Zero `unsafe` Native GUI, External-Sidecar Multi-Part Live2D Rig & Siri-Style Chat** | Built on `winit 0.30` + `wgpu 24` transparent compositing (external sidecar `live2d.json` + individual part PNGs keep classic `.nar` packages untouched while driving 24 Sakura anatomical & 7 Unyu layers with C1 neck-head-face joints, multi-layer hair/coat-flaps/ribbons, independent damped-spring pendulums, `surface_overrides` unbroken expressions, and 40%-translucent layered sunglasses in 100% Safe Rust multi-pass GPU compositing — gracefully falling back to the single-texture WGSL rig for sidecar-free shells; includes bundled offline rig editor `tools/live2d_studio.html`) and `cosmic-text 0.12` CJK shaping. Features dynamically auto-sizing & scrollable speech balloons, a sapphire Siri-style `Communicate` glass bar with blinking caret, IME preedit underline, Send/Close buttons and Japanese/English default chrome, a scrollable context menu with 1-click default skin restore & `[🎤 声色選択]` voice selection right at the top, OS work-area snapping, and `tray-icon`. |
 | **Strict Character Scope & Skin-Linked Ghost Profiles (`\0` / `\1`)** | Strictly isolates Sakura Script `\0` (main character) and `\1` (partner character) surface resolution plus per-shell Ghost persona, long-term memories, dialogue history, `OnGhostChanged` greeting, and `bindgroup` dress-up layers whenever switching skins. Supports drag-and-drop and menu installation of classic `.nar` / `.zip` packages with `.png` / `.pna` alpha mask compositing, `seriko.use_self_alpha`, SERIKO `overlayf` / `replace` / `alternativestart` / `bind`, and Shift-JIS `descript.txt` & `surfaces.txt` compatibility. Also adds generic file/image/URL drag-and-drop inspection (with pre-read secret path guard and `<untrusted_data>` isolation), hourly chime, `set_reminder`/`list_reminders`, `OnClose` farewell dialogue, clickable `\_a` URL links & `\_q` instant display, zero-manual-launch headless AivisSpeech (`:10101`) / VOICEVOX `vv-engine` (`:50021`) character TTS with per-Ghost `\0`/`\1` voice casting (+ OS TTS fallback), and GitHub Releases update checks. |
 | **Clean Open-Source Asset Separation (`MIT` + `CC0-1.0`)** | Bundled default skins (`neo_default`, `clean_default`) contain only original **CC0-1.0** public-domain assets created for this project: Sakura (`\0`) in a classic cute navy-and-white ribbon outfit with frilly lace-bow socks & feminine Mary Jane strap dress shoes (`330x675 pt` `@2x`), Unyu (`\1`) in vivid periwinkle blue (`#94A3FF`) with soft 2.5D shading, animated paws, unbroken expressive eyes, and floating 40%-translucent round sunglasses (`@2x`), plus a translucent pearl glassmorphism balloon (`@2x`). Classic personal shells load automatically from the OS user data directory. |
 | **Multi-AI Backends & Dual SSTP/HTTP Server** | Connects to local/remote Ollama (`gemma4`, etc.), Gemini CLI/API, Claude CLI/API, ChatGPT Codex, and OpenAI-compatible endpoints with a built-in guard blocking restricted models. Exposes both HTTP JSON (`127.0.0.1:9821`) and classic `SSTP/1.4` TCP (`127.0.0.1:9801`). |

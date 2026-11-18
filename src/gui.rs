@@ -4191,11 +4191,143 @@ impl AppRuntime {
                 label: String::new(),
                 cmd: MenuCommand::Separator,
             },
-            MenuRow {
-                label: "[キャラクターシェル · Shells]".to_string(),
-                cmd: MenuCommand::Separator,
-            },
         ];
+
+        {
+            let (eng_lbl, all_voices) = crate::companion_extras::cached_tts_voices();
+            let base_url = crate::companion_extras::cached_tts_base_url();
+            let installed_uuids = crate::companion_extras::cached_installed_aivm_uuids();
+            let (sak_sp, ker_sp, arch_override) = self
+                .config_store
+                .get_shell_voice_profile(&cfg.active_shell_id);
+            let (arch, _) = self.active_kero_voice_archetype();
+            let resolved = crate::companion_extras::resolve_effective_voice_selection(
+                &all_voices,
+                arch,
+                sak_sp,
+                ker_sp,
+            );
+
+            rows.push(MenuRow {
+                label: format!("[🎤 声色選択 · {eng_lbl}]"),
+                cmd: MenuCommand::Separator,
+            });
+            if !all_voices.is_empty() {
+                let sample = Self::representative_voice_options(&all_voices, 8);
+                rows.push(MenuRow {
+                    label: format!(
+                        "{} (\\0) 声: 自動 ({})",
+                        if sak_sp.is_none() { "✓" } else { " " },
+                        resolved.sakura_label
+                    ),
+                    cmd: MenuCommand::SelectVoiceSpeaker {
+                        scope: 0,
+                        style_id: None,
+                    },
+                });
+                for v in &sample {
+                    let mark = if sak_sp == Some(v.style_id) { "✓" } else { " " };
+                    rows.push(MenuRow {
+                        label: format!("{mark} (\\0) {}", v.label),
+                        cmd: MenuCommand::SelectVoiceSpeaker {
+                            scope: 0,
+                            style_id: Some(v.style_id),
+                        },
+                    });
+                }
+                rows.push(MenuRow {
+                    label: format!(
+                        "{} (\\1) 声: 自動 ({})",
+                        if ker_sp.is_none() { "✓" } else { " " },
+                        resolved.kero_label
+                    ),
+                    cmd: MenuCommand::SelectVoiceSpeaker {
+                        scope: 1,
+                        style_id: None,
+                    },
+                });
+                for v in &sample {
+                    let mark = if ker_sp == Some(v.style_id) { "✓" } else { " " };
+                    rows.push(MenuRow {
+                        label: format!("{mark} (\\1) {}", v.label),
+                        cmd: MenuCommand::SelectVoiceSpeaker {
+                            scope: 1,
+                            style_id: Some(v.style_id),
+                        },
+                    });
+                }
+            } else {
+                rows.push(MenuRow {
+                    label: "   ⏳ 音声エンジン検出中… (AivisSpeech/VOICEVOX)".to_string(),
+                    cmd: MenuCommand::SelectTtsEngine("auto".to_string()),
+                });
+            }
+
+            rows.push(MenuRow {
+                label: "[\\1 パートナー声タイプ]".to_string(),
+                cmd: MenuCommand::Separator,
+            });
+            rows.push(MenuRow {
+                label: format!(
+                    "{} 自動 ({})",
+                    if arch_override.is_none() { "✓" } else { " " },
+                    arch.label_ja()
+                ),
+                cmd: MenuCommand::SelectKeroVoiceArchetype(None),
+            });
+            for (code, albl) in KERO_ARCHETYPE_CHOICES {
+                let mark = if arch_override.as_deref() == Some(*code) {
+                    "✓"
+                } else {
+                    " "
+                };
+                rows.push(MenuRow {
+                    label: format!("{mark} {albl}"),
+                    cmd: MenuCommand::SelectKeroVoiceArchetype(Some((*code).to_string())),
+                });
+            }
+
+            rows.push(MenuRow {
+                label: "[音声エンジン · TTS Engine]".to_string(),
+                cmd: MenuCommand::Separator,
+            });
+            for (eid, elbl) in TTS_ENGINE_CHOICES {
+                let mark = if cfg.tts_engine == *eid { "✓" } else { " " };
+                rows.push(MenuRow {
+                    label: format!("{mark} {elbl}"),
+                    cmd: MenuCommand::SelectTtsEngine((*eid).to_string()),
+                });
+            }
+
+            let show_aivis_catalog = cfg.tts_engine == "auto"
+                || cfg.tts_engine == "aivisspeech"
+                || base_url.as_deref().is_some_and(|u| u.contains(":10101"));
+            if show_aivis_catalog {
+                rows.push(MenuRow {
+                    label: "[📥 音声モデル追加 · AivisHub]".to_string(),
+                    cmd: MenuCommand::Separator,
+                });
+                for m in crate::companion_extras::CURATED_AIVISHUB_MODELS {
+                    let installed = installed_uuids
+                        .iter()
+                        .any(|u| u.eq_ignore_ascii_case(m.uuid));
+                    let mark = if installed { "✓" } else { " " };
+                    let suffix = if installed { " [導入済]" } else { "" };
+                    rows.push(MenuRow {
+                        label: format!("{mark} {}{suffix}", m.menu_label),
+                        cmd: MenuCommand::InstallAivmModel {
+                            uuid: m.uuid.to_string(),
+                            name: m.name.to_string(),
+                        },
+                    });
+                }
+            }
+        }
+
+        rows.push(MenuRow {
+            label: "[キャラクターシェル · Shells]".to_string(),
+            cmd: MenuCommand::Separator,
+        });
 
         for s in shells {
             let mark = if cfg.active_shell_id == s.id { "✓" } else { " " };
@@ -4254,132 +4386,6 @@ impl AppRuntime {
                     label: format!("{mark} ({target_tag}) {} / {}", bg.category, bg.name),
                     cmd: MenuCommand::ToggleBind(bg.bind_id),
                 });
-            }
-        }
-
-        if cfg.voice_tts {
-            let (eng_lbl, all_voices) = crate::companion_extras::cached_tts_voices();
-            let base_url = crate::companion_extras::cached_tts_base_url();
-            let installed_uuids = crate::companion_extras::cached_installed_aivm_uuids();
-            let (sak_sp, ker_sp, arch_override) = self
-                .config_store
-                .get_shell_voice_profile(&cfg.active_shell_id);
-            let (arch, _) = self.active_kero_voice_archetype();
-            let resolved = crate::companion_extras::resolve_effective_voice_selection(
-                &all_voices,
-                arch,
-                sak_sp,
-                ker_sp,
-            );
-
-            rows.push(MenuRow {
-                label: "[音声エンジン · TTS Engine]".to_string(),
-                cmd: MenuCommand::Separator,
-            });
-            for (eid, elbl) in TTS_ENGINE_CHOICES {
-                let mark = if cfg.tts_engine == *eid { "✓" } else { " " };
-                rows.push(MenuRow {
-                    label: format!("{mark} {elbl}"),
-                    cmd: MenuCommand::SelectTtsEngine((*eid).to_string()),
-                });
-            }
-
-            rows.push(MenuRow {
-                label: "[\\1 パートナー声タイプ]".to_string(),
-                cmd: MenuCommand::Separator,
-            });
-            rows.push(MenuRow {
-                label: format!(
-                    "{} 自動 ({})",
-                    if arch_override.is_none() { "✓" } else { " " },
-                    arch.label_ja()
-                ),
-                cmd: MenuCommand::SelectKeroVoiceArchetype(None),
-            });
-            for (code, albl) in KERO_ARCHETYPE_CHOICES {
-                let mark = if arch_override.as_deref() == Some(*code) {
-                    "✓"
-                } else {
-                    " "
-                };
-                rows.push(MenuRow {
-                    label: format!("{mark} {albl}"),
-                    cmd: MenuCommand::SelectKeroVoiceArchetype(Some((*code).to_string())),
-                });
-            }
-
-            if !all_voices.is_empty() {
-                let sample = Self::representative_voice_options(&all_voices, 12);
-                rows.push(MenuRow {
-                    label: format!("[声色 · {eng_lbl}]"),
-                    cmd: MenuCommand::Separator,
-                });
-                rows.push(MenuRow {
-                    label: format!(
-                        "{} (\\0) 声: 自動 ({})",
-                        if sak_sp.is_none() { "✓" } else { " " },
-                        resolved.sakura_label
-                    ),
-                    cmd: MenuCommand::SelectVoiceSpeaker {
-                        scope: 0,
-                        style_id: None,
-                    },
-                });
-                for v in &sample {
-                    let mark = if sak_sp == Some(v.style_id) { "✓" } else { " " };
-                    rows.push(MenuRow {
-                        label: format!("{mark} (\\0) {}", v.label),
-                        cmd: MenuCommand::SelectVoiceSpeaker {
-                            scope: 0,
-                            style_id: Some(v.style_id),
-                        },
-                    });
-                }
-                rows.push(MenuRow {
-                    label: format!(
-                        "{} (\\1) 声: 自動 ({})",
-                        if ker_sp.is_none() { "✓" } else { " " },
-                        resolved.kero_label
-                    ),
-                    cmd: MenuCommand::SelectVoiceSpeaker {
-                        scope: 1,
-                        style_id: None,
-                    },
-                });
-                for v in &sample {
-                    let mark = if ker_sp == Some(v.style_id) { "✓" } else { " " };
-                    rows.push(MenuRow {
-                        label: format!("{mark} (\\1) {}", v.label),
-                        cmd: MenuCommand::SelectVoiceSpeaker {
-                            scope: 1,
-                            style_id: Some(v.style_id),
-                        },
-                    });
-                }
-            }
-
-            let show_aivis_catalog = cfg.tts_engine == "auto"
-                || cfg.tts_engine == "aivisspeech"
-                || base_url.as_deref().is_some_and(|u| u.contains(":10101"));
-            if show_aivis_catalog {
-                rows.push(MenuRow {
-                    label: "[📥 音声モデル追加 · AivisHub]".to_string(),
-                    cmd: MenuCommand::Separator,
-                });
-                for m in crate::companion_extras::CURATED_AIVISHUB_MODELS {
-                    let installed = installed_uuids
-                        .iter()
-                        .any(|u| u.eq_ignore_ascii_case(m.uuid));
-                    let mark = if installed { "✓" } else { " " };
-                    let suffix = if installed { " [導入済]" } else { "" };
-                    rows.push(MenuRow {
-                        label: format!("{mark} {}{suffix}", m.menu_label),
-                        cmd: MenuCommand::InstallAivmModel {
-                            uuid: m.uuid.to_string(),
-                            name: m.name.to_string(),
-                        },
-                    });
-                }
             }
         }
 
@@ -4554,7 +4560,7 @@ impl AppRuntime {
             let _ = menu.append(&bind_sub);
         }
 
-        if cfg.voice_tts {
+        {
             let (eng_lbl, all_voices) = crate::companion_extras::cached_tts_voices();
             let base_url = crate::companion_extras::cached_tts_base_url();
             let installed_uuids = crate::companion_extras::cached_installed_aivm_uuids();
@@ -4943,6 +4949,7 @@ impl AppRuntime {
             MenuCommand::SelectTtsEngine(mode) => {
                 let norm = crate::config_store::normalize_tts_engine(&mode);
                 let updated = self.config_store.update(ConfigPatch {
+                    voice_tts: Some(true),
                     tts_engine: Some(norm.clone()),
                     ..Default::default()
                 });
@@ -4999,7 +5006,11 @@ impl AppRuntime {
                 }
             }
             MenuCommand::SelectKeroVoiceArchetype(arch_opt) => {
-                let shell_id = self.config_store.get().active_shell_id;
+                let updated = self.config_store.update(ConfigPatch {
+                    voice_tts: Some(true),
+                    ..Default::default()
+                });
+                let shell_id = updated.active_shell_id;
                 self.config_store
                     .set_shell_kero_archetype(&shell_id, arch_opt);
                 let (arch, _) = self.active_kero_voice_archetype();
@@ -5015,7 +5026,11 @@ impl AppRuntime {
                 }
             }
             MenuCommand::SelectVoiceSpeaker { scope, style_id } => {
-                let shell_id = self.config_store.get().active_shell_id;
+                let updated = self.config_store.update(ConfigPatch {
+                    voice_tts: Some(true),
+                    ..Default::default()
+                });
+                let shell_id = updated.active_shell_id;
                 self.config_store
                     .set_shell_voice_speaker(&shell_id, scope, style_id);
                 self.rebuild_tray_menu();
@@ -5304,7 +5319,41 @@ impl AppRuntime {
         }
     }
 
+    /// Background-discover installed TTS engines & speaker voices and emit `RefreshMenus`.
+    fn spawn_tts_discovery_refresh(&self, allow_spawn: bool) {
+        let cfg = self.config_store.get();
+        let v_url = cfg.voicevox_url;
+        let eng_mode = cfg.tts_engine;
+        let (arch, _) = self.active_kero_voice_archetype();
+        let proxy_tts = self.proxy.clone();
+        std::thread::spawn(move || {
+            let status =
+                crate::companion_extras::ensure_tts_engine_ready_with_mode_blocking(
+                    &v_url,
+                    &eng_mode,
+                    allow_spawn,
+                );
+            if let Some(base) = status.base_url {
+                if base.contains(":10101") {
+                    let proxy_hub = proxy_tts.clone();
+                    crate::companion_extras::maybe_auto_install_boyish_aivm_async(
+                        base,
+                        arch,
+                        move |_| {
+                            let _ = proxy_hub.send_event(UserEvent::RefreshMenus);
+                        },
+                    );
+                }
+            }
+            let _ = proxy_tts.send_event(UserEvent::RefreshMenus);
+        });
+    }
+
     fn open_menu_near_cursor(&mut self, scope: Scope) {
+        if !self.smoke_mode && crate::companion_extras::cached_tts_voices().1.is_empty() {
+            let allow_spawn = self.config_store.get().voice_tts;
+            self.spawn_tts_discovery_refresh(allow_spawn);
+        }
         let (mx, my, mw, mh) = self.desktop_safe_work_area();
         let fallback_pos = match scope {
             Scope::Sakura => self.sakura.as_ref().map(|c| (c.logical_pos.0 + 40.0, c.logical_pos.1 + 40.0)),
@@ -6398,7 +6447,7 @@ impl AppRuntime {
                 sb.utterance_min_w = 0;
                 sb.large = false;
             }
-            let short_script = "\\0\\s[0]안녕! 何か藍(NanikaAi) v0.1.9!\\e";
+            let short_script = "\\0\\s[0]안녕! 何か藍(NanikaAi) v0.1.10!\\e";
             self.playback.enqueue(parse_dialogue(short_script));
             let _ = self.playback.fast_forward();
             self.sync_balloons_to_playback();
@@ -6424,7 +6473,7 @@ impl AppRuntime {
                 sb.utterance_min_w = 0;
                 sb.large = false;
             }
-            let demo_script = "\\0\\s[0]안녕! 100% Safe Rust 何か藍(NanikaAi) v0.1.9 テスト完了だよ！\\n\\n長い文章では吹き出しが内容に合わせて滑らかに広がり、最大サイズに達すると自動的にスクロールバーとトラックが表示されて、マウスホイールで快適に読み進められます。\\n\\n1行目: 外付けサイドカー Live2D 解剖学的関節・多層髪・衣装揺れ有効化。\\n2行目: うにゅうの40%半透明サングラスと無欠損表情レイヤーを保持。\\n3行目: Gemma/SentencePieceのバイトフォールバック文字も完全復元。\\w3\\1\\s[10]40%半透明サングラスの上からもバッチリ見えてるぜ。\\e";
+            let demo_script = "\\0\\s[0]안녕! 100% Safe Rust 何か藍(NanikaAi) v0.1.10 テスト完了だよ！\\n\\n長い文章では吹き出しが内容に合わせて滑らかに広がり、最大サイズに達すると自動的にスクロールバーとトラックが表示されて、マウスホイールで快適に読み進められます。\\n\\n1行目: 外付けサイドカー Live2D 解剖学的関節・多層髪・衣装揺れ有効化。\\n2行目: うにゅうの40%半透明サングラスと無欠損表情レイヤーを保持。\\n3行目: Gemma/SentencePieceのバイトフォールバック文字も完全復元。\\w3\\1\\s[10]40%半透明サングラスの上からもバッチリ見えてるぜ。\\e";
             self.playback.enqueue(parse_dialogue(demo_script));
             let _ = self.playback.fast_forward();
             self.sync_balloons_to_playback();
@@ -7147,32 +7196,7 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
         if self.smoke_mode {
             let _ = self.proxy.send_event(UserEvent::TriggerSmokeStep);
         } else {
-            if cfg.voice_tts {
-                let v_url = cfg.voicevox_url.clone();
-                let eng_mode = cfg.tts_engine.clone();
-                let (arch, _) = self.active_kero_voice_archetype();
-                let proxy_tts = self.proxy.clone();
-                std::thread::spawn(move || {
-                    let status = crate::companion_extras::ensure_tts_engine_ready_with_mode_blocking(
-                        &v_url,
-                        &eng_mode,
-                        true,
-                    );
-                    if let Some(base) = status.base_url {
-                        if base.contains(":10101") {
-                            let proxy_hub = proxy_tts.clone();
-                            crate::companion_extras::maybe_auto_install_boyish_aivm_async(
-                                base,
-                                arch,
-                                move |_| {
-                                    let _ = proxy_hub.send_event(UserEvent::RefreshMenus);
-                                },
-                            );
-                        }
-                    }
-                    let _ = proxy_tts.send_event(UserEvent::RefreshMenus);
-                });
-            }
+            self.spawn_tts_discovery_refresh(cfg.voice_tts);
             // Boot greeting on background thread
             let eng = self.engine.clone();
             let proxy = self.proxy.clone();
@@ -7295,6 +7319,16 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
             }
             UserEvent::RefreshMenus => {
                 self.rebuild_tray_menu();
+                if self.menu.as_ref().is_some_and(|m| m.visible) {
+                    let rows = self.build_menu_rows();
+                    if let (Some(ref gpu), Some(ref mut m)) = (&self.gpu, &mut self.menu) {
+                        m.rows = rows;
+                        m.hovered_idx = None;
+                        let max_scroll = m.rows.len().saturating_sub(m.max_visible_rows);
+                        m.scroll_row = m.scroll_row.min(max_scroll);
+                        m.redraw(&mut self.text_renderer, gpu);
+                    }
+                }
             }
             UserEvent::TriggerSmokeStep => {
                 if self.smoke_mode && self.smoke_phase == 0 {

@@ -227,7 +227,7 @@ def check_phase0_pretest_security(scan_root: Path) -> list[dict[str, Any]]:
         re.compile("<\\|im_" + "start\\|>system", re.I),
     ]
 
-    binary_exts = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".icns", ".ico", ".zip", ".nar", ".exe", ".dll", ".so", ".dylib"}
+    binary_exts = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".icns", ".ico", ".zip", ".nar", ".exe", ".dll", ".so", ".dylib", ".mp4", ".webm", ".wav", ".m4a"}
 
     for fp in files:
         rel_posix = fp.relative_to(scan_root).as_posix()
@@ -389,7 +389,7 @@ def check_tier0_static() -> list[dict[str, Any]]:
     tracked = [Path(p) for p in ls_out.splitlines() if p.strip()] if rc == 0 else []
     for rel in tracked:
         fp = ROOT_DIR / rel
-        if not fp.is_file() or fp.suffix.lower() in {".png", ".jpg", ".icns", ".ico", ".zip", ".nar"}:
+        if not fp.is_file() or fp.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".icns", ".ico", ".zip", ".nar", ".mp4", ".webm", ".wav", ".m4a"}:
             continue
         if rel == Path("tests/behavior_spec.rs") or rel == self_rel:
             # Exclude test pattern strings themselves from self-scan; audit only personal IP/path there.
