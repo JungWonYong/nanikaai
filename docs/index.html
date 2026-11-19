@@ -154,6 +154,29 @@
     }
     .lang-pane { display: none; }
     .lang-pane.active { display: block; }
+    details.accordion {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      margin-bottom: 14px;
+      overflow: hidden;
+    }
+    details.accordion summary {
+      list-style: none;
+      cursor: pointer;
+      padding: 14px 18px;
+      font-weight: 700;
+      color: #dbeafe;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    details.accordion summary::-webkit-details-marker { display: none; }
+    details.accordion summary::after { content: "▾"; color: #7dd3fc; font-size: 1rem; transition: transform 0.15s ease; }
+    details.accordion[open] summary::after { transform: rotate(180deg); }
+    details.accordion .acc-body { padding: 0 18px 18px; }
+    code { background: rgba(15, 23, 42, 0.72); padding: 1px 6px; border-radius: 5px; font-size: 0.88em; color: #dbeafe; }
+    pre code { background: transparent; padding: 0; }
     footer {
       margin-top: 28px;
       text-align: center;
@@ -204,86 +227,108 @@
         <div style="display:flex; gap:10px; flex-wrap:wrap;">
           <a class="btn" href="https://github.com/JungWonYong/nanikaai/releases/latest">GitHub Releases</a>
           <a id="demo-download" class="btn secondary" href="media/nanikaai_intro_ja.mp4" download>MP4 Download (JA)</a>
+          <a class="btn secondary" href="https://github.com/JungWonYong/nanikaai/blob/main/docs/GUIDE.md">Full Guide</a>
           <a class="btn secondary" href="https://github.com/JungWonYong/nanikaai">GitHub Repository</a>
         </div>
       </div>
     </section>
 
     <div class="lang-pane active" data-lang="ja">
-      <div class="grid">
-        <div class="card">
-          <h3>24+7 外付け Live2D リグ</h3>
-          <p>既存 `.nar` を改変せず、部位別 PNG + `live2d.json` でC1頭部視差・多層髪揺れ・衣装連動・無欠損表情を GPU 描画。</p>
+      <details class="accordion">
+        <summary>✨ 主な機能（クリックで展開）</summary>
+        <div class="acc-body">
+          <div class="grid" style="margin-bottom:0;">
+            <div class="card">
+              <h3>24+7 外付け Live2D リグ</h3>
+              <p>既存 <code>.nar</code> を改変せず、部位別 PNG + <code>live2d.json</code> で揺れ・目パチ・口パク・着せ替えを GPU 描画。</p>
+            </div>
+            <div class="card">
+              <h3>声色選択 &amp; 関心ニュース雑談</h3>
+              <p>AivisSpeech / VOICEVOX 自動連携と、会話から記憶した関心事を混ぜた自動雑談を搭載。</p>
+            </div>
+            <div class="card">
+              <h3>100% Safe Rust &amp; 多言語 UI</h3>
+              <p><code>#![forbid(unsafe_code)]</code> 単一バイナリ（macOS / Windows / Linux）。OS 言語自動追従＋設定パネル搭載。</p>
+            </div>
+            <div class="card">
+              <h3>マルチ AI &amp; アクセサリ</h3>
+              <p>Ollama / Gemini / Claude / ChatGPT 接続、DND・ポモドーロ・バックログ・HTTP/SSTP API を内蔵。</p>
+            </div>
+          </div>
         </div>
-        <div class="card">
-          <h3>右クリック最上段で声色選択</h3>
-          <p>AivisSpeech / VOICEVOX を手動起動なしで自動連携し、メニュー最上段から `\0` / `\1` それぞれの声色や AivisHub モデルを追加・保存。</p>
+      </details>
+      <details class="accordion">
+        <summary>🚀 クイックスタート（AI エージェント自動導入）</summary>
+        <div class="acc-body">
+          <p style="margin:0;color:var(--muted);"><code>agy</code> または <code>claude</code> CLI で最新リリースの導入から Ollama 接続まで実行可能。</p>
+          <pre><code>agy -i "https://github.com/JungWonYong/nanikaai の最新リリース実行ファイルとローカルOllamaをこのPCに導入・起動し、スペックに合う無料モデル(gemma4/llama3系)を接続して動作確認まで完了して。"</code></pre>
         </div>
-        <div class="card">
-          <h3>100% Safe Rust</h3>
-          <p>`#![forbid(unsafe_code)]` 準拠の単一ネイティブバイナリ（macOS / Windows / Linux）。コード `MIT` ＋ 既定スキン `CC0-1.0`。</p>
-        </div>
-        <div class="card">
-          <h3>マルチ AI &amp; SSTP/HTTP</h3>
-          <p>ローカル Ollama・Gemini・Claude・ChatGPT 接続に加え、HTTP (`:9821`) と `SSTP/1.4` (`:9801`) を同時提供。</p>
-        </div>
-      </div>
-      <div class="panel">
-        <h2>クイックスタート（AI エージェント自動導入）</h2>
-        <p style="margin:0;color:var(--muted);">`agy` または `claude` CLI でそのまま最新リリースの導入から Ollama 接続まで実行可能。</p>
-        <pre><code>agy -i "https://github.com/JungWonYong/nanikaai の最新リリース実行ファイルとローカルOllamaをこのPCに導入・起動し、スペックに合う無料モデル(gemma4/llama3系)を接続して動作確認まで完了して。"</code></pre>
-      </div>
+      </details>
     </div>
 
     <div class="lang-pane" data-lang="ko">
-      <div class="grid">
-        <div class="card">
-          <h3>24+7 외장 Live2D 멀티파츠</h3>
-          <p>기존 `.nar` 수정 없이 `live2d.json` + 부위별 PNG로 목/두부 시차, 다층 머리카락, 리본·스커트 스웨이, 무결손 표정을 GPU 합성.</p>
+      <details class="accordion">
+        <summary>✨ 주요 기능 (클릭하여 펼치기)</summary>
+        <div class="acc-body">
+          <div class="grid" style="margin-bottom:0;">
+            <div class="card">
+              <h3>24+7 외장 Live2D 멀티파츠</h3>
+              <p>기존 <code>.nar</code> 수정 없이 <code>live2d.json</code> + 부위별 PNG로 스웨이·눈깜빡임·립싱크·갈아입히기를 GPU 합성.</p>
+            </div>
+            <div class="card">
+              <h3>목소리 선택 &amp; 관심 뉴스 잡담</h3>
+              <p>AivisSpeech / VOICEVOX 자동 연동 및 대화 속 관심사를 기억해 일반 뉴스와 섞어 들려주는 자동 잡담 지원.</p>
+            </div>
+            <div class="card">
+              <h3>100% Safe Rust &amp; 다국어 UI</h3>
+              <p><code>#![forbid(unsafe_code)]</code> 단일 바이너리(macOS / Windows / Linux). OS 언어 자동 추적 + 설정 패널 탑재.</p>
+            </div>
+            <div class="card">
+              <h3>멀티 AI &amp; 편의 액세서리</h3>
+              <p>Ollama·Gemini·Claude·ChatGPT 연결, 방해 금지·뽀모도로·백로그 및 HTTP/SSTP 듀얼 서버 제공.</p>
+            </div>
+          </div>
         </div>
-        <div class="card">
-          <h3>우클릭 최상단 목소리 선택</h3>
-          <p>AivisSpeech / VOICEVOX를 수동 실행 없이 자동 연동하며, 우클릭 첫 화면에서 `\0`·`\1` 화자 선택과 AivisHub 모델 추가 지원.</p>
+      </details>
+      <details class="accordion">
+        <summary>🚀 빠른 설치 (AI 에이전트 1줄 자동 세팅)</summary>
+        <div class="acc-body">
+          <p style="margin:0;color:var(--muted);">터미널에서 <code>agy</code> 또는 <code>claude</code> CLI로 최신 릴리스 다운로드와 Ollama 연동을 일괄 실행한다.</p>
+          <pre><code>agy -i "https://github.com/JungWonYong/nanikaai 의 최신 릴리스 실행 파일과 로컬 Ollama를 내 PC에 설치·실행하고, 내 PC 사양에 맞는 무료 모델(gemma4/llama3 계열)을 연결해 동작 확인까지 끝내줘."</code></pre>
         </div>
-        <div class="card">
-          <h3>100% Safe Rust 아키텍처</h3>
-          <p>`#![forbid(unsafe_code)]` 단일 네이티브 바이너리(macOS / Windows / Linux). 소스 `MIT` + 기본 스킨 `CC0-1.0` 완전 분리.</p>
-        </div>
-        <div class="card">
-          <h3>멀티 AI &amp; HTTP/SSTP API</h3>
-          <p>Ollama·Gemini·Claude·ChatGPT 연결 및 HTTP JSON(`:9821`)과 클래식 `SSTP/1.4`(`:9801`) 동시 지원.</p>
-        </div>
-      </div>
-      <div class="panel">
-        <h2>빠른 설치 (AI 에이전트 1줄 자동 세팅)</h2>
-        <p style="margin:0;color:var(--muted);">터미널에서 `agy` 또는 `claude` CLI로 최신 릴리스 다운로드와 Ollama 연동을 일괄 실행한다.</p>
-        <pre><code>agy -i "https://github.com/JungWonYong/nanikaai 의 최신 릴리스 실행 파일과 로컬 Ollama를 내 PC에 설치·실행하고, 내 PC 사양에 맞는 무료 모델(gemma4/llama3 계열)을 연결해 동작 확인까지 끝내줘."</code></pre>
-      </div>
+      </details>
     </div>
 
     <div class="lang-pane" data-lang="en">
-      <div class="grid">
-        <div class="card">
-          <h3>24+7 External Sidecar Live2D</h3>
-          <p>Drives anatomical C1 head joints, layered hair/coat sway, unbroken expressions, and 40%-translucent glasses via GPU multipass.</p>
+      <details class="accordion">
+        <summary>✨ Key Features (Click to expand)</summary>
+        <div class="acc-body">
+          <div class="grid" style="margin-bottom:0;">
+            <div class="card">
+              <h3>24+7 External Sidecar Live2D</h3>
+              <p>Drives layered hair/cloth sway, blinking, lip-sync, and dress-up via GPU multipass without modifying <code>.nar</code> archives.</p>
+            </div>
+            <div class="card">
+              <h3>Headless TTS &amp; Interest News</h3>
+              <p>Zero-manual-launch AivisSpeech / VOICEVOX voices plus balanced auto-talk mixing remembered interests with general news.</p>
+            </div>
+            <div class="card">
+              <h3>100% Safe Rust &amp; Multilingual UI</h3>
+              <p><code>#![forbid(unsafe_code)]</code> single native binary (macOS / Windows / Linux) with OS-following UI and native Settings Panel.</p>
+            </div>
+            <div class="card">
+              <h3>Multi-AI &amp; Companion Tools</h3>
+              <p>Connects Ollama, Gemini, Claude, and ChatGPT alongside DND, Pomodoro timer, backlog, and HTTP/SSTP APIs.</p>
+            </div>
+          </div>
         </div>
-        <div class="card">
-          <h3>Instant Top-of-Menu Voice Picker</h3>
-          <p>Zero-manual-launch headless AivisSpeech / VOICEVOX engine with per-shell `\0`/`\1` voice selection right at the top of the right-click menu.</p>
+      </details>
+      <details class="accordion">
+        <summary>🚀 Quick Start via AI Agent</summary>
+        <div class="acc-body">
+          <pre><code>agy -i "Install and launch the latest NanikaAi release from https://github.com/JungWonYong/nanikaai with local Ollama, pull a compatible model, and verify it speaks."</code></pre>
         </div>
-        <div class="card">
-          <h3>100% Safe Rust</h3>
-          <p>`#![forbid(unsafe_code)]` single native binary for macOS, Windows, and Linux with clean `MIT` code and `CC0-1.0` skins.</p>
-        </div>
-        <div class="card">
-          <h3>Multi-AI &amp; Dual API</h3>
-          <p>Connects Ollama, Gemini, Claude, and ChatGPT with built-in HTTP JSON (`:9821`) and classic `SSTP/1.4` (`:9801`).</p>
-        </div>
-      </div>
-      <div class="panel">
-        <h2>Quick Start via AI Agent</h2>
-        <pre><code>agy -i "Install and launch the latest NanikaAi release from https://github.com/JungWonYong/nanikaai with local Ollama, pull a compatible model, and verify it speaks."</code></pre>
-      </div>
+      </details>
     </div>
 
     <footer>
