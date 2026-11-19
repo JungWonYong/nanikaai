@@ -11,7 +11,11 @@ fn configure_platform_env() {
             .is_some_and(|v| !v.is_empty());
         let has_display = std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty());
         let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
-        if !backend_set && has_display && desktop.to_ascii_uppercase().contains("GNOME") {
+        if !backend_set
+            && has_display
+            && desktop.to_ascii_uppercase().contains("GNOME")
+            && nanikaai::config_store::read_linux_prefer_x11_hint()
+        {
             // GNOME Wayland does not allow global client window positioning; use XWayland cleanly when available.
             std::env::set_var("WINIT_UNIX_BACKEND", "x11");
         }

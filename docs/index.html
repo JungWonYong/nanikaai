@@ -194,9 +194,8 @@
       </div>
 
       <div class="video-box">
-        <video controls playsinline preload="metadata" poster="media/nanikaai_intro_poster.png">
-          <source src="media/nanikaai_intro_demo.mp4" type="video/mp4" />
-          <img src="media/nanikaai_intro_preview.gif" alt="NanikaAi Live2D Motion and Voice Demo" />
+        <video id="demo-video" controls playsinline preload="metadata" poster="media/nanikaai_intro_ja_poster.png">
+          <source id="demo-source" src="media/nanikaai_intro_ja.mp4" type="video/mp4" />
         </video>
       </div>
 
@@ -204,7 +203,7 @@
         <span>MP4 (1280×720 H.264 + AAC Stereo 44.1kHz)</span>
         <div style="display:flex; gap:10px; flex-wrap:wrap;">
           <a class="btn" href="https://github.com/JungWonYong/nanikaai/releases/latest">GitHub Releases</a>
-          <a class="btn secondary" href="media/nanikaai_intro_demo.mp4" download>MP4 Download</a>
+          <a id="demo-download" class="btn secondary" href="media/nanikaai_intro_ja.mp4" download>MP4 Download (JA)</a>
           <a class="btn secondary" href="https://github.com/JungWonYong/nanikaai">GitHub Repository</a>
         </div>
       </div>
@@ -295,13 +294,50 @@
   <script>
     const btns = document.querySelectorAll(".lang-btn");
     const panes = document.querySelectorAll(".lang-pane");
+    const video = document.getElementById("demo-video");
+    const source = document.getElementById("demo-source");
+    const downloadLink = document.getElementById("demo-download");
+    const SUPPORTED = new Set(["ja", "en", "ko"]);
+
+    function setLang(rawLang, preservePlayback) {
+      const lang = SUPPORTED.has(rawLang) ? rawLang : "ja";
+      document.documentElement.lang = lang;
+      btns.forEach((b) => b.classList.toggle("active", b.dataset.lang === lang));
+      panes.forEach((p) => p.classList.toggle("active", p.dataset.lang === lang));
+      if (video && source) {
+        const nextSrc = "media/nanikaai_intro_" + lang + ".mp4";
+        const nextPoster = "media/nanikaai_intro_" + lang + "_poster.png";
+        if (source.getAttribute("src") !== nextSrc) {
+          if (!preservePlayback) {
+            video.pause();
+          }
+          video.poster = nextPoster;
+          source.setAttribute("src", nextSrc);
+          video.load();
+        }
+      }
+      if (downloadLink) {
+        downloadLink.setAttribute("href", "media/nanikaai_intro_" + lang + ".mp4");
+        downloadLink.textContent = "MP4 Download (" + lang.toUpperCase() + ")";
+      }
+    }
+
     btns.forEach((btn) => {
       btn.addEventListener("click", () => {
         const lang = btn.dataset.lang;
-        btns.forEach((b) => b.classList.toggle("active", b.dataset.lang === lang));
-        panes.forEach((p) => p.classList.toggle("active", p.dataset.lang === lang));
+        setLang(lang, false);
+        if (window.history && window.history.replaceState) {
+          const url = new URL(window.location.href);
+          url.searchParams.set("lang", lang);
+          window.history.replaceState(null, "", url.toString());
+        }
       });
     });
+
+    const initLang = new URLSearchParams(window.location.search).get("lang");
+    if (initLang && SUPPORTED.has(initLang)) {
+      setLang(initLang, true);
+    }
   </script>
 </body>
 </html>

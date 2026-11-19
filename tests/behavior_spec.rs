@@ -9,27 +9,51 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
-use nanikaai::agent_engine::{
-    assert_allowed_model, is_forbidden_model, provider_catalog, sanitize_skin_metadata_label,
-    wrap_untrusted_data, AgentEngine, AgentReply, StatusCallback, FORBIDDEN_MODEL_PREFIXES,
-    PREFERRED_MODELS, REMOTE_PREFERRED_MODELS,
+use nanikaai::accessory_utils::{
+    apply_os_autostart_in_dir, build_low_battery_script, build_pomodoro_transition_script,
+    effective_poll_interval_ms, format_linux_autostart_desktop, format_macos_launch_agent_plist,
+    format_windows_run_command, parse_linux_sys_battery, parse_macos_pmset_battery,
+    parse_macos_spaces_fullscreen, parse_windows_battery_line, parse_windows_quns_is_fullscreen,
+    parse_xprop_active_window_id, parse_xprop_wm_state_is_fullscreen, select_next_monitor_index,
+    BatteryStatus, DialogueBacklog, PomodoroPhase, PomodoroTimer, PomodoroTransition,
+    MAX_BACKLOG_ENTRIES,
 };
-use nanikaai::builtin_tools::{is_sensitive_path, validate_public_url, BuiltinToolRunner};
+use nanikaai::agent_engine::{
+    assert_allowed_model, extract_interests_from_utterance, is_forbidden_model, provider_catalog,
+    sanitize_skin_metadata_label, wrap_untrusted_data, AgentEngine, AgentReply, AutoTalkSlot,
+    StatusCallback, FORBIDDEN_MODEL_PREFIXES, PREFERRED_MODELS, REMOTE_PREFERRED_MODELS,
+};
+use nanikaai::builtin_tools::{
+    is_sensitive_path, parse_google_news_rss_xml, query_ram_gb, validate_public_url,
+    BuiltinToolRunner, NewsHeadline,
+};
 use nanikaai::companion_extras::{
     compare_semver, extract_speech_segments, fetch_voices_from_engine, infer_kero_voice_archetype,
     inspect_dropped_path, is_valid_aivm_uuid, open_validated_browser_url,
-    pick_default_speaker_pair, pick_speaker_pair_for_archetype, KeroVoiceArchetype,
+    parse_ollama_pull_progress_line, pick_default_speaker_pair, pick_speaker_pair_for_archetype,
+    prepare_local_ollama_blocking, recommend_local_ollama_candidates, KeroVoiceArchetype,
     TtsVoiceOption,
 };
-use nanikaai::config_store::{is_stock_default_persona, ConfigPatch, ConfigStore, DEFAULT_PERSONA};
+use nanikaai::config_store::{
+    clamp_auto_talk_interval_sec, clamp_interest_news_weight, default_user_data_dir,
+    is_stock_default_persona, sanitize_interest_topic, AgentConfig, ConfigPatch, ConfigStore,
+    DEFAULT_PERSONA,
+};
 use nanikaai::dialogue_parser::{parse_dialogue, ActionKind, DialogueAction, Scope};
+use nanikaai::gui::TextRenderer;
+use nanikaai::i18n::{resolve_ui_lang_with_os, UiLang};
 use nanikaai::live2d_rig::{
     discover_and_load_rig, load_character_rig, validate_safe_rel_asset_path, Live2dMotionInputs,
+};
+use nanikaai::settings_panel::{
+    SettingsAction, SettingsPanelData, SettingsPanelModel, SliderKind,
 };
 use nanikaai::shell_parser::{
     install_nar_archive, load_ukagaka_rgba, parse_descript_txt, BalloonManager, ShellManager,
 };
-use nanikaai::sstp_server::{start_dual_server, ServerBackend, VoiceConfigReq};
+use nanikaai::sstp_server::{
+    start_dual_server, validate_settings_patch, ServerBackend, SettingsPatchReq, VoiceConfigReq,
+};
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -434,6 +458,8 @@ struct MockSpecBackend {
     last_spoken: Mutex<Vec<String>>,
     active_shell: Mutex<String>,
     active_provider: Mutex<(String, String)>,
+    skin_opacity: Mutex<f32>,
+    backlog: Mutex<DialogueBacklog>,
 }
 
 impl MockSpecBackend {
@@ -442,6 +468,8 @@ impl MockSpecBackend {
             last_spoken: Mutex::new(Vec::new()),
             active_shell: Mutex::new("neo_default".to_string()),
             active_provider: Mutex::new(("ollama".to_string(), "auto".to_string())),
+            skin_opacity: Mutex::new(1.0),
+            backlog: Mutex::new(DialogueBacklog::default()),
         }
     }
 }
@@ -474,7 +502,12 @@ impl ServerBackend for MockSpecBackend {
 
     fn on_speak(&self, script: &str) -> Vec<DialogueAction> {
         self.last_spoken.lock().unwrap().push(script.to_string());
-        parse_dialogue(script)
+        let actions = parse_dialogue(script);
+        self.backlog
+            .lock()
+            .unwrap()
+            .push_from_actions(&actions, "12:00:00".to_string());
+        actions
     }
 
     fn on_chat(&self, message: &str) -> AgentReply {
@@ -542,6 +575,35 @@ impl ServerBackend for MockSpecBackend {
             "kero_voice_archetype": req.kero_voice_archetype.unwrap_or_else(|| "boy".to_string()),
         }))
     }
+
+    fn get_settings(&self) -> Value {
+        json!({
+            "config_file": "~/.nanikaai/config.json",
+            "skin_opacity": *self.skin_opacity.lock().unwrap(),
+            "balloon_opacity": 1.0,
+            "character_scale": 1.0,
+            "opaque_on_hover": true
+        })
+    }
+
+    fn get_backlog(&self) -> Value {
+        let entries = self.backlog.lock().unwrap().entries_newest_first();
+        json!({
+            "count": entries.len(),
+            "entries": entries,
+        })
+    }
+
+    fn on_update_settings(&self, req: SettingsPatchReq) -> Result<Value, String> {
+        validate_settings_patch(&req)?;
+        if req.reset_defaults {
+            *self.skin_opacity.lock().unwrap() = 1.0;
+        }
+        if let Some(op) = req.skin_opacity {
+            *self.skin_opacity.lock().unwrap() = op;
+        }
+        Ok(self.get_settings())
+    }
 }
 
 #[test]
@@ -557,7 +619,7 @@ fn spec_srv_01_02_03_dual_http_and_sstp_tcp_contract() {
         .expect("http client");
 
     // GET routes
-    for path in ["/api/health", "/api/skins", "/api/providers", "/api/voices"] {
+    for path in ["/api/health", "/api/skins", "/api/providers", "/api/voices", "/api/settings"] {
         let resp = client.get(format!("{base}{path}")).send().expect("GET route");
         assert_eq!(resp.status().as_u16(), 200, "GET {path} status");
         let body: Value = resp.json().expect("JSON body");
@@ -1544,6 +1606,58 @@ fn spec_l2d_01_02_external_sidecar_parts_and_path_safety() {
     assert!(sak_rig.render_cpu_rgba().count_opaque_pixels() > 50_000);
     assert!(unyu_rig.render_cpu_rgba().count_opaque_pixels() > 30_000);
 
+    // Assert smooth monotone outlined crown transition (x=96..160) with zero protruding fragments across sway
+    let assert_unyu_crown_seamless = |bmp: &nanikaai::shell_parser::RgbaBitmap, label: &str| {
+        let mut prev_top: Option<i32> = None;
+        for x in (96..=160).step_by(3) {
+            let y_top = (0..bmp.height as i32)
+                .find(|&y| {
+                    let idx = ((y as u32 * bmp.width + x as u32) * 4) as usize;
+                    bmp.data[idx + 3] > 40
+                })
+                .unwrap_or_else(|| panic!("{label}: missing top pixel at x={x}"));
+            if let Some(pt) = prev_top {
+                assert!(
+                    y_top >= pt - 1,
+                    "{label}: Unyu crown contour jumped upward at x={x} ({pt} -> {y_top})"
+                );
+            }
+            prev_top = Some(y_top);
+            let has_dark_outline = (y_top..=(y_top + 5).min(bmp.height as i32 - 1)).any(|y| {
+                let idx = ((y as u32 * bmp.width + x as u32) * 4) as usize;
+                let (r, g, b, a) = (
+                    bmp.data[idx],
+                    bmp.data[idx + 1],
+                    bmp.data[idx + 2],
+                    bmp.data[idx + 3],
+                );
+                a > 180 && r < 65 && g < 65 && b > 60
+            });
+            assert!(
+                has_dark_outline,
+                "{label}: Unyu crown missing dark-navy outline below top edge at x={x}, y={y_top}"
+            );
+        }
+    };
+    let rest_unyu = discover_and_load_rig("neo_default", &shell_dir, &user_dir, &assets, Scope::Kero)
+        .unwrap();
+    assert_unyu_crown_seamless(&rest_unyu.render_cpu_rgba(), "rest");
+    for (lbl, vx) in [("sway_pos", 1.8_f32), ("sway_neg", -1.8_f32)] {
+        let mut rig_sway =
+            discover_and_load_rig("neo_default", &shell_dir, &user_dir, &assets, Scope::Kero)
+                .unwrap();
+        let sway_in = Live2dMotionInputs {
+            vel_x: vx,
+            angle_x: vx * 0.4,
+            speech_impulse: true,
+            ..motion
+        };
+        for _ in 0..8 {
+            rig_sway.step(&sway_in);
+        }
+        assert_unyu_crown_seamless(&rig_sway.render_cpu_rgba(), lbl);
+    }
+
     // Verify user override directory priority over bundled assets
     let user_l2d_dir = user_dir.join("live2d").join("neo_default");
     fs::create_dir_all(user_l2d_dir.join("parts")).unwrap();
@@ -1611,4 +1725,845 @@ fn spec_l2d_01_02_external_sidecar_parts_and_path_safety() {
 
     let _ = fs::remove_dir_all(&user_dir);
     let _ = fs::remove_dir_all(&bad_dir);
+}
+
+#[test]
+fn spec_cfg_01_and_ui_06_home_dotdir_settings_panel_and_api() {
+    // 1. SPEC-CFG-01: Default home dot-directory (~/.nanikaai) & is_sensitive_path guard
+    if std::env::var_os("NANIKAAI_HOME").is_none() {
+        let def_dir = default_user_data_dir();
+        assert_eq!(
+            def_dir.file_name().and_then(|s| s.to_str()),
+            Some(".nanikaai"),
+            "default_user_data_dir must resolve to ~/.nanikaai when NANIKAAI_HOME is unset"
+        );
+    }
+    assert!(is_sensitive_path(Path::new("~/.nanikaai/config.json")));
+    assert!(is_sensitive_path(Path::new("/tmp/test/.nanikaai/config.json")));
+
+    // 2. Legacy config migration, clamping, and convenience/appearance reset
+    let root_tmp = fresh_temp_dir("nanikaai_spec_cfg");
+    let legacy_dir = root_tmp.join("legacy_appdata");
+    let dot_dir = root_tmp.join(".nanikaai");
+    fs::create_dir_all(&legacy_dir).unwrap();
+    fs::write(
+        legacy_dir.join("config.json"),
+        serde_json::json!({
+            "provider": "openai_compat",
+            "model": "test-custom-model",
+            "skin_opacity": 0.01,
+            "balloon_opacity": 2.5,
+            "character_scale": 3.0,
+            "lock_position": true,
+            "opaque_on_hover": false
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let store = ConfigStore::new_with_migration(dot_dir.clone(), std::slice::from_ref(&legacy_dir));
+    assert!(
+        dot_dir.join("config.json").is_file(),
+        "Migrated ~/.nanikaai/config.json must be written to disk"
+    );
+    let migrated = store.get();
+    assert_eq!(migrated.provider, "openai_compat");
+    assert_eq!(migrated.model, "test-custom-model");
+    assert!((migrated.skin_opacity - 0.15).abs() < 0.001);
+    assert!((migrated.balloon_opacity - 1.0).abs() < 0.001);
+    assert!((migrated.character_scale - 1.50).abs() < 0.001);
+    assert!(migrated.lock_position);
+    assert!(!migrated.opaque_on_hover);
+
+    let reset = store.reset_convenience_and_appearance_defaults();
+    assert!((reset.skin_opacity - 1.0).abs() < 0.001);
+    assert!((reset.balloon_opacity - 1.0).abs() < 0.001);
+    assert!((reset.character_scale - 1.0).abs() < 0.001);
+    assert!(!reset.lock_position);
+    assert!(reset.opaque_on_hover);
+    assert_eq!(reset.provider, "openai_compat");
+
+    // 3. SPEC-UI-06: Native SettingsPanelModel 4-tab CPU bitmap rendering & hit-testing
+    let mut model = SettingsPanelModel::new();
+    let mut tr = TextRenderer::new();
+    let data = SettingsPanelData {
+        cfg: store.get(),
+        config_path_display: dot_dir.join("config.json").display().to_string(),
+        active_shell_name: "Neo Default".to_string(),
+        active_balloon_name: "Clean Glass".to_string(),
+        provider_label: "Local Ollama".to_string(),
+        tts_engine_label: "Auto".to_string(),
+        sakura_voice_label: "自動".to_string(),
+        kero_voice_label: "自動".to_string(),
+        kero_archetype_label: "少年系".to_string(),
+        recommended_local_ai_hint: "RAM 16GB → gemma4:e4b / llama3.2:3b".to_string(),
+        local_ai_setup_busy: false,
+        interests_summary: "未登録".to_string(),
+        ui_lang: UiLang::Ja,
+        ui_language_label: "OS 自動 (日本語)".to_string(),
+        characters_hidden: false,
+        pomodoro_preset_label: "25分集中 / 5分休憩".to_string(),
+        pomodoro_button_label: "🍅 集中開始 (25分)".to_string(),
+        power_save_label: "自動 (バッテリー省電力)".to_string(),
+    };
+    for tab in 0..4 {
+        model.select_tab(tab);
+        let bmp = model.render(&data, &mut tr, 2.0);
+        assert_eq!((bmp.width, bmp.height), (1080, 952));
+        assert!(
+            bmp.count_opaque_pixels() > 50_000,
+            "Settings tab {tab} rendered too few opaque pixels"
+        );
+    }
+
+    model.select_tab(0);
+    let _ = model.render(&data, &mut tr, 2.0);
+    let slider_pt = model
+        .slider_point(SliderKind::SkinOpacity, 0.50)
+        .expect("SkinOpacity slider point");
+    let _ = model.handle_pointer_move(slider_pt);
+    let (_, _, act_slide) = model.handle_mouse_press(slider_pt);
+    model.handle_mouse_release();
+    match act_slide {
+        Some(SettingsAction::SetSkinOpacity(v)) => {
+            assert!((0.50..=0.65).contains(&v), "Unexpected slider value {v}");
+        }
+        other => panic!("Expected SetSkinOpacity action, got {other:?}"),
+    }
+
+    let tab1_pt = model.target_center("tab_1").expect("tab_1 hit target");
+    let (_, _, act_tab1) = model.handle_mouse_press(tab1_pt);
+    assert_eq!(act_tab1, Some(SettingsAction::SelectTab(1)));
+
+    let reset_pt = model
+        .target_center("btn_reset_defaults")
+        .expect("btn_reset_defaults hit target");
+    let (_, _, act_reset) = model.handle_mouse_press(reset_pt);
+    assert_eq!(act_reset, Some(SettingsAction::ResetDefaults));
+
+    // 4. GET/POST /api/settings contract & validation without api_key exposure
+    let backend = Arc::new(MockSpecBackend::new());
+    let mut srv = start_dual_server(backend, 0, 0).expect("start_dual_server");
+    let base = format!("http://127.0.0.1:{}", srv.http_port);
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .expect("http client");
+
+    let get_resp = client.get(format!("{base}/api/settings")).send().unwrap();
+    assert_eq!(get_resp.status().as_u16(), 200);
+    let get_json: Value = get_resp.json().unwrap();
+    assert_eq!(get_json.get("ok").and_then(|v| v.as_bool()), Some(true));
+    assert!(get_json.get("api_key").is_none());
+
+    let post_ok = client
+        .post(format!("{base}/api/settings"))
+        .json(&json!({"skin_opacity": 0.72}))
+        .send()
+        .unwrap();
+    assert_eq!(post_ok.status().as_u16(), 200);
+
+    for bad_payload in [json!({"skin_opacity": 0.05}), json!({"character_scale": 9.0})] {
+        let post_bad = client
+            .post(format!("{base}/api/settings"))
+            .json(&bad_payload)
+            .send()
+            .unwrap();
+        assert_eq!(post_bad.status().as_u16(), 400);
+    }
+
+    srv.stop();
+    let _ = fs::remove_dir_all(&root_tmp);
+}
+
+#[test]
+fn spec_ai_04_one_click_local_ollama_setup_and_general_user_defaults() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // 1. Out-of-the-box defaults for general users
+    let tmp = fresh_temp_dir("nanikaai_spec_ai_04");
+    let store = ConfigStore::new(Some(tmp.clone()));
+    let defaults = store.get();
+    assert_eq!(defaults.provider, "ollama");
+    assert_eq!(defaults.endpoint_url, "http://127.0.0.1:11434");
+    assert_eq!(defaults.model, "auto");
+
+    let catalog = provider_catalog();
+    assert_eq!(catalog.first().map(|p| p.id.as_str()), Some("ollama"));
+    assert_eq!(catalog.last().map(|p| p.id.as_str()), Some("linux-ollama"));
+
+    // 2. RAM-based free lightweight model selection passes safety guard
+    for ram in [8.0, 16.0, 48.0, 0.0] {
+        let cands = recommend_local_ollama_candidates(ram);
+        assert!(!cands.is_empty(), "RAM {ram} must recommend at least 1 model");
+        for m in cands {
+            assert!(
+                assert_allowed_model(m).is_ok(),
+                "Recommended model {m} for RAM {ram} must pass guard"
+            );
+        }
+    }
+
+    // Parse NDJSON pull lines cleanly
+    let parsed_50 = parse_ollama_pull_progress_line(
+        r#"{"status":"pulling layer","completed":500,"total":1000}"#,
+    )
+    .expect("valid 50% line");
+    assert_eq!(parsed_50.as_ref().and_then(|x| x.1), Some(50));
+
+    // 3. Loopback mock Ollama server for prepare_local_ollama_blocking
+    let (host_ram, _) = query_ram_gb();
+    let expected_model = recommend_local_ollama_candidates(host_ram)[0].to_string();
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock ollama");
+    let addr = listener.local_addr().expect("mock ollama addr");
+    let stop = Arc::new(AtomicBool::new(false));
+    let pulled = Arc::new(AtomicBool::new(false));
+    let stop_srv = Arc::clone(&stop);
+    let pulled_srv = Arc::clone(&pulled);
+    let pulled_model_name = expected_model.clone();
+
+    let srv_handle = std::thread::spawn(move || {
+        for stream_res in listener.incoming() {
+            if stop_srv.load(Ordering::Acquire) {
+                break;
+            }
+            let Ok(mut stream) = stream_res else {
+                continue;
+            };
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            if n == 0 {
+                continue;
+            }
+            let req = String::from_utf8_lossy(&buf[..n]);
+            let first_line = req.lines().next().unwrap_or("");
+            if first_line.starts_with("GET /api/tags") {
+                let body = if pulled_srv.load(Ordering::Acquire) {
+                    json!({ "models": [{ "name": pulled_model_name }] }).to_string()
+                } else {
+                    json!({ "models": [] }).to_string()
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            } else if first_line.starts_with("POST /api/pull") {
+                pulled_srv.store(true, Ordering::Release);
+                let body = concat!(
+                    "{\"status\":\"pulling layer\",\"completed\":500,\"total\":1000}\n",
+                    "{\"status\":\"pulling layer\",\"completed\":1000,\"total\":1000}\n",
+                    "{\"status\":\"success\"}\n"
+                );
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            } else {
+                let _ = stream.write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        }
+    });
+
+    let mock_url = format!("http://{addr}");
+    let mut progress_msgs: Vec<String> = Vec::new();
+    let setup_res = prepare_local_ollama_blocking(&mock_url, |msg| {
+        progress_msgs.push(msg);
+    })
+    .expect("prepare_local_ollama_blocking mock must succeed");
+
+    stop.store(true, Ordering::Release);
+    let _ = TcpStream::connect(addr);
+    let _ = srv_handle.join();
+
+    assert!(setup_res.installed_ready);
+    assert_eq!(setup_res.chosen_model, expected_model);
+    assert!(
+        progress_msgs.iter().any(|m| m.contains("50%")),
+        "Expected 50% progress update, got {progress_msgs:?}"
+    );
+    assert!(
+        progress_msgs.iter().any(|m| m.contains("100%")),
+        "Expected 100% progress update, got {progress_msgs:?}"
+    );
+
+    // 4. Offline fallback choices offer 1-click setup & AI Settings shortcuts
+    let closed_listener = TcpListener::bind("127.0.0.1:0").expect("bind temp port");
+    let closed_port = closed_listener.local_addr().unwrap().port();
+    drop(closed_listener);
+
+    store.update(ConfigPatch {
+        provider: Some("ollama".to_string()),
+        endpoint_url: Some(format!("http://127.0.0.1:{closed_port}")),
+        model: Some("auto".to_string()),
+        ..Default::default()
+    });
+    let runner = BuiltinToolRunner::new(store.clone(), None);
+    let manifest = ShellManager::new(vec![manifest_dir().join("assets").join("shells")])
+        .load_shell("neo_default")
+        .expect("load neo_default");
+    let engine = AgentEngine::new(store, runner, Arc::new(Mutex::new(manifest)), None);
+
+    let boot = engine.handle_boot();
+    assert!(boot.offline_fallback);
+    assert!(
+        boot.actions
+            .iter()
+            .any(|a| a.kind == ActionKind::Choice && a.choice_id == "__setup_local_ai__"),
+        "Boot offline fallback must include __setup_local_ai__ choice: {:?}",
+        boot.raw_reply
+    );
+
+    let chat = engine.handle_user_message("こんにちは");
+    assert!(chat.offline_fallback);
+    assert!(
+        chat.actions
+            .iter()
+            .any(|a| a.kind == ActionKind::Choice && a.choice_id == "__setup_local_ai__"),
+        "Chat offline fallback must include __setup_local_ai__ choice: {:?}",
+        chat.raw_reply
+    );
+    assert!(
+        chat.actions
+            .iter()
+            .any(|a| a.kind == ActionKind::Choice && a.choice_id == "__open_settings_ai__"),
+        "Chat offline fallback must include __open_settings_ai__ choice: {:?}",
+        chat.raw_reply
+    );
+
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn spec_comp_05_autotalk_30s_interval_interest_memory_and_balanced_news() {
+    use std::collections::HashSet;
+
+    // 1. Auto-talk interval & interest weight clamping + topic sanitization
+    assert_eq!(clamp_auto_talk_interval_sec(0), 0);
+    assert_eq!(clamp_auto_talk_interval_sec(15), 30);
+    assert_eq!(clamp_auto_talk_interval_sec(30), 30);
+    assert_eq!(clamp_auto_talk_interval_sec(180), 180);
+    assert_eq!(clamp_auto_talk_interval_sec(9999), 1800);
+
+    assert!((clamp_interest_news_weight(-0.2) - 0.0).abs() < 1e-4);
+    assert!((clamp_interest_news_weight(0.50) - 0.50).abs() < 1e-4);
+    assert!((clamp_interest_news_weight(0.95) - 0.80).abs() < 1e-4);
+
+    assert_eq!(sanitize_interest_topic("관심사"), None);
+    assert_eq!(sanitize_interest_topic("news"), None);
+    assert_eq!(sanitize_interest_topic("/etc/passwd"), None);
+    assert_eq!(sanitize_interest_topic("https://example.com"), None);
+
+    // 2. HTTP /api/settings validation for 30s..=1800s and 0.0..=0.80
+    let backend = Arc::new(MockSpecBackend::new());
+    let mut srv = start_dual_server(backend, 0, 0).expect("start_dual_server");
+    let base = format!("http://127.0.0.1:{}", srv.http_port);
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .expect("http client");
+
+    let ok_resp = client
+        .post(format!("{base}/api/settings"))
+        .json(&json!({"auto_talk_interval_sec": 30, "interest_news_weight": 0.75}))
+        .send()
+        .unwrap();
+    assert_eq!(ok_resp.status().as_u16(), 200);
+
+    for invalid in [
+        json!({"auto_talk_interval_sec": 15}),
+        json!({"interest_news_weight": 0.95}),
+    ] {
+        let bad_resp = client
+            .post(format!("{base}/api/settings"))
+            .json(&invalid)
+            .send()
+            .unwrap();
+        assert_eq!(bad_resp.status().as_u16(), 400);
+    }
+    srv.stop();
+
+    // 3. Conversational interest extraction (KO/JA/EN + negative filtering)
+    let ko1 = extract_interests_from_utterance("요즘 AI 에이전트와 반도체에 관심 있어");
+    assert_eq!(ko1, vec!["AI 에이전트", "반도체"]);
+
+    let ko2 = extract_interests_from_utterance("내 관심사는 우주 개발이랑 로봇공학이야");
+    assert_eq!(ko2, vec!["우주 개발", "로봇공학"]);
+
+    let ja1 = extract_interests_from_utterance("最近はPythonとRustに興味があるよ");
+    assert_eq!(ja1, vec!["Python", "Rust"]);
+
+    let en1 = extract_interests_from_utterance("I'm interested in robotics and astronomy");
+    assert_eq!(en1, vec!["robotics", "astronomy"]);
+
+    for neg in [
+        "공포 영화는 관심 없어",
+        "芸能ニュースには興味がない",
+        "I'm not interested in gossip",
+    ] {
+        assert!(
+            extract_interests_from_utterance(neg).is_empty(),
+            "Negative utterance must not record interests: {neg}"
+        );
+    }
+
+    // Tool integration (`interest_save`) and per-shell isolation
+    let tmp = fresh_temp_dir("nanikaai_spec_comp_05");
+    let store = ConfigStore::new(Some(tmp.clone()));
+    let runner = BuiltinToolRunner::new(store.clone(), None);
+
+    let add_out: Value = serde_json::from_str(
+        &runner.execute("interest_save", &json!({"topics": ["반도체", "우주 개발"]})),
+    )
+    .unwrap();
+    assert_eq!(add_out.get("ok").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(store.active_interests(), vec!["반도체", "우주 개발"]);
+
+    store.add_interests_for_shell("other_shell", &["料理".to_string()]);
+    assert_eq!(store.active_interests(), vec!["반도체", "우주 개발"]);
+    assert_eq!(store.interests_for_shell("other_shell"), vec!["料理"]);
+
+    let _ = runner.execute("interest_save", &json!({"remove": "반도체"}));
+    assert_eq!(store.active_interests(), vec!["우주 개발"]);
+    let _ = runner.execute("interest_save", &json!({"clear": true}));
+    assert!(store.active_interests().is_empty());
+    assert_eq!(store.interests_for_shell("other_shell"), vec!["料理"]);
+
+    // 4. Deterministic Bresenham weighted scheduling & category diversity
+    let manifest = ShellManager::new(vec![manifest_dir().join("assets").join("shells")])
+        .load_shell("neo_default")
+        .expect("load neo_default");
+
+    let run_schedule = |weight: f32, turns: usize, topics: &[&str]| {
+        let sched_dir = fresh_temp_dir("nanikaai_sched");
+        let st = ConfigStore::new(Some(sched_dir.clone()));
+        st.update(ConfigPatch {
+            interest_news_weight: Some(weight),
+            ..Default::default()
+        });
+        let owned: Vec<String> = topics.iter().map(|s| (*s).to_string()).collect();
+        st.set_interests(&owned);
+        let run = BuiltinToolRunner::new(st.clone(), None);
+        let eng = AgentEngine::new(st, run, Arc::new(Mutex::new(manifest.clone())), None);
+        let mut interest_hits = Vec::new();
+        let mut general_cats = Vec::new();
+        for _ in 0..turns {
+            match eng.plan_next_auto_talk_slot() {
+                AutoTalkSlot::InterestNews { topic, .. } => interest_hits.push(topic),
+                AutoTalkSlot::GeneralNews { category, .. } => general_cats.push(category),
+            }
+        }
+        let _ = fs::remove_dir_all(&sched_dir);
+        (interest_hits, general_cats)
+    };
+
+    let (int50, gen50) = run_schedule(0.50, 10, &["우주 개발", "반도체"]);
+    assert_eq!(int50.len(), 5, "weight 0.50 should allocate 5/10 interest slots");
+    assert_eq!(gen50.len(), 5, "weight 0.50 should allocate 5/10 general slots");
+    let unique_topics50: HashSet<&str> = int50.iter().map(|s| s.as_str()).collect();
+    assert!(unique_topics50.contains("우주 개발") && unique_topics50.contains("반도체"));
+    let unique_cats50: HashSet<&str> = gen50.iter().map(|s| s.as_str()).collect();
+    assert_eq!(unique_cats50.len(), 5, "all 5 general categories must rotate");
+
+    let (int80, gen80) = run_schedule(0.80, 10, &["우주 개발", "반도체"]);
+    assert_eq!(int80.len(), 8, "max weight 0.80 should allocate 8/10 interest slots");
+    assert_eq!(gen80.len(), 2, "max weight 0.80 must still preserve general news diversity");
+
+    let (int0, gen0) = run_schedule(0.0, 5, &["우주 개발", "반도체"]);
+    assert_eq!(int0.len(), 0);
+    assert_eq!(gen0.len(), 5);
+    let unique_cats0: HashSet<&str> = gen0.iter().map(|s| s.as_str()).collect();
+    assert_eq!(unique_cats0.len(), 5);
+
+    // 5. Google News RSS XML parser (with CDATA), headline deduplication & <untrusted_data> guard
+    let sample_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+    <rss version="2.0"><channel>
+      <item>
+        <title><![CDATA[Rust 1.90 Released - Tech Daily]]></title>
+        <link>https://example.org/rust-1-90</link>
+        <pubDate>Wed, 18 Nov 2026 10:00:00 GMT</pubDate>
+        <source>Tech Daily</source>
+      </item>
+      <item>
+        <title>Next-Gen Semiconductor Fab Opens</title>
+        <link>https://example.org/semi-fab</link>
+        <pubDate>Wed, 18 Nov 2026 09:00:00 GMT</pubDate>
+        <source>Chip Times</source>
+      </item>
+      <item>
+        <title>Lunar Probe Sends Fresh Telemetry</title>
+        <link>https://example.org/lunar-probe</link>
+        <pubDate>Wed, 18 Nov 2026 08:00:00 GMT</pubDate>
+        <source>Space Wire</source>
+      </item>
+    </channel></rss>"#;
+
+    let parsed: Vec<NewsHeadline> = parse_google_news_rss_xml(sample_xml, 6);
+    assert_eq!(parsed.len(), 3);
+    assert_eq!(parsed[0].title, "Rust 1.90 Released - Tech Daily");
+    assert_eq!(parsed[0].source, "Tech Daily");
+
+    let eng = AgentEngine::new(
+        store,
+        runner,
+        Arc::new(Mutex::new(manifest)),
+        None,
+    );
+    let batch1 = eng.pick_fresh_headlines(&parsed, 2);
+    assert_eq!(batch1.len(), 2);
+    assert_eq!(batch1[0].title, "Rust 1.90 Released - Tech Daily");
+
+    let batch2 = eng.pick_fresh_headlines(&parsed, 2);
+    assert_eq!(batch2.len(), 2);
+    assert_eq!(batch2[0].title, "Lunar Probe Sends Fresh Telemetry");
+
+    let prompt = AgentEngine::build_auto_talk_prompt(
+        &AutoTalkSlot::InterestNews {
+            topic: "반도체".to_string(),
+            query: "반도체 최신 뉴스".to_string(),
+        },
+        &batch1,
+        "ko",
+    );
+    assert!(prompt.contains("<untrusted_data source=\"auto_talk_news_rss\">"));
+    assert!(prompt.contains("Rust 1.90 Released - Tech Daily"));
+    assert!(prompt.contains("</untrusted_data>"));
+
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn spec_ui_07_ui_language_os_auto_fallback_and_switching() {
+    // 1. Default config uses OS-following "auto" and persists cleanly
+    assert_eq!(AgentConfig::default().ui_language, "auto");
+    let tmp = fresh_temp_dir("nanikaai_spec_ui_07");
+    let store = ConfigStore::new(Some(tmp.clone()));
+    assert_eq!(store.get().ui_language, "auto");
+
+    // 2. OS locale mapping ("auto") + English fallback on unsupported OS locales
+    assert_eq!(resolve_ui_lang_with_os("auto", "ja-JP"), UiLang::Ja);
+    assert_eq!(resolve_ui_lang_with_os("auto", "ko-KR"), UiLang::Ko);
+    assert_eq!(resolve_ui_lang_with_os("auto", "en-US"), UiLang::En);
+    for unsupported in ["fr-FR", "de_DE.UTF-8", "es-ES", "zh-CN", "ru_RU", "C.UTF-8", ""] {
+        assert_eq!(
+            resolve_ui_lang_with_os("auto", unsupported),
+            UiLang::En,
+            "Unsupported OS locale `{unsupported}` must fall back to English"
+        );
+    }
+
+    // 3. Explicit overrides take precedence over OS locale, and Reset restores "auto"
+    assert_eq!(resolve_ui_lang_with_os("ko", "ja-JP"), UiLang::Ko);
+    assert_eq!(resolve_ui_lang_with_os("en", "ja-JP"), UiLang::En);
+    assert_eq!(resolve_ui_lang_with_os("ja", "en-US"), UiLang::Ja);
+
+    store.update(ConfigPatch {
+        ui_language: Some("ko".to_string()),
+        ..Default::default()
+    });
+    assert_eq!(store.get().ui_language, "ko");
+    let reloaded = ConfigStore::new(Some(tmp.clone()));
+    assert_eq!(reloaded.get().ui_language, "ko");
+
+    let reset = store.reset_convenience_and_appearance_defaults();
+    assert_eq!(reset.ui_language, "auto");
+
+    // 4. HTTP POST /api/settings accepts valid ui_language and rejects invalid ones
+    let backend = Arc::new(MockSpecBackend::new());
+    let mut srv = start_dual_server(backend, 0, 0).expect("start_dual_server");
+    let base = format!("http://127.0.0.1:{}", srv.http_port);
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .expect("http client");
+
+    let ok_resp = client
+        .post(format!("{base}/api/settings"))
+        .json(&json!({"ui_language": "ko"}))
+        .send()
+        .unwrap();
+    assert_eq!(ok_resp.status().as_u16(), 200);
+
+    let bad_resp = client
+        .post(format!("{base}/api/settings"))
+        .json(&json!({"ui_language": "fr"}))
+        .send()
+        .unwrap();
+    assert_eq!(bad_resp.status().as_u16(), 400);
+    srv.stop();
+
+    // 5. Native SettingsPanelModel renders cleanly across all 3 languages (4 tabs each)
+    let mut model = SettingsPanelModel::new();
+    let mut tr = TextRenderer::new();
+    for (lang, lbl) in [
+        (UiLang::Ja, "日本語"),
+        (UiLang::Ko, "한국어"),
+        (UiLang::En, "English"),
+    ] {
+        let data = SettingsPanelData {
+            cfg: store.get(),
+            config_path_display: tmp.join("config.json").display().to_string(),
+            active_shell_name: "Neo Default".to_string(),
+            active_balloon_name: "Clean Glass".to_string(),
+            provider_label: "Ollama".to_string(),
+            tts_engine_label: "Auto".to_string(),
+            sakura_voice_label: "Auto".to_string(),
+            kero_voice_label: "Auto".to_string(),
+            kero_archetype_label: "Boy".to_string(),
+            recommended_local_ai_hint: "RAM 16GB -> gemma4:e4b".to_string(),
+            local_ai_setup_busy: false,
+            interests_summary: String::new(),
+            ui_lang: lang,
+            ui_language_label: lbl.to_string(),
+            characters_hidden: false,
+            pomodoro_preset_label: "25m Focus / 5m Break".to_string(),
+            pomodoro_button_label: "🍅 Focus (25m)".to_string(),
+            power_save_label: "Auto".to_string(),
+        };
+        for tab in 0..4 {
+            model.select_tab(tab);
+            let bmp = model.render(&data, &mut tr, 2.0);
+            assert_eq!((bmp.width, bmp.height), (1080, 952));
+            assert!(
+                bmp.count_opaque_pixels() > 50_000,
+                "UI lang {lang:?} tab {tab} rendered too few opaque pixels"
+            );
+        }
+        model.select_tab(1);
+        let _ = model.render(&data, &mut tr, 2.0);
+        let lang_next_pt = model
+            .target_center("cyc_ui_lang_next")
+            .expect("cyc_ui_lang_next target on Tab 1");
+        let (_, _, act) = model.handle_mouse_press(lang_next_pt);
+        assert_eq!(act, Some(SettingsAction::CycleUiLanguage(1)));
+    }
+
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn spec_acc_01_quiet_mode_fullscreen_parsers_and_api() {
+    let normal_spaces = r#"{
+        Monitors = (
+            {
+                "Current Space" = { ManagedSpaceID = 1; type = 0; };
+                Spaces = ( { ManagedSpaceID = 2; type = 4; } );
+            }
+        );
+    }"#;
+    assert!(!parse_macos_spaces_fullscreen(normal_spaces));
+    let fs_spaces = r#"{
+        Monitors = (
+            {
+                "Current Space" = {
+                    ManagedSpaceID = 2;
+                    WindowManagerInfo = { type = 0; };
+                    type = 4;
+                };
+            }
+        );
+    }"#;
+    assert!(parse_macos_spaces_fullscreen(fs_spaces));
+
+    assert_eq!(
+        parse_xprop_active_window_id("_NET_ACTIVE_WINDOW(WINDOW): window id # 0x2c00007"),
+        Some("0x2c00007".to_string())
+    );
+    assert!(parse_xprop_wm_state_is_fullscreen(
+        "_NET_WM_STATE(ATOM) = _NET_WM_STATE_FULLSCREEN"
+    ));
+    assert!(parse_windows_quns_is_fullscreen("3"));
+    assert!(!parse_windows_quns_is_fullscreen("5"));
+
+    let tmp = fresh_temp_dir("nanikaai_spec_acc_01");
+    let store = ConfigStore::new(Some(tmp.clone()));
+    let def = store.get();
+    assert!(!def.quiet_mode);
+    assert!(def.auto_hide_on_fullscreen);
+    store.update(ConfigPatch {
+        quiet_mode: Some(true),
+        auto_hide_on_fullscreen: Some(false),
+        ..Default::default()
+    });
+    assert!(store.get().quiet_mode);
+    assert!(!store.get().auto_hide_on_fullscreen);
+    let reset = store.reset_convenience_and_appearance_defaults();
+    assert!(!reset.quiet_mode);
+    assert!(reset.auto_hide_on_fullscreen);
+
+    let backend = Arc::new(MockSpecBackend::new());
+    let mut srv = start_dual_server(backend, 0, 0).expect("start_dual_server");
+    let base = format!("http://127.0.0.1:{}", srv.http_port);
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .unwrap();
+    let ok_resp = client
+        .post(format!("{base}/api/settings"))
+        .json(&json!({"quiet_mode": true, "characters_hidden": true, "pomodoro_action": "start"}))
+        .send()
+        .unwrap();
+    assert_eq!(ok_resp.status().as_u16(), 200);
+    for bad in [
+        json!({"power_save_mode": "turbo"}),
+        json!({"pomodoro_action": "explode"}),
+        json!({"pomodoro_preset_idx": 99}),
+    ] {
+        let bad_resp = client
+            .post(format!("{base}/api/settings"))
+            .json(&bad)
+            .send()
+            .unwrap();
+        assert_eq!(bad_resp.status().as_u16(), 400);
+    }
+    srv.stop();
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn spec_acc_02_pomodoro_state_machine_and_scripts() {
+    let mut timer = PomodoroTimer::new(1);
+    assert_eq!((timer.work_mins, timer.break_mins), (50, 10));
+    timer.start_focus();
+    assert!(timer.is_focusing());
+    timer.toggle_start_pause();
+    assert!(timer.paused);
+    assert!(!timer.is_focusing());
+    timer.toggle_start_pause();
+    assert!(timer.is_focusing());
+
+    let focus_done = timer
+        .advance_secs(50 * 60)
+        .expect("focus completion transition");
+    assert_eq!(
+        focus_done,
+        PomodoroTransition::FocusCompleted {
+            cycles: 1,
+            next_break_mins: 10
+        }
+    );
+    assert_eq!(timer.phase, PomodoroPhase::Break);
+
+    let break_done = timer
+        .advance_secs(10 * 60)
+        .expect("break completion transition");
+    assert_eq!(
+        break_done,
+        PomodoroTransition::BreakCompleted {
+            cycles: 1,
+            next_work_mins: 50
+        }
+    );
+    assert_eq!(timer.phase, PomodoroPhase::Idle);
+
+    for lang in [UiLang::Ja, UiLang::Ko, UiLang::En] {
+        let f_script = build_pomodoro_transition_script(focus_done, lang);
+        assert!(f_script.contains("1"));
+        let b_script = build_pomodoro_transition_script(break_done, lang);
+        assert!(b_script.contains("__pomo_start__"));
+    }
+
+    timer.start_focus();
+    timer.stop();
+    assert_eq!(timer.phase, PomodoroPhase::Idle);
+    assert!(!timer.is_active());
+}
+
+#[test]
+fn spec_acc_03_dialogue_backlog_ring_and_http_endpoint() {
+    let mut bl = DialogueBacklog::default();
+    for i in 0..(MAX_BACKLOG_ENTRIES + 5) {
+        let s = format!("\\0\\s[0]Msg {i}\\e");
+        bl.push_from_actions(&parse_dialogue(&s), format!("09:{:02}:00", i % 60));
+    }
+    assert_eq!(bl.len(), MAX_BACKLOG_ENTRIES);
+    bl.push_from_actions(
+        &parse_dialogue("\\0\\s[0]Msg 34\\e"),
+        "09:59:00".to_string(),
+    );
+    assert_eq!(bl.entries_newest_first()[0].sakura_text, "Msg 34");
+
+    let backend = Arc::new(MockSpecBackend::new());
+    let mut srv = start_dual_server(backend, 0, 0).expect("start_dual_server");
+    let base = format!("http://127.0.0.1:{}", srv.http_port);
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .unwrap();
+
+    let speak = client
+        .post(format!("{base}/api/speak"))
+        .json(&json!({"script": "\\0\\s[5]Check \\_a[https://example.org/news]News\\_a\\1\\s[10]Roger\\e"}))
+        .send()
+        .unwrap();
+    assert_eq!(speak.status().as_u16(), 200);
+
+    let resp = client.get(format!("{base}/api/backlog")).send().unwrap();
+    assert_eq!(resp.status().as_u16(), 200);
+    let body: Value = resp.json().unwrap();
+    assert_eq!(body.get("ok").and_then(|v| v.as_bool()), Some(true));
+    assert_eq!(body.get("count").and_then(|v| v.as_u64()), Some(1));
+    assert_eq!(
+        body["entries"][0]["urls"][0][0].as_str(),
+        Some("https://example.org/news")
+    );
+    srv.stop();
+}
+
+#[test]
+fn spec_acc_04_autostart_manifests_power_save_and_monitor_cycling() {
+    let tmp = fresh_temp_dir("nanikaai_spec_acc_04");
+    let exe = Path::new("/opt/nanikaai/nanikaai");
+
+    let created = apply_os_autostart_in_dir(true, exe, &tmp).expect("create autostart file");
+    assert!(created.is_file());
+    let removed = apply_os_autostart_in_dir(false, exe, &tmp).expect("remove autostart file");
+    assert!(!removed.exists());
+
+    let plist = format_macos_launch_agent_plist(exe);
+    assert!(plist.contains("io.github.nanikaai.desktop"));
+    let desktop = format_linux_autostart_desktop(exe);
+    assert!(desktop.contains("[Desktop Entry]"));
+    let win_cmd = format_windows_run_command(Path::new("C:\\App\\nanikaai.exe"));
+    assert_eq!(win_cmd, "\"C:\\App\\nanikaai.exe\"");
+
+    assert_eq!(
+        parse_macos_pmset_battery("Now drawing from 'Battery Power'\n -InternalBattery-0\t15%; discharging\n"),
+        BatteryStatus {
+            on_battery: true,
+            percent: Some(15)
+        }
+    );
+    assert_eq!(
+        parse_linux_sys_battery("Discharging\n", "18\n"),
+        BatteryStatus {
+            on_battery: true,
+            percent: Some(18)
+        }
+    );
+    assert_eq!(
+        parse_windows_battery_line("1|19"),
+        BatteryStatus {
+            on_battery: true,
+            percent: Some(19)
+        }
+    );
+    assert_eq!(effective_poll_interval_ms(true, false, true, "off", false, 500), 250);
+    assert_eq!(effective_poll_interval_ms(true, false, false, "auto", true, 500), 66);
+    assert!(build_low_battery_script(18, UiLang::Ja).contains("18%"));
+    assert!(build_low_battery_script(18, UiLang::Ko).contains("18%"));
+    assert!(build_low_battery_script(18, UiLang::En).contains("18%"));
+
+    let mons = [(0, 0, 1920, 1080), (1920, 0, 1920, 1080)];
+    assert_eq!(select_next_monitor_index(&mons, (200, 200)), Some(1));
+    assert_eq!(select_next_monitor_index(&mons, (2200, 200)), Some(0));
+
+    let _ = fs::remove_dir_all(&tmp);
 }

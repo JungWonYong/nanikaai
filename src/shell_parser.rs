@@ -2700,11 +2700,15 @@ mod tests {
 
     #[test]
     fn local_classic_shells_isolate_unyu_if_installed() {
-        let user_shells = crate::config_store::default_user_data_dir().join("shells");
-        if !user_shells.join("master").is_dir() {
+        let mut search_shells = vec![crate::config_store::default_user_data_dir().join("shells")];
+        for legacy in crate::config_store::legacy_user_data_dirs() {
+            search_shells.push(legacy.join("shells"));
+        }
+        search_shells.retain(|d| d.join("master").is_dir());
+        if search_shells.is_empty() {
             return;
         }
-        let mgr = ShellManager::new(vec![user_shells]);
+        let mgr = ShellManager::new(search_shells);
         let mut master = mgr.load_shell("master").expect("load master");
         assert!(master.is_full_pose_for_scope(Scope::Sakura, 0, false));
         assert!(!master.is_full_pose_for_scope(Scope::Kero, 0, false));
@@ -2830,10 +2834,16 @@ mod tests {
         assert_eq!(CURATED_BALLOON_ORDER.first().copied(), Some("clean_default"));
 
         // 4) Local classic shell & balloon verification when user shells are present
-        let user_dir = crate::config_store::default_user_data_dir();
-        let user_shells = user_dir.join("shells");
-        if user_shells.join("mayura").is_dir() {
-            let smgr = ShellManager::new(vec![user_shells.clone()]);
+        let mut user_dirs = vec![crate::config_store::default_user_data_dir()];
+        for legacy in crate::config_store::legacy_user_data_dirs() {
+            if !user_dirs.contains(&legacy) {
+                user_dirs.push(legacy);
+            }
+        }
+        let mut shell_dirs: Vec<PathBuf> = user_dirs.iter().map(|d| d.join("shells")).collect();
+        shell_dirs.retain(|d| d.join("mayura").is_dir());
+        if !shell_dirs.is_empty() {
+            let smgr = ShellManager::new(shell_dirs);
             let list = smgr.list_shells();
             for s in &list {
                 let mut mf = smgr.load_shell(&s.id).unwrap_or_else(|e| panic!("load {}: {e}", s.id));
@@ -2854,9 +2864,10 @@ mod tests {
             assert!(m10.count_opaque_pixels() > 6000, "mayura s10 opaque px={}", m10.count_opaque_pixels());
             assert!(m0.count_opaque_pixels() > 50_000, "mayura s0 opaque px={}", m0.count_opaque_pixels());
         }
-        let user_balloons = user_dir.join("balloons");
-        if user_balloons.join("emily4").is_dir() {
-            let bmgr = BalloonManager::new(vec![user_balloons]);
+        let mut balloon_dirs: Vec<PathBuf> = user_dirs.iter().map(|d| d.join("balloons")).collect();
+        balloon_dirs.retain(|d| d.join("emily4").is_dir());
+        if !balloon_dirs.is_empty() {
+            let bmgr = BalloonManager::new(balloon_dirs);
             let emily = bmgr.load_balloon("emily4").expect("load emily4");
             let (fr, _) = emily.load_frame_rgba(Scope::Sakura, "left", false);
             assert!(!fr.is_opaque_at(0, 0), "emily4 corner must be transparent via .pna");

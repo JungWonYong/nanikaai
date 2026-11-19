@@ -973,7 +973,7 @@ impl LoadedCharacterRig {
                     110.0,
                     sp.bend_px * part.spring_x.pos,
                 ),
-                PartMotionRole::Ahoge | PartMotionRole::MochiTuft => (
+                PartMotionRole::Ahoge => (
                     sp.parallax[0] * inp.angle_x * 4.0 + part.spring_x.pos * 1.4,
                     sp.parallax[1] * inp.angle_y * 3.0 + part.spring_y.pos * 1.1,
                     sp.rot_deg.to_radians() * (part.spring_x.pos * 0.85),
@@ -981,6 +981,16 @@ impl LoadedCharacterRig {
                     1.0,
                     -1.0,
                     82.0,
+                    sp.bend_px * part.spring_x.pos,
+                ),
+                PartMotionRole::MochiTuft => (
+                    0.0,
+                    0.0,
+                    sp.rot_deg.to_radians() * (part.spring_x.pos * 0.65),
+                    1.0,
+                    1.0,
+                    -1.0,
+                    92.0,
                     sp.bend_px * part.spring_x.pos,
                 ),
                 PartMotionRole::Skirt => (

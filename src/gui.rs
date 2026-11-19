@@ -24,22 +24,30 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowAttributes, WindowId, WindowLevel};
 
 #[cfg(target_os = "macos")]
-use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS, WindowAttributesExtMacOS};
+use winit::platform::macos::{
+    ActivationPolicy, EventLoopBuilderExtMacOS, WindowAttributesExtMacOS, WindowExtMacOS,
+};
 #[cfg(target_os = "windows")]
-use winit::platform::windows::WindowAttributesExtWindows;
+use winit::platform::windows::{WindowAttributesExtWindows, WindowExtWindows};
 
 use crate::agent_engine::{provider_catalog, AgentEngine, AgentReply, StatusCallback};
 use crate::builtin_tools::BuiltinToolRunner;
-use crate::config_store::{default_user_data_dir, legacy_user_data_dir, ConfigPatch, ConfigStore};
+use crate::config_store::{
+    default_user_data_dir, legacy_user_data_dirs, ConfigPatch, ConfigStore,
+};
 use crate::dialogue_parser::{parse_dialogue, ActionKind, DialogueAction, Scope};
 use crate::live2d_rig::{
     discover_and_load_rig, Live2dMotionInputs, LoadedCharacterRig,
+};
+use crate::settings_panel::{
+    SettingsAction, SettingsPanelData, SettingsPanelModel, SliderKind, SETTINGS_LOGICAL_H,
+    SETTINGS_LOGICAL_W,
 };
 use crate::shell_parser::{
     install_nar_archive, BalloonManager, BalloonSkin, BalloonSummary, CollisionRect, RgbaBitmap,
     ShellManifest, ShellManager, ShellSummary, StrokeDetector,
 };
-use crate::sstp_server::{start_dual_server, ServerBackend, ServerHandle};
+use crate::sstp_server::{start_dual_server, ServerBackend, ServerHandle, SettingsPatchReq};
 
 const POLL_INTERVAL_MS: u64 = 50;
 const TYPEWRITER_INTERVAL_MS: u64 = 38;
@@ -92,7 +100,7 @@ impl ShaderParams {
             anchor_v: 0.96,
             center_u: 0.50,
             aspect_hw: 1.5,
-            pad2: 0.0,
+            pad2: 1.0,
             extra: [0.0; 4],
         }
     }
@@ -334,14 +342,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let pm01 = vec4<f32>(t01.rgb * t01.a, t01.a);
     let pm11 = vec4<f32>(t11.rgb * t11.a, t11.a);
     let pm = mix(mix(pm00, pm10, f.x), mix(pm01, pm11, f.x), f.y);
-    if (pm.a <= 0.0001) {
+    let op = clamp(u_params.pad2, 0.0, 1.0);
+    let scaled_pm = pm * op;
+    if (scaled_pm.a <= 0.0001) {
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
     var out_col: vec4<f32>;
     if (u_params.premul != 0u) {
-        out_col = pm;
+        out_col = scaled_pm;
     } else {
-        out_col = vec4<f32>(pm.rgb / pm.a, pm.a);
+        out_col = vec4<f32>(scaled_pm.rgb / scaled_pm.a, scaled_pm.a);
     }
     if (u_params.pad1 != 0u) {
         let clamped_rgb = clamp(out_col.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
@@ -431,7 +441,7 @@ const PRESENT_OFFSCREEN_WGSL: &str = r#"
 struct PresentParams {
     premul: u32,
     pad0: u32,
-    pad1: u32,
+    opacity: f32,
     pad2: u32,
 };
 
@@ -465,7 +475,8 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let dims_u = textureDimensions(u_tex, 0);
     let coord = clamp(vec2<i32>(floor(in.uv * vec2<f32>(dims_u))), vec2<i32>(0, 0), vec2<i32>(dims_u) - vec2<i32>(1, 1));
-    let pm = textureLoad(u_tex, coord, 0);
+    let op = clamp(u_present.opacity, 0.0, 1.0);
+    let pm = textureLoad(u_tex, coord, 0) * op;
     if (pm.a <= 0.0001) {
         return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     }
@@ -564,7 +575,6 @@ struct GpuContext {
     part_bind_group_layout: wgpu::BindGroupLayout,
     present_pipeline: wgpu::RenderPipeline,
     present_bind_group_layout: wgpu::BindGroupLayout,
-    present_params_buffer: wgpu::Buffer,
     sampler: wgpu::Sampler,
     premul: u32,
     surface_is_srgb: u32,
@@ -831,15 +841,6 @@ impl GpuContext {
             cache: None,
         });
 
-        let mut present_bytes = [0u8; 16];
-        present_bytes[0..4].copy_from_slice(&(premul as u32).to_ne_bytes());
-        present_bytes[4..8].copy_from_slice(&surface_is_srgb.to_ne_bytes());
-        let present_params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("present-params"),
-            contents: &present_bytes,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-
         Ok(Self {
             _instance: instance,
             device,
@@ -850,7 +851,6 @@ impl GpuContext {
             part_bind_group_layout,
             present_pipeline,
             present_bind_group_layout,
-            present_params_buffer,
             sampler,
             premul,
             surface_is_srgb,
@@ -896,6 +896,9 @@ struct WindowSurface {
     texture: Option<wgpu::Texture>,
     bind_group: Option<wgpu::BindGroup>,
     params_buffer: wgpu::Buffer,
+    present_params_buffer: wgpu::Buffer,
+    opacity: f32,
+    last_params: ShaderParams,
     part_layers: Vec<GpuPartLayer>,
     offscreen_target: Option<GpuOffscreenTarget>,
     multipart_active: bool,
@@ -904,6 +907,14 @@ struct WindowSurface {
 }
 
 impl WindowSurface {
+    fn encode_present_params(gpu: &GpuContext, opacity: f32) -> [u8; 16] {
+        let mut present_bytes = [0u8; 16];
+        present_bytes[0..4].copy_from_slice(&gpu.premul.to_ne_bytes());
+        present_bytes[4..8].copy_from_slice(&gpu.surface_is_srgb.to_ne_bytes());
+        present_bytes[8..12].copy_from_slice(&opacity.clamp(0.0, 1.0).to_ne_bytes());
+        present_bytes
+    }
+
     fn from_existing(
         surface: wgpu::Surface<'static>,
         window: Arc<Window>,
@@ -914,9 +925,15 @@ impl WindowSurface {
         surface.configure(&gpu.device, &config);
         let mut init_params = ShaderParams::idle(gpu.premul);
         init_params.pad1 = gpu.surface_is_srgb;
+        init_params.pad2 = 1.0;
         let params_buffer = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("window-shader-params"),
             contents: &as_bytes_shader_params(&init_params),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let present_params_buffer = gpu.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("window-present-params"),
+            contents: &Self::encode_present_params(gpu, 1.0),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         Self {
@@ -926,6 +943,9 @@ impl WindowSurface {
             texture: None,
             bind_group: None,
             params_buffer,
+            present_params_buffer,
+            opacity: 1.0,
+            last_params: init_params,
             part_layers: Vec::new(),
             offscreen_target: None,
             multipart_active: false,
@@ -937,9 +957,27 @@ impl WindowSurface {
     fn update_params(&mut self, gpu: &GpuContext, params: &ShaderParams) {
         let mut eff = *params;
         eff.pad1 = gpu.surface_is_srgb;
+        eff.pad2 = self.opacity;
+        self.last_params = eff;
         gpu.queue
             .write_buffer(&self.params_buffer, 0, &as_bytes_shader_params(&eff));
         self.last_live2d_active = params.live2d != 0;
+    }
+
+    fn set_opacity(&mut self, gpu: &GpuContext, opacity: f32) -> bool {
+        let op = opacity.clamp(0.0, 1.0);
+        if (self.opacity - op).abs() < 0.002 {
+            return false;
+        }
+        self.opacity = op;
+        self.last_params.pad1 = gpu.surface_is_srgb;
+        self.last_params.pad2 = op;
+        gpu.queue
+            .write_buffer(&self.params_buffer, 0, &as_bytes_shader_params(&self.last_params));
+        gpu.queue
+            .write_buffer(&self.present_params_buffer, 0, &Self::encode_present_params(gpu, op));
+        self.window.request_redraw();
+        true
     }
 
     fn resize(&mut self, gpu: &GpuContext, phys: PhysicalSize<u32>) {
@@ -1114,7 +1152,7 @@ impl WindowSurface {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: gpu.present_params_buffer.as_entire_binding(),
+                    resource: self.present_params_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -1281,20 +1319,20 @@ impl WindowSurface {
     }
 }
 
-struct TextRenderer {
+pub struct TextRenderer {
     font_system: FontSystem,
     swash_cache: SwashCache,
 }
 
 impl TextRenderer {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             font_system: FontSystem::new(),
             swash_cache: SwashCache::new(),
         }
     }
 
-    fn measure_lines(&mut self, text: &str, font_px: f32, line_h: f32, max_w: f32) -> (usize, f32) {
+    pub fn measure_lines(&mut self, text: &str, font_px: f32, line_h: f32, max_w: f32) -> (usize, f32) {
         let mut buf = Buffer::new(&mut self.font_system, Metrics::new(font_px, line_h));
         buf.set_wrap(&mut self.font_system, Wrap::WordOrGlyph);
         buf.set_size(&mut self.font_system, Some(max_w.max(20.0)), None);
@@ -1313,7 +1351,7 @@ impl TextRenderer {
         (lines, (lines as f32) * line_h)
     }
 
-    fn measure_inline_width(&mut self, text: &str, font_px: f32) -> f32 {
+    pub fn measure_inline_width(&mut self, text: &str, font_px: f32) -> f32 {
         if text.is_empty() {
             return 0.0;
         }
@@ -1332,7 +1370,7 @@ impl TextRenderer {
         (w_all - w_mark).max(0.0)
     }
 
-    fn draw_inline_text(
+    pub fn draw_inline_text(
         &mut self,
         bmp: &mut RgbaBitmap,
         text: &str,
@@ -1371,7 +1409,7 @@ impl TextRenderer {
         });
     }
 
-    fn draw_text(
+    pub fn draw_text(
         &mut self,
         bmp: &mut RgbaBitmap,
         text: &str,
@@ -1499,6 +1537,8 @@ struct CharacterWindowState {
     surface_id: i32,
     is_neo_default: bool,
     display_scale: f64,
+    user_scale: f64,
+    hovered_opaque: bool,
     base_bmp: Option<RgbaBitmap>,
     overlays: HashMap<i32, (i32, i32, bool, RgbaBitmap)>,
     composited: RgbaBitmap,
@@ -1597,12 +1637,16 @@ impl CharacterWindowState {
         true
     }
 
+    fn effective_display_scale(&self) -> f64 {
+        (self.display_scale / self.user_scale.clamp(0.5, 1.5)).clamp(0.25, 8.0)
+    }
+
     fn foot_bottom_offset_logical(&self) -> f64 {
         let Some((_x0, _y0, _x1, y1)) = self.composited.opaque_bbox() else {
             return 0.0;
         };
         let pad_px = ((self.composited.height as i32) - 1 - y1).max(0) as f64;
-        pad_px / self.display_scale.max(0.5)
+        pad_px / self.effective_display_scale()
     }
 
     fn trigger_bounce(&mut self, strength: f32) {
@@ -1859,7 +1903,7 @@ impl CharacterWindowState {
                 }
             }
         }
-        let ds = self.display_scale.clamp(0.5, 4.0);
+        let ds = self.effective_display_scale();
         let new_w = ((comp.width as f64) / ds).round().max(40.0) as u32;
         let new_h = ((comp.height as f64) / ds).round().max(40.0) as u32;
         if self.win_size != (new_w, new_h) {
@@ -2648,6 +2692,7 @@ impl CommunicateWindowState {
         text_renderer: &mut TextRenderer,
         scale: f32,
         phase_s: f32,
+        ui_lang: crate::i18n::UiLang,
     ) -> RgbaBitmap {
         let (logical_w, logical_h) = self.win_size;
         let pw = ((logical_w as f32) * scale).round().max(1.0) as u32;
@@ -2694,11 +2739,12 @@ impl CommunicateWindowState {
             105,
         );
 
-        // Generously padded header inside pill: Japanese & English default labels
+        // Generously padded header inside pill localized by UI language
+        let ui_str = crate::i18n::ui_strings(ui_lang);
         let hdr_font = 10.5 * scale;
         text_renderer.draw_inline_text(
             &mut canvas,
-            "何か藍に話しかける · Ask NanikaAi",
+            ui_str.comm_header,
             (28.0 * scale).round() as i32,
             (17.5 * scale).round() as i32,
             (24.0 * scale).round() as i32,
@@ -2812,7 +2858,7 @@ impl CommunicateWindowState {
             let ph_x = ((clip_x0 as f32) + 7.5 * scale).round() as i32;
             text_renderer.draw_inline_text(
                 &mut canvas,
-                "メッセージを入力… / Type a message…",
+                ui_str.comm_placeholder,
                 ph_x,
                 text_y,
                 clip_x0,
@@ -2873,10 +2919,16 @@ impl CommunicateWindowState {
         canvas
     }
 
-    fn redraw(&mut self, _skin: &BalloonSkin, text_renderer: &mut TextRenderer, gpu: &GpuContext) {
+    fn redraw(
+        &mut self,
+        _skin: &BalloonSkin,
+        text_renderer: &mut TextRenderer,
+        gpu: &GpuContext,
+        ui_lang: crate::i18n::UiLang,
+    ) {
         let scale = self.ws.window.scale_factor().clamp(1.0, 3.0) as f32;
         let phase_s = self.anim_start.elapsed().as_secs_f32();
-        let canvas = self.render_bitmap(text_renderer, scale, phase_s);
+        let canvas = self.render_bitmap(text_renderer, scale, phase_s, ui_lang);
         let phys = PhysicalSize::new(canvas.width.max(1), canvas.height.max(1));
         self.ws.resize(gpu, phys);
         self.ws.upload_rgba(gpu, &canvas);
@@ -2898,13 +2950,26 @@ const KERO_ARCHETYPE_CHOICES: &[(&str, &str)] = &[
     ("male", "青年/男性 (渋めパートナ)"),
 ];
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum MenuSection {
+    Skins,
+    Voice,
+    Ai,
+    Tools,
+}
+
 #[derive(Clone, Debug)]
 enum MenuCommand {
     OpenCommunicate,
+    OpenSettings,
     ResetDefaultSkin,
+    ToggleMenuSection(MenuSection),
+    OpenConfigFolder,
+    ToggleClickThrough,
     SwitchShell(String),
     SwitchBalloon(String),
     SwitchProvider(String, String),
+    SetupLocalAi,
     ToggleKero,
     ToggleAlwaysOnTop,
     ToggleLive2dMotion,
@@ -2912,6 +2977,15 @@ enum MenuCommand {
     OpenLive2dFolder,
     ToggleBind(i32),
     ToggleHourlyChime,
+    CycleAutoTalk,
+    CycleUiLanguage,
+    ToggleQuietMode,
+    ToggleHideCharacters,
+    TogglePomodoro,
+    StopPomodoro,
+    ShowBacklog,
+    CopyLastReply,
+    MoveNextMonitor,
     ToggleVoiceTts,
     SelectTtsEngine(String),
     SelectKeroVoiceArchetype(Option<String>),
@@ -3022,10 +3096,10 @@ impl MenuWindowState {
                     45,
                 );
             }
-            let rgb = if matches!(row.cmd, MenuCommand::ResetDefaultSkin) {
-                (147, 210, 255)
-            } else {
-                (240, 244, 252)
+            let rgb = match row.cmd {
+                MenuCommand::ResetDefaultSkin | MenuCommand::OpenSettings => (147, 215, 255),
+                MenuCommand::ToggleMenuSection(_) => (186, 224, 255),
+                _ => (240, 244, 252),
             };
             text_renderer.draw_inline_text(
                 &mut canvas,
@@ -3090,6 +3164,30 @@ impl MenuWindowState {
                 .request_inner_size(LogicalSize::new(logical_w, logical_h));
             self.win_size = (logical_w, logical_h);
         }
+        let phys = PhysicalSize::new(canvas.width.max(1), canvas.height.max(1));
+        self.ws.resize(gpu, phys);
+        self.ws.upload_rgba(gpu, &canvas);
+        self.last_render_bmp = canvas;
+        self.ws.window.request_redraw();
+    }
+}
+
+struct SettingsWindowState {
+    ws: WindowSurface,
+    visible: bool,
+    win_size: (u32, u32),
+    model: SettingsPanelModel,
+    dragging_header: bool,
+    drag_start_cursor: (f64, f64),
+    drag_start_pos: (f64, f64),
+    last_local_cursor: Option<(f64, f64)>,
+    last_render_bmp: RgbaBitmap,
+}
+
+impl SettingsWindowState {
+    fn redraw(&mut self, data: &SettingsPanelData, text_renderer: &mut TextRenderer, gpu: &GpuContext) {
+        let scale = self.ws.window.scale_factor().clamp(1.0, 3.0) as f32;
+        let canvas = self.model.render(data, text_renderer, scale);
         let phys = PhysicalSize::new(canvas.width.max(1), canvas.height.max(1));
         self.ws.resize(gpu, phys);
         self.ws.upload_rgba(gpu, &canvas);
@@ -3247,12 +3345,19 @@ impl PlaybackQueue {
 #[derive(Debug)]
 enum UserEvent {
     PlayActions(Vec<DialogueAction>),
+    PlayActionsNoBacklog(Vec<DialogueAction>),
     StatusUpdate(String, bool),
     ServerGetHealth(mpsc::Sender<Value>),
     ServerGetSkins(mpsc::Sender<Value>),
     ServerGetVoices(mpsc::Sender<Value>),
+    ServerGetBacklog(mpsc::Sender<Value>),
     ServerConfigureVoice {
         req: crate::sstp_server::VoiceConfigReq,
+        reply: mpsc::Sender<Result<Value, String>>,
+    },
+    ServerGetSettings(mpsc::Sender<Value>),
+    ServerUpdateSettings {
+        req: SettingsPatchReq,
         reply: mpsc::Sender<Result<Value, String>>,
     },
     ServerSwitchSkin {
@@ -3266,6 +3371,10 @@ enum UserEvent {
         reply: mpsc::Sender<Result<Value, String>>,
     },
     RefreshMenus,
+    SystemProbeUpdate {
+        fullscreen: bool,
+        battery: crate::accessory_utils::BatteryStatus,
+    },
     TriggerSmokeStep,
 }
 
@@ -3328,6 +3437,7 @@ impl ServerBackend for GuiServerBackend {
         let _ = self
             .proxy
             .send_event(UserEvent::PlayActions(reply.actions.clone()));
+        let _ = self.proxy.send_event(UserEvent::RefreshMenus);
         reply
     }
 
@@ -3483,6 +3593,36 @@ impl ServerBackend for GuiServerBackend {
         let _ = self.proxy.send_event(UserEvent::RefreshMenus);
         Ok(self.get_voices())
     }
+
+    fn get_settings(&self) -> Value {
+        let (tx, rx) = mpsc::channel();
+        if self.proxy.send_event(UserEvent::ServerGetSettings(tx)).is_ok() {
+            if let Ok(v) = rx.recv_timeout(Duration::from_millis(120)) {
+                return v;
+            }
+        }
+        AppRuntime::settings_snapshot_from_store(&self.config_store)
+    }
+
+    fn get_backlog(&self) -> Value {
+        let (tx, rx) = mpsc::channel();
+        if self.proxy.send_event(UserEvent::ServerGetBacklog(tx)).is_ok() {
+            if let Ok(v) = rx.recv_timeout(Duration::from_millis(200)) {
+                return v;
+            }
+        }
+        json!({ "count": 0, "entries": [] })
+    }
+
+    fn on_update_settings(&self, req: SettingsPatchReq) -> Result<Value, String> {
+        crate::sstp_server::validate_settings_patch(&req)?;
+        let (tx, rx) = mpsc::channel();
+        self.proxy
+            .send_event(UserEvent::ServerUpdateSettings { req, reply: tx })
+            .map_err(|e| format!("GUI 이벤트 전송 실패: {e}"))?;
+        rx.recv_timeout(Duration::from_secs(3))
+            .map_err(|e| format!("설정 변경 타임아웃: {e}"))?
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -3605,6 +3745,8 @@ struct AppRuntime {
     kero_balloon: Option<BalloonWindowState>,
     communicate: Option<CommunicateWindowState>,
     menu: Option<MenuWindowState>,
+    settings: Option<SettingsWindowState>,
+    expanded_menu_section: Option<MenuSection>,
     playback: PlaybackQueue,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     tray: Option<TrayIcon>,
@@ -3618,6 +3760,14 @@ struct AppRuntime {
     closing_at: Option<Instant>,
     os_insets: DesktopInsets,
     initialized: bool,
+    characters_hidden_by_user: bool,
+    hidden_by_fullscreen: bool,
+    dock_left_edge: bool,
+    pomodoro: crate::accessory_utils::PomodoroTimer,
+    backlog: crate::accessory_utils::DialogueBacklog,
+    battery_status: crate::accessory_utils::BatteryStatus,
+    low_battery_notified: bool,
+    last_pomo_ui_refresh: Instant,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -3626,6 +3776,7 @@ enum UiWindowTarget {
     Balloon(Scope),
     Communicate,
     Menu,
+    Settings,
 }
 
 impl AppRuntime {
@@ -3650,6 +3801,8 @@ impl AppRuntime {
             Some(UiWindowTarget::Communicate)
         } else if self.menu.as_ref().is_some_and(|m| m.ws.window.id() == window_id) {
             Some(UiWindowTarget::Menu)
+        } else if self.settings.as_ref().is_some_and(|s| s.ws.window.id() == window_id) {
+            Some(UiWindowTarget::Settings)
         } else {
             None
         }
@@ -3687,6 +3840,11 @@ impl AppRuntime {
                 .as_ref()
                 .map(|m| m.ws.window.scale_factor().max(1.0))
                 .unwrap_or(1.0),
+            Some(UiWindowTarget::Settings) => self
+                .settings
+                .as_ref()
+                .map(|s| s.ws.window.scale_factor().max(1.0))
+                .unwrap_or(1.0),
             None => 1.0,
         }
     }
@@ -3698,6 +3856,33 @@ impl AppRuntime {
         always_on_top: bool,
         active: bool,
         visible: bool,
+    ) -> Result<Arc<Window>, String> {
+        Self::create_borderless_window_opts(
+            event_loop,
+            title,
+            w,
+            h,
+            always_on_top,
+            active,
+            visible,
+            false,
+            true,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_borderless_window_opts(
+        event_loop: &ActiveEventLoop,
+        title: &str,
+        w: u32,
+        h: u32,
+        always_on_top: bool,
+        active: bool,
+        visible: bool,
+        has_shadow: bool,
+        accepts_first_mouse: bool,
+        skip_taskbar: bool,
     ) -> Result<Arc<Window>, String> {
         let mut attrs = WindowAttributes::default()
             .with_title(title)
@@ -3715,12 +3900,20 @@ impl AppRuntime {
 
         #[cfg(target_os = "macos")]
         {
-            attrs = attrs.with_has_shadow(false);
+            attrs = attrs
+                .with_has_shadow(has_shadow)
+                .with_accepts_first_mouse(accepts_first_mouse);
         }
+        #[cfg(not(target_os = "macos"))]
+        let _ = (has_shadow, accepts_first_mouse);
         #[cfg(target_os = "windows")]
         {
-            attrs = attrs.with_skip_taskbar(true);
+            attrs = attrs
+                .with_skip_taskbar(skip_taskbar)
+                .with_undecorated_shadow(has_shadow);
         }
+        #[cfg(not(target_os = "windows"))]
+        let _ = skip_taskbar;
 
         let win = event_loop
             .create_window(attrs)
@@ -3749,7 +3942,8 @@ impl AppRuntime {
         let (mx, my, mw, mh) = self.screen_work_bounds();
         #[cfg(target_os = "linux")]
         {
-            if let Some(ref s) = self.sakura {
+            if self.config_store.get().linux_respect_workarea {
+                if let Some(ref s) = self.sakura {
                 if let Ok(out) = std::process::Command::new("xprop")
                     .args(["-root", "_NET_WORKAREA"])
                     .output()
@@ -3774,6 +3968,7 @@ impl AppRuntime {
                         }
                     }
                 }
+                }
             }
         }
         let ins = &self.os_insets;
@@ -3785,6 +3980,7 @@ impl AppRuntime {
     }
 
     fn reset_character_positions(&mut self) {
+        self.dock_left_edge = false;
         let (_mx, my, _mw, mh) = self.screen_work_bounds();
         let (sx_safe, sy_safe, sw_safe, sh_safe) = self.desktop_safe_work_area();
         let safe_right = sx_safe + sw_safe;
@@ -3952,6 +4148,1081 @@ impl AppRuntime {
         })
     }
 
+    pub(crate) fn settings_snapshot_from_store(store: &ConfigStore) -> Value {
+        let cfg = store.get();
+        let eff_lang = crate::i18n::resolve_ui_lang(&cfg.ui_language);
+        json!({
+            "config_dir": store.config_dir.display().to_string(),
+            "config_file": store.file_path.display().to_string(),
+            "os_platform": std::env::consts::OS,
+            "ui_language": cfg.ui_language,
+            "effective_ui_language": eff_lang.code(),
+            "quiet_mode": cfg.quiet_mode,
+            "auto_hide_on_fullscreen": cfg.auto_hide_on_fullscreen,
+            "auto_start_at_login": cfg.auto_start_at_login,
+            "power_save_mode": cfg.power_save_mode,
+            "low_battery_alert": cfg.low_battery_alert,
+            "pomodoro_preset_idx": cfg.pomodoro_preset_idx,
+            "skin_opacity": cfg.skin_opacity,
+            "balloon_opacity": cfg.balloon_opacity,
+            "character_scale": cfg.character_scale,
+            "opaque_on_hover": cfg.opaque_on_hover,
+            "eye_tracking": cfg.eye_tracking,
+            "lock_position": cfg.lock_position,
+            "snap_to_bottom": cfg.snap_to_bottom,
+            "click_through_mode": cfg.click_through_mode,
+            "show_kero": cfg.show_kero,
+            "always_on_top": cfg.always_on_top,
+            "live2d_motion": cfg.live2d_motion,
+            "hourly_chime": cfg.hourly_chime,
+            "voice_tts": cfg.voice_tts,
+            "tts_engine": cfg.tts_engine,
+            "active_shell_id": cfg.active_shell_id,
+            "active_balloon_id": cfg.active_balloon_id,
+            "provider": cfg.provider,
+            "model": cfg.model,
+            "enable_tools": cfg.enable_tools,
+            "enable_clipboard_tool": cfg.enable_clipboard_tool,
+            "auto_talk_interval_sec": cfg.auto_talk_interval_sec,
+            "interest_news_weight": cfg.interest_news_weight,
+            "interests": store.active_interests(),
+            "macos_accept_first_mouse": cfg.macos_accept_first_mouse,
+            "macos_window_shadow": cfg.macos_window_shadow,
+            "macos_show_in_dock": cfg.macos_show_in_dock,
+            "windows_skip_taskbar": cfg.windows_skip_taskbar,
+            "windows_undecorated_shadow": cfg.windows_undecorated_shadow,
+            "linux_prefer_x11": cfg.linux_prefer_x11,
+            "linux_respect_workarea": cfg.linux_respect_workarea,
+        })
+    }
+
+    fn build_settings_snapshot(&self) -> Value {
+        let mut snap = Self::settings_snapshot_from_store(&self.config_store);
+        if let Some(map) = snap.as_object_mut() {
+            map.insert(
+                "characters_hidden".to_string(),
+                json!(self.characters_hidden_by_user),
+            );
+            map.insert(
+                "hidden_by_fullscreen".to_string(),
+                json!(self.hidden_by_fullscreen),
+            );
+            map.insert(
+                "on_battery".to_string(),
+                json!(self.battery_status.on_battery),
+            );
+            map.insert(
+                "battery_percent".to_string(),
+                json!(self.battery_status.percent),
+            );
+            map.insert("pomodoro".to_string(), self.pomodoro.snapshot_json());
+        }
+        snap
+    }
+
+    fn settings_panel_data(&self) -> SettingsPanelData {
+        let cfg = self.config_store.get();
+        let ui_lang = crate::i18n::resolve_ui_lang(&cfg.ui_language);
+        let s = crate::i18n::ui_strings(ui_lang);
+        let ui_language_label = crate::i18n::format_ui_language_label(&cfg.ui_language, ui_lang);
+        let characters_hidden = self.characters_hidden_by_user;
+        let pomodoro_preset_label = self.pomodoro.format_preset_label(ui_lang);
+        let pomodoro_button_label = self.pomodoro.format_button_label(ui_lang);
+        let power_save_label = crate::i18n::power_save_label(ui_lang, &cfg.power_save_mode).to_string();
+        let active_shell_name = self
+            .shell_manager
+            .list_shells()
+            .into_iter()
+            .find(|sh| sh.id == cfg.active_shell_id)
+            .map(|sh| sh.name)
+            .unwrap_or_else(|| cfg.active_shell_id.clone());
+        let active_balloon_name = self
+            .balloon_manager
+            .list_balloons()
+            .into_iter()
+            .find(|b| b.id == cfg.active_balloon_id)
+            .map(|b| b.name)
+            .unwrap_or_else(|| cfg.active_balloon_id.clone());
+        let provider_fallback = provider_catalog()
+            .into_iter()
+            .find(|p| p.id == cfg.provider)
+            .map(|p| p.label)
+            .unwrap_or_else(|| cfg.provider.clone());
+        let provider_label = crate::i18n::provider_label(ui_lang, &cfg.provider, &provider_fallback);
+        let tts_engine_label = crate::i18n::tts_engine_label(ui_lang, &cfg.tts_engine);
+
+        let (eng_lbl, all_voices) = crate::companion_extras::cached_tts_voices();
+        let (sak_sp, ker_sp, _) = self
+            .config_store
+            .get_shell_voice_profile(&cfg.active_shell_id);
+        let (arch, _) = self.active_kero_voice_archetype();
+        let resolved = crate::companion_extras::resolve_effective_voice_selection(
+            &all_voices,
+            arch,
+            sak_sp,
+            ker_sp,
+        );
+        let sakura_voice_label = if sak_sp.is_none() {
+            format!("{} ({}) [{eng_lbl}]", s.voice_auto_prefix, resolved.sakura_label)
+        } else {
+            format!("{} [{eng_lbl}]", resolved.sakura_label)
+        };
+        let kero_voice_label = if ker_sp.is_none() {
+            format!("{} ({}) [{eng_lbl}]", s.voice_auto_prefix, resolved.kero_label)
+        } else {
+            format!("{} [{eng_lbl}]", resolved.kero_label)
+        };
+        let kero_archetype_label =
+            crate::i18n::kero_archetype_label(ui_lang, arch.short_code()).to_string();
+        let config_path_display = self.config_store.file_path.display().to_string();
+        let interests_list = self.config_store.active_interests();
+        let interests_summary = if interests_list.is_empty() {
+            s.interests_empty.to_string()
+        } else {
+            interests_list.join(", ")
+        };
+
+        SettingsPanelData {
+            cfg,
+            config_path_display,
+            active_shell_name,
+            active_balloon_name,
+            provider_label,
+            tts_engine_label,
+            sakura_voice_label,
+            kero_voice_label,
+            kero_archetype_label,
+            recommended_local_ai_hint: crate::companion_extras::recommended_local_ai_summary(),
+            local_ai_setup_busy: crate::companion_extras::is_local_ai_setup_running(),
+            interests_summary,
+            ui_lang,
+            ui_language_label,
+            characters_hidden,
+            pomodoro_preset_label,
+            pomodoro_button_label,
+            power_save_label,
+        }
+    }
+
+    fn apply_live_settings(&mut self) {
+        let cfg = self.config_store.get();
+        let lvl = if cfg.always_on_top {
+            WindowLevel::AlwaysOnTop
+        } else {
+            WindowLevel::Normal
+        };
+        let target_scale = (cfg.character_scale as f64).clamp(0.50, 1.50);
+        let mut scale_changed = false;
+
+        if let Some(ref mut s) = self.sakura {
+            s.ws.window.set_window_level(lvl);
+            #[cfg(target_os = "macos")]
+            s.ws.window.set_has_shadow(cfg.macos_window_shadow);
+            #[cfg(target_os = "windows")]
+            {
+                s.ws.window.set_skip_taskbar(cfg.windows_skip_taskbar);
+                s.ws.window
+                    .set_undecorated_shadow(cfg.windows_undecorated_shadow);
+            }
+            if cfg.click_through_mode {
+                if s.ws.window.set_cursor_hittest(false).is_ok() {
+                    s.last_hittest = Some(false);
+                }
+                s.hovered_opaque = false;
+            }
+            if (s.user_scale - target_scale).abs() > 0.005 {
+                s.user_scale = target_scale;
+                if let Some(ref gpu) = self.gpu {
+                    s.rebuild_composited(gpu, false);
+                }
+                scale_changed = true;
+            }
+            let op = if cfg.opaque_on_hover && s.hovered_opaque && !cfg.click_through_mode {
+                1.0
+            } else {
+                cfg.skin_opacity
+            };
+            if let Some(ref gpu) = self.gpu {
+                s.ws.set_opacity(gpu, op);
+            }
+        }
+        if let Some(ref mut k) = self.kero {
+            k.visible = cfg.show_kero;
+            k.ws.window.set_visible(cfg.show_kero);
+            k.ws.window.set_window_level(lvl);
+            #[cfg(target_os = "macos")]
+            k.ws.window.set_has_shadow(cfg.macos_window_shadow);
+            #[cfg(target_os = "windows")]
+            {
+                k.ws.window.set_skip_taskbar(cfg.windows_skip_taskbar);
+                k.ws.window
+                    .set_undecorated_shadow(cfg.windows_undecorated_shadow);
+            }
+            if cfg.click_through_mode {
+                if k.ws.window.set_cursor_hittest(false).is_ok() {
+                    k.last_hittest = Some(false);
+                }
+                k.hovered_opaque = false;
+            }
+            if (k.user_scale - target_scale).abs() > 0.005 {
+                k.user_scale = target_scale;
+                if let Some(ref gpu) = self.gpu {
+                    k.rebuild_composited(gpu, false);
+                }
+                scale_changed = true;
+            }
+            let op = if cfg.opaque_on_hover && k.hovered_opaque && !cfg.click_through_mode {
+                1.0
+            } else {
+                cfg.skin_opacity
+            };
+            if let Some(ref gpu) = self.gpu {
+                k.ws.set_opacity(gpu, op);
+            }
+        }
+        if !cfg.show_kero {
+            if let Some(ref mut kb) = self.kero_balloon {
+                kb.visible = false;
+                kb.ws.window.set_visible(false);
+            }
+        }
+        if let Some(ref mut sb) = self.sakura_balloon {
+            sb.ws.window.set_window_level(lvl);
+            if let Some(ref gpu) = self.gpu {
+                sb.ws.set_opacity(gpu, cfg.balloon_opacity);
+            }
+        }
+        if let Some(ref mut kb) = self.kero_balloon {
+            kb.ws.window.set_window_level(lvl);
+            if let Some(ref gpu) = self.gpu {
+                kb.ws.set_opacity(gpu, cfg.balloon_opacity);
+            }
+        }
+        if !cfg.live2d_motion {
+            if let Some(ref gpu) = self.gpu {
+                if let Some(ref mut s) = self.sakura {
+                    s.tick_live2d(gpu, false, None, false);
+                }
+                if let Some(ref mut k) = self.kero {
+                    k.tick_live2d(gpu, false, None, false);
+                }
+            }
+        }
+        if scale_changed {
+            self.reposition_balloon(Scope::Sakura);
+            self.reposition_balloon(Scope::Kero);
+        }
+    }
+
+    fn effective_ui_lang(&self) -> crate::i18n::UiLang {
+        crate::i18n::resolve_ui_lang(&self.config_store.get().ui_language)
+    }
+
+    fn ui_strings(&self) -> &'static crate::i18n::UiStrings {
+        crate::i18n::ui_strings(self.effective_ui_lang())
+    }
+
+    fn redraw_communicate_if_visible(&mut self) {
+        let ui_lang = self.effective_ui_lang();
+        if let (Some(ref gpu), Some(ref mut cw)) = (&self.gpu, &mut self.communicate) {
+            if cw.visible {
+                cw.redraw(&self.balloon_skin, &mut self.text_renderer, gpu, ui_lang);
+            }
+        }
+    }
+
+    fn redraw_settings_panel(&mut self) {
+        if !self.settings.as_ref().is_some_and(|s| s.visible) {
+            return;
+        }
+        let data = self.settings_panel_data();
+        if let (Some(ref gpu), Some(ref mut sw)) = (&self.gpu, &mut self.settings) {
+            sw.redraw(&data, &mut self.text_renderer, gpu);
+        }
+    }
+
+    fn open_settings_panel(&mut self) {
+        let (mx, my, mw, mh) = self.desktop_safe_work_area();
+        let data = self.settings_panel_data();
+        let Some(ref mut sw) = self.settings else { return };
+        let w = sw.win_size.0 as f64;
+        let h = sw.win_size.1 as f64;
+        let px = (mx + (mw - w) * 0.5).clamp(mx + 8.0, (mx + mw - w - 8.0).max(mx + 8.0));
+        let py = (my + (mh - h) * 0.45).clamp(my + 8.0, (my + mh - h - 8.0).max(my + 8.0));
+        sw.visible = true;
+        sw.dragging_header = false;
+        sw.last_local_cursor = None;
+        sw.model.dragging_slider = None;
+        sw.ws.window.set_outer_position(LogicalPosition::new(px, py));
+        sw.ws.window.set_visible(true);
+        sw.ws.window.focus_window();
+        if let Some(ref gpu) = self.gpu {
+            sw.redraw(&data, &mut self.text_renderer, gpu);
+        }
+    }
+
+    fn hide_settings_panel(&mut self) {
+        if let Some(ref mut sw) = self.settings {
+            if sw.visible {
+                sw.visible = false;
+                sw.dragging_header = false;
+                sw.model.dragging_slider = None;
+                sw.ws.window.set_visible(false);
+            }
+        }
+    }
+
+    fn handle_settings_key(&mut self, logical_key: &Key) {
+        if matches!(logical_key, Key::Named(NamedKey::Escape)) {
+            self.hide_settings_panel();
+        }
+    }
+
+    fn cycle_shell(&mut self, delta: i32) {
+        let shells = self.shell_manager.list_shells();
+        if shells.len() <= 1 {
+            return;
+        }
+        let cur = self.config_store.get().active_shell_id;
+        let pos = shells.iter().position(|s| s.id == cur).unwrap_or(0) as isize;
+        let next = (pos + delta as isize).rem_euclid(shells.len() as isize) as usize;
+        let _ = self.apply_skin_switch(Some(shells[next].id.clone()), None);
+    }
+
+    fn cycle_balloon(&mut self, delta: i32) {
+        let balloons = self.balloon_manager.list_balloons();
+        if balloons.len() <= 1 {
+            return;
+        }
+        let cur = self.config_store.get().active_balloon_id;
+        let pos = balloons.iter().position(|b| b.id == cur).unwrap_or(0) as isize;
+        let next = (pos + delta as isize).rem_euclid(balloons.len() as isize) as usize;
+        let _ = self.apply_skin_switch(None, Some(balloons[next].id.clone()));
+    }
+
+    fn cycle_provider(&mut self, delta: i32) {
+        let cat = provider_catalog();
+        if cat.is_empty() {
+            return;
+        }
+        let cur = self.config_store.get().provider;
+        let pos = cat.iter().position(|p| p.id == cur).unwrap_or(0) as isize;
+        let next = (pos + delta as isize).rem_euclid(cat.len() as isize) as usize;
+        let p = &cat[next];
+        if self.smoke_mode {
+            self.config_store.update(ConfigPatch {
+                provider: Some(p.id.clone()),
+                model: Some(p.default_model.clone()),
+                ..Default::default()
+            });
+        } else {
+            let _ = self.handle_provider_switch(p.id.clone(), Some(p.default_model.clone()));
+        }
+    }
+
+    fn cycle_tts_engine(&mut self, delta: i32) {
+        let cur = self.config_store.get().tts_engine;
+        let pos = TTS_ENGINE_CHOICES
+            .iter()
+            .position(|(id, _)| *id == cur)
+            .unwrap_or(0) as isize;
+        let next = (pos + delta as isize).rem_euclid(TTS_ENGINE_CHOICES.len() as isize) as usize;
+        let next_id = TTS_ENGINE_CHOICES[next].0.to_string();
+        self.execute_menu_command_inner(None, MenuCommand::SelectTtsEngine(next_id));
+    }
+
+    fn cycle_voice_speaker(&mut self, scope: u8, delta: i32) {
+        let (_, all_voices) = crate::companion_extras::cached_tts_voices();
+        let options = Self::representative_voice_options(&all_voices, 12);
+        if options.is_empty() {
+            return;
+        }
+        let cur_shell = self.config_store.get().active_shell_id;
+        let (sak_sp, ker_sp, _) = self.config_store.get_shell_voice_profile(&cur_shell);
+        let cur_id = if scope == 1 { ker_sp } else { sak_sp };
+        let mut slots: Vec<Option<i64>> = vec![None];
+        for v in options {
+            slots.push(Some(v.style_id));
+        }
+        let pos = slots.iter().position(|s| *s == cur_id).unwrap_or(0) as isize;
+        let next = (pos + delta as isize).rem_euclid(slots.len() as isize) as usize;
+        self.execute_menu_command_inner(
+            None,
+            MenuCommand::SelectVoiceSpeaker {
+                scope,
+                style_id: slots[next],
+            },
+        );
+    }
+
+    fn cycle_kero_archetype(&mut self, delta: i32) {
+        let cur_shell = self.config_store.get().active_shell_id;
+        let (_, _, cur_arch) = self.config_store.get_shell_voice_profile(&cur_shell);
+        let mut slots: Vec<Option<String>> = vec![None];
+        for (code, _) in KERO_ARCHETYPE_CHOICES {
+            slots.push(Some((*code).to_string()));
+        }
+        let pos = slots.iter().position(|s| *s == cur_arch).unwrap_or(0) as isize;
+        let next = (pos + delta as isize).rem_euclid(slots.len() as isize) as usize;
+        self.execute_menu_command_inner(
+            None,
+            MenuCommand::SelectKeroVoiceArchetype(slots[next].clone()),
+        );
+    }
+
+    fn cycle_autotalk(&mut self, delta: i32) {
+        const INTERVALS: [u64; 7] = [0, 30, 60, 120, 180, 300, 600];
+        let cur = self.config_store.get().auto_talk_interval_sec;
+        let pos = INTERVALS
+            .iter()
+            .position(|&v| v == cur)
+            .unwrap_or_else(|| {
+                INTERVALS
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, &v)| v.abs_diff(cur))
+                    .map(|(i, _)| i)
+                    .unwrap_or(4)
+            }) as isize;
+        let next = (pos + delta as isize).rem_euclid(INTERVALS.len() as isize) as usize;
+        self.config_store.update(ConfigPatch {
+            auto_talk_interval_sec: Some(INTERVALS[next]),
+            ..Default::default()
+        });
+        self.auto_talk_last = Instant::now();
+    }
+
+    fn cycle_ui_language(&mut self, delta: i32) {
+        let choices = crate::i18n::UI_LANGUAGE_CHOICES;
+        if choices.is_empty() {
+            return;
+        }
+        let cur = crate::i18n::normalize_ui_language(&self.config_store.get().ui_language);
+        let pos = choices.iter().position(|&c| c == cur).unwrap_or(0) as isize;
+        let next = (pos + delta as isize).rem_euclid(choices.len() as isize) as usize;
+        self.config_store.update(ConfigPatch {
+            ui_language: Some(choices[next].to_string()),
+            ..Default::default()
+        });
+    }
+
+    fn characters_effectively_hidden(&self) -> bool {
+        let cfg = self.config_store.get();
+        self.characters_hidden_by_user || (cfg.auto_hide_on_fullscreen && self.hidden_by_fullscreen)
+    }
+
+    fn apply_visibility_state(&mut self) {
+        let hide = self.characters_effectively_hidden();
+        let show_kero_cfg = self.config_store.get().show_kero;
+        if let Some(ref mut s) = self.sakura {
+            s.visible = !hide;
+            s.ws.window.set_visible(!hide);
+        }
+        if let Some(ref mut k) = self.kero {
+            let vis = !hide && show_kero_cfg;
+            k.visible = vis;
+            k.ws.window.set_visible(vis);
+        }
+        if hide {
+            if let Some(ref sb) = self.sakura_balloon {
+                sb.ws.window.set_visible(false);
+            }
+            if let Some(ref kb) = self.kero_balloon {
+                kb.ws.window.set_visible(false);
+            }
+            if let Some(ref mut cw) = self.communicate {
+                if cw.visible {
+                    cw.visible = false;
+                    cw.focused = false;
+                    cw.ws.window.set_visible(false);
+                }
+            }
+            self.hide_menu();
+        } else {
+            if let Some(ref sb) = self.sakura_balloon {
+                sb.ws.window.set_visible(sb.visible);
+            }
+            if let Some(ref kb) = self.kero_balloon {
+                kb.ws.window.set_visible(kb.visible && show_kero_cfg);
+            }
+        }
+    }
+
+    fn move_to_next_monitor_or_edge(&mut self) {
+        let (sak_w, sak_h, sak_full_feet, sak_foot_off, sak_pos) = match self.sakura {
+            Some(ref mut s) => {
+                s.sync_pos_from_window();
+                (
+                    s.win_size.0 as f64,
+                    s.win_size.1 as f64,
+                    s.is_full_feet(),
+                    s.foot_bottom_offset_logical(),
+                    s.logical_pos,
+                )
+            }
+            None => return,
+        };
+        let (kero_w, kero_h, kero_full_feet, kero_foot_off) = self
+            .kero
+            .as_ref()
+            .map(|k| {
+                (
+                    k.win_size.0 as f64,
+                    k.win_size.1 as f64,
+                    k.is_full_feet(),
+                    k.foot_bottom_offset_logical(),
+                )
+            })
+            .unwrap_or((200.0, 250.0, true, 8.0));
+
+        let mon_rects: Vec<(i32, i32, u32, u32)> = self
+            .sakura
+            .as_ref()
+            .map(|s| {
+                s.ws.window
+                    .available_monitors()
+                    .map(|m| {
+                        let sc = m.scale_factor().max(1.0);
+                        let p = m.position().to_logical::<i32>(sc);
+                        let sz = m.size().to_logical::<u32>(sc);
+                        (p.x, p.y, sz.width, sz.height)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let cur_center = (
+            (sak_pos.0 + sak_w * 0.5).round() as i32,
+            (sak_pos.1 + sak_h * 0.5).round() as i32,
+        );
+        if let Some(next_idx) =
+            crate::accessory_utils::select_next_monitor_index(&mon_rects, cur_center)
+        {
+            let (mx, my, mw, mh) = mon_rects[next_idx];
+            let mx = mx as f64;
+            let my = my as f64;
+            let mw = mw as f64;
+            let mh = mh as f64;
+            let sak_x = (mx + mw - sak_w - 28.0).max(mx + 12.0);
+            let sak_floor_y = if sak_full_feet {
+                my + mh - 24.0
+            } else {
+                my + mh - 16.0
+            };
+            let sak_y = (sak_floor_y - sak_h + if sak_full_feet { sak_foot_off } else { 0.0 })
+                .clamp(my + 24.0, (my + mh - sak_h).max(my + 24.0));
+            if let Some(ref mut s) = self.sakura {
+                s.set_logical_pos(sak_x, sak_y);
+            }
+            let kero_x = (sak_x - kero_w - 24.0).max(mx + 12.0);
+            let kero_y = (sak_floor_y - kero_h + if kero_full_feet { kero_foot_off } else { 0.0 })
+                .clamp(my + 24.0, (my + mh - kero_h).max(my + 24.0));
+            if let Some(ref mut k) = self.kero {
+                k.set_logical_pos(kero_x, kero_y);
+            }
+            self.reposition_balloon(Scope::Sakura);
+            self.reposition_balloon(Scope::Kero);
+            let msg = format!("{}{}", self.ui_strings().status_monitor_moved_prefix, next_idx + 1);
+            self.apply_status_feedback(msg);
+            return;
+        }
+
+        self.dock_left_edge = !self.dock_left_edge;
+        if self.dock_left_edge {
+            let (sx_safe, sy_safe, _sw_safe, sh_safe) = self.desktop_safe_work_area();
+            let (_mx, my, _mw, mh) = self.screen_work_bounds();
+            let safe_bottom = sy_safe + sh_safe;
+            let sak_x = sx_safe + 28.0;
+            let sak_floor_y = if sak_full_feet {
+                safe_bottom - 6.0
+            } else {
+                safe_bottom
+            };
+            let sak_y = (sak_floor_y - sak_h + if sak_full_feet { sak_foot_off } else { 0.0 })
+                .clamp(sy_safe, (my + mh - sak_h).max(sy_safe));
+            if let Some(ref mut s) = self.sakura {
+                s.set_logical_pos(sak_x, sak_y);
+            }
+            let kero_x = sak_x + sak_w + 24.0;
+            let kero_y = (sak_floor_y - kero_h + if kero_full_feet { kero_foot_off } else { 0.0 })
+                .clamp(sy_safe, (my + mh - kero_h).max(sy_safe));
+            if let Some(ref mut k) = self.kero {
+                k.set_logical_pos(kero_x, kero_y);
+            }
+            self.reposition_balloon(Scope::Sakura);
+            self.reposition_balloon(Scope::Kero);
+            let msg = self.ui_strings().status_dock_edge_left.to_string();
+            self.apply_status_feedback(msg);
+        } else {
+            self.reset_character_positions();
+            let msg = self.ui_strings().status_dock_edge_right.to_string();
+            self.apply_status_feedback(msg);
+        }
+    }
+
+    fn copy_last_reply_to_clipboard(&mut self) {
+        let Some(text) = self.backlog.latest_plain_text() else {
+            let msg = self.ui_strings().status_copy_empty.to_string();
+            self.apply_status_feedback(msg);
+            return;
+        };
+        if !self.smoke_mode {
+            if let Ok(mut cb) = Clipboard::new() {
+                let _ = cb.set_text(text);
+            }
+        }
+        let msg = self.ui_strings().status_copied_reply.to_string();
+        self.apply_status_feedback(msg);
+    }
+
+    fn show_backlog_in_balloon(&mut self) {
+        if self.characters_effectively_hidden() {
+            self.characters_hidden_by_user = false;
+            self.apply_visibility_state();
+        }
+        let script = self
+            .backlog
+            .format_replay_script(8, self.effective_ui_lang());
+        let _ = self
+            .proxy
+            .send_event(UserEvent::PlayActionsNoBacklog(parse_dialogue(&script)));
+    }
+
+    fn cycle_pomodoro_preset(&mut self, delta: i32) {
+        let total = crate::accessory_utils::POMODORO_PRESETS.len() as isize;
+        let cur = self.config_store.get().pomodoro_preset_idx as isize;
+        let next = (cur + delta as isize).rem_euclid(total) as usize;
+        self.config_store.update(ConfigPatch {
+            pomodoro_preset_idx: Some(next),
+            ..Default::default()
+        });
+        self.pomodoro.set_preset(next);
+    }
+
+    fn apply_pomodoro_action(&mut self, action: &str) {
+        match action.trim().to_ascii_lowercase().as_str() {
+            "start" => self.pomodoro.start_focus(),
+            "pause" => {
+                if self.pomodoro.is_active() && !self.pomodoro.paused {
+                    self.pomodoro.toggle_start_pause();
+                }
+            }
+            "stop" => self.pomodoro.stop(),
+            "skip" => {
+                if let Some(trans) = self.pomodoro.skip_phase() {
+                    let script = crate::accessory_utils::build_pomodoro_transition_script(
+                        trans,
+                        self.effective_ui_lang(),
+                    );
+                    let _ = self
+                        .proxy
+                        .send_event(UserEvent::PlayActionsNoBacklog(parse_dialogue(&script)));
+                }
+            }
+            _ => self.pomodoro.toggle_start_pause(),
+        }
+        let lbl = self.pomodoro.format_button_label(self.effective_ui_lang());
+        self.apply_status_feedback(lbl);
+    }
+
+    fn cycle_power_save_mode(&mut self, delta: i32) {
+        let choices = crate::accessory_utils::POWER_SAVE_CHOICES;
+        let cur = crate::accessory_utils::normalize_power_save_mode(
+            &self.config_store.get().power_save_mode,
+        );
+        let pos = choices.iter().position(|&c| c == cur).unwrap_or(0) as isize;
+        let next = (pos + delta as isize).rem_euclid(choices.len() as isize) as usize;
+        let mode = choices[next].to_string();
+        self.config_store.update(ConfigPatch {
+            power_save_mode: Some(mode.clone()),
+            ..Default::default()
+        });
+        let msg = format!(
+            "{}{}",
+            self.ui_strings().status_power_save_prefix,
+            crate::i18n::power_save_label(self.effective_ui_lang(), &mode)
+        );
+        self.apply_status_feedback(msg);
+    }
+
+    fn apply_autostart_toggle(&mut self, enabled: bool) {
+        if !self.smoke_mode {
+            if let Ok(exe) = std::env::current_exe() {
+                if let Err(err) = crate::accessory_utils::apply_os_autostart(enabled, &exe) {
+                    let msg = format!("{}{err}", self.ui_strings().status_autostart_err);
+                    self.apply_status_feedback(msg);
+                    return;
+                }
+            }
+        }
+        self.config_store.update(ConfigPatch {
+            auto_start_at_login: Some(enabled),
+            ..Default::default()
+        });
+        let msg = if enabled {
+            self.ui_strings().status_autostart_on
+        } else {
+            self.ui_strings().status_autostart_off
+        }
+        .to_string();
+        self.apply_status_feedback(msg);
+    }
+
+    fn start_one_click_local_ai_setup(&mut self) {
+        if self.smoke_mode {
+            self.config_store.update(ConfigPatch {
+                provider: Some("ollama".to_string()),
+                endpoint_url: Some("http://127.0.0.1:11434".to_string()),
+                model: Some("auto".to_string()),
+                ..Default::default()
+            });
+            let msg = self.ui_strings().status_local_ai_dry_run.to_string();
+            self.apply_status_feedback(msg);
+            self.redraw_settings_panel();
+            self.rebuild_tray_menu();
+            return;
+        }
+        if crate::companion_extras::is_local_ai_setup_running() {
+            let msg = self.ui_strings().status_local_ai_busy.to_string();
+            self.apply_status_feedback(msg);
+            return;
+        }
+        let _ = self.proxy.send_event(UserEvent::PlayActions(parse_dialogue(
+            "\\0\\s[5]このPCのスペックを確認して、無料ローカルAI（Ollama＋軽量モデル）を自動で準備するね！\\1\\s[10]ちょっと待っててな！\\e",
+        )));
+        let checking = self.ui_strings().status_local_ai_checking.to_string();
+        self.apply_status_feedback(checking);
+
+        let proxy = self.proxy.clone();
+        let store = self.config_store.clone();
+        std::thread::spawn(move || {
+            let mut notified_busy = false;
+            let res = crate::companion_extras::prepare_local_ollama_blocking(
+                "http://127.0.0.1:11434",
+                |progress| {
+                    if !notified_busy {
+                        notified_busy = true;
+                        let _ = proxy.send_event(UserEvent::RefreshMenus);
+                    }
+                    let _ = proxy.send_event(UserEvent::StatusUpdate(progress, true));
+                },
+            );
+            match res {
+                Ok(info) => {
+                    if info.installed_ready {
+                        store.update(ConfigPatch {
+                            provider: Some("ollama".to_string()),
+                            endpoint_url: Some("http://127.0.0.1:11434".to_string()),
+                            model: Some(info.chosen_model.clone()),
+                            ..Default::default()
+                        });
+                    }
+                    let _ = proxy.send_event(UserEvent::StatusUpdate(String::new(), false));
+                    let _ = proxy.send_event(UserEvent::RefreshMenus);
+                    let _ = proxy.send_event(UserEvent::PlayActions(parse_dialogue(
+                        &info.summary_script,
+                    )));
+                }
+                Err(err) => {
+                    let short_err: String = err.chars().take(120).collect();
+                    let _ = proxy.send_event(UserEvent::StatusUpdate(String::new(), false));
+                    let _ = proxy.send_event(UserEvent::RefreshMenus);
+                    let msg = format!(
+                        "\\0\\s[3]無料ローカルAIの自動準備に失敗しちゃった…。\\n({short_err})\\n\\q[🔄 もう一度試す,__setup_local_ai__]\\1\\s[11]ネット接続やディスク空き容量を確認してみよか！\\e"
+                    );
+                    let _ = proxy.send_event(UserEvent::PlayActions(parse_dialogue(&msg)));
+                }
+            }
+        });
+    }
+
+    fn execute_settings_action(&mut self, act: SettingsAction) {
+        let cur = self.config_store.get();
+        match act {
+            SettingsAction::Close => {
+                self.hide_settings_panel();
+                return;
+            }
+            SettingsAction::SelectTab(tab) => {
+                if let Some(ref mut sw) = self.settings {
+                    sw.model.select_tab(tab);
+                }
+                self.redraw_settings_panel();
+                return;
+            }
+            SettingsAction::SetSkinOpacity(v) => {
+                self.config_store.update(ConfigPatch {
+                    skin_opacity: Some(v),
+                    ..Default::default()
+                });
+            }
+            SettingsAction::SetBalloonOpacity(v) => {
+                self.config_store.update(ConfigPatch {
+                    balloon_opacity: Some(v),
+                    ..Default::default()
+                });
+            }
+            SettingsAction::SetCharacterScale(v) => {
+                self.config_store.update(ConfigPatch {
+                    character_scale: Some(v),
+                    ..Default::default()
+                });
+            }
+            SettingsAction::ToggleOpaqueOnHover => {
+                self.config_store.update(ConfigPatch {
+                    opaque_on_hover: Some(!cur.opaque_on_hover),
+                    ..Default::default()
+                });
+            }
+            SettingsAction::ToggleLive2dMotion => {
+                self.config_store.update(ConfigPatch {
+                    live2d_motion: Some(!cur.live2d_motion),
+                    ..Default::default()
+                });
+            }
+            SettingsAction::ToggleEyeTracking => {
+                self.config_store.update(ConfigPatch {
+                    eye_tracking: Some(!cur.eye_tracking),
+                    ..Default::default()
+                });
+            }
+            SettingsAction::ToggleKero => {
+                self.config_store.update(ConfigPatch {
+                    show_kero: Some(!cur.show_kero),
+                    ..Default::default()
+                });
+            }
+            SettingsAction::CycleShell(d) => self.cycle_shell(d),
+            SettingsAction::CycleBalloon(d) => self.cycle_balloon(d),
+            SettingsAction::ToggleAlwaysOnTop => {
+                self.config_store.update(ConfigPatch {
+                    always_on_top: Some(!cur.always_on_top),
+                    ..Default::default()
+                });
+            }
+            SettingsAction::ToggleClickThrough => {
+                self.execute_menu_command_inner(None, MenuCommand::ToggleClickThrough);
+                return;
+            }
+            SettingsAction::ToggleLockPosition => {
+                self.config_store.update(ConfigPatch {
+                    lock_position: Some(!cur.lock_position),
+                    ..Default::default()
+                });
+            }
+            SettingsAction::ToggleSnapToBottom => {
+                self.config_store.update(ConfigPatch {
+                    snap_to_bottom: Some(!cur.snap_to_bottom),
+                    ..Default::default()
+                });
+            }
+            SettingsAction::ToggleHourlyChime => {
+                self.config_store.update(ConfigPatch {
+                    hourly_chime: Some(!cur.hourly_chime),
+                    ..Default::default()
+                });
+            }
+            SettingsAction::CycleUiLanguage(d) => {
+                self.cycle_ui_language(d);
+                let setting_now = self.config_store.get().ui_language;
+                let msg = crate::i18n::format_ui_lang_status(
+                    &setting_now,
+                    self.effective_ui_lang(),
+                );
+                self.apply_status_feedback(msg);
+                self.redraw_communicate_if_visible();
+            }
+            SettingsAction::ToggleQuietMode => {
+                let next = !cur.quiet_mode;
+                self.config_store.update(ConfigPatch {
+                    quiet_mode: Some(next),
+                    ..Default::default()
+                });
+                let msg = if next {
+                    self.ui_strings().status_quiet_on
+                } else {
+                    self.ui_strings().status_quiet_off
+                }
+                .to_string();
+                self.apply_status_feedback(msg);
+            }
+            SettingsAction::ToggleAutoHideFullscreen => {
+                let next = !cur.auto_hide_on_fullscreen;
+                self.config_store.update(ConfigPatch {
+                    auto_hide_on_fullscreen: Some(next),
+                    ..Default::default()
+                });
+                if !next {
+                    self.hidden_by_fullscreen = false;
+                }
+                self.apply_visibility_state();
+            }
+            SettingsAction::ToggleHideCharacters => {
+                self.characters_hidden_by_user = !self.characters_hidden_by_user;
+                self.apply_visibility_state();
+                if !self.characters_hidden_by_user {
+                    let msg = self.ui_strings().status_chars_shown.to_string();
+                    self.apply_status_feedback(msg);
+                }
+            }
+            SettingsAction::MoveNextMonitor => {
+                self.move_to_next_monitor_or_edge();
+            }
+            SettingsAction::CyclePomodoroPreset(d) => {
+                self.cycle_pomodoro_preset(d);
+            }
+            SettingsAction::TogglePomodoro => {
+                self.apply_pomodoro_action("toggle");
+            }
+            SettingsAction::StopPomodoro => {
+                self.apply_pomodoro_action("stop");
+            }
+            SettingsAction::ShowBacklog => {
+                self.show_backlog_in_balloon();
+                return;
+            }
+            SettingsAction::CopyLastReply => {
+                self.copy_last_reply_to_clipboard();
+                return;
+            }
+            SettingsAction::ToggleAutoStart => {
+                self.apply_autostart_toggle(!cur.auto_start_at_login);
+            }
+            SettingsAction::CyclePowerSaveMode(d) => {
+                self.cycle_power_save_mode(d);
+            }
+            SettingsAction::ToggleLowBatteryAlert => {
+                self.config_store.update(ConfigPatch {
+                    low_battery_alert: Some(!cur.low_battery_alert),
+                    ..Default::default()
+                });
+            }
+            SettingsAction::ToggleMacosAcceptFirstMouse => {
+                self.config_store.update(ConfigPatch {
+                    macos_accept_first_mouse: Some(!cur.macos_accept_first_mouse),
+                    ..Default::default()
+                });
+            }
+            SettingsAction::ToggleMacosShadow => {
+                self.config_store.update(ConfigPatch {
+                    macos_window_shadow: Some(!cur.macos_window_shadow),
+                    ..Default::default()
+                });
+            }
+            SettingsAction::ToggleMacosDock => {
+                self.config_store.update(ConfigPatch {
+                    macos_show_in_dock: Some(!cur.macos_show_in_dock),
+                    ..Default::default()
+                });
+            }
+            SettingsAction::ToggleWindowsSkipTaskbar => {
+                self.config_store.update(ConfigPatch {
+                    windows_skip_taskbar: Some(!cur.windows_skip_taskbar),
+                    ..Default::default()
+                });
+            }
+            SettingsAction::ToggleWindowsShadow => {
+                self.config_store.update(ConfigPatch {
+                    windows_undecorated_shadow: Some(!cur.windows_undecorated_shadow),
+                    ..Default::default()
+                });
+            }
+            SettingsAction::ToggleLinuxPreferX11 => {
+                self.config_store.update(ConfigPatch {
+                    linux_prefer_x11: Some(!cur.linux_prefer_x11),
+                    ..Default::default()
+                });
+            }
+            SettingsAction::ToggleLinuxWorkarea => {
+                self.config_store.update(ConfigPatch {
+                    linux_respect_workarea: Some(!cur.linux_respect_workarea),
+                    ..Default::default()
+                });
+            }
+            SettingsAction::ToggleVoiceTts => {
+                self.execute_menu_command_inner(None, MenuCommand::ToggleVoiceTts);
+                self.redraw_settings_panel();
+                return;
+            }
+            SettingsAction::CycleTtsEngine(d) => {
+                self.cycle_tts_engine(d);
+                self.redraw_settings_panel();
+                return;
+            }
+            SettingsAction::CycleSakuraVoice(d) => {
+                self.cycle_voice_speaker(0, d);
+                self.redraw_settings_panel();
+                return;
+            }
+            SettingsAction::CycleKeroVoice(d) => {
+                self.cycle_voice_speaker(1, d);
+                self.redraw_settings_panel();
+                return;
+            }
+            SettingsAction::CycleKeroArchetype(d) => {
+                self.cycle_kero_archetype(d);
+                self.redraw_settings_panel();
+                return;
+            }
+            SettingsAction::CycleProvider(d) => self.cycle_provider(d),
+            SettingsAction::SetupLocalAi => {
+                self.start_one_click_local_ai_setup();
+                return;
+            }
+            SettingsAction::ToggleEnableTools => {
+                self.config_store.update(ConfigPatch {
+                    enable_tools: Some(!cur.enable_tools),
+                    ..Default::default()
+                });
+            }
+            SettingsAction::ToggleEnableClipboard => {
+                self.config_store.update(ConfigPatch {
+                    enable_clipboard_tool: Some(!cur.enable_clipboard_tool),
+                    ..Default::default()
+                });
+            }
+            SettingsAction::CycleAutoTalkInterval(d) => self.cycle_autotalk(d),
+            SettingsAction::SetAutoTalkInterval(sec) => {
+                self.config_store.update(ConfigPatch {
+                    auto_talk_interval_sec: Some(sec),
+                    ..Default::default()
+                });
+                self.auto_talk_last = Instant::now();
+            }
+            SettingsAction::SetInterestWeight(w) => {
+                self.config_store.update(ConfigPatch {
+                    interest_news_weight: Some(w),
+                    ..Default::default()
+                });
+            }
+            SettingsAction::ClearInterests => {
+                self.config_store.clear_interests();
+                let msg = self.ui_strings().status_clear_interests.to_string();
+                self.apply_status_feedback(msg);
+            }
+            SettingsAction::OpenConfigFolder => {
+                self.execute_menu_command_inner(None, MenuCommand::OpenConfigFolder);
+                return;
+            }
+            SettingsAction::ClearHistory => {
+                self.execute_menu_command_inner(None, MenuCommand::ClearHistory);
+                return;
+            }
+            SettingsAction::ResetPositions => {
+                self.reset_character_positions();
+            }
+            SettingsAction::ResetDefaults => {
+                let reset_cfg = self.config_store.reset_convenience_and_appearance_defaults();
+                self.pomodoro.set_preset(reset_cfg.pomodoro_preset_idx);
+                self.apply_visibility_state();
+                self.redraw_communicate_if_visible();
+            }
+        }
+        self.apply_live_settings();
+        self.redraw_settings_panel();
+        self.rebuild_tray_menu();
+    }
+
     fn reposition_balloon(&mut self, scope: Scope) {
         let (mx, my, mw, mh) = self.desktop_safe_work_area();
         let (char_x, char_y, char_w, _char_h, sid) = match scope {
@@ -4079,6 +5350,8 @@ impl AppRuntime {
             self.reposition_balloon(Scope::Sakura);
             self.reposition_balloon(Scope::Kero);
         }
+        self.apply_live_settings();
+        self.redraw_settings_panel();
         self.rebuild_tray_menu();
         if switched_shell && !self.smoke_mode && shell_id.as_deref() != Some(prev_shell_id.as_str()) {
             let greet = self
@@ -4119,73 +5392,22 @@ impl AppRuntime {
 
     fn build_menu_rows(&self) -> Vec<MenuRow> {
         let cfg = self.config_store.get();
+        let ui_lang = crate::i18n::resolve_ui_lang(&cfg.ui_language);
+        let ui_s = crate::i18n::ui_strings(ui_lang);
         let shells: Vec<ShellSummary> = self.shell_manager.list_shells();
         let balloons: Vec<BalloonSummary> = self.balloon_manager.list_balloons();
         let mut rows = vec![
             MenuRow {
-                label: "💬 話しかける · Chat (Double-Click)".to_string(),
+                label: ui_s.menu_chat.to_string(),
                 cmd: MenuCommand::OpenCommunicate,
             },
             MenuRow {
-                label: "🎨 デフォルトスキンに戻す · Default Skin".to_string(),
+                label: ui_s.menu_settings.to_string(),
+                cmd: MenuCommand::OpenSettings,
+            },
+            MenuRow {
+                label: ui_s.menu_default_skin.to_string(),
                 cmd: MenuCommand::ResetDefaultSkin,
-            },
-            MenuRow {
-                label: "📁 スキン追加 (.nar / .zip)...".to_string(),
-                cmd: MenuCommand::InstallNarDialog,
-            },
-            MenuRow {
-                label: if cfg.show_kero {
-                    "✓ パートナー (\\1) · Partner"
-                } else {
-                    "   パートナー (\\1) · Partner"
-                }
-                .to_string(),
-                cmd: MenuCommand::ToggleKero,
-            },
-            MenuRow {
-                label: if cfg.always_on_top {
-                    "✓ 常に手前 · Always on Top"
-                } else {
-                    "   常に手前 · Always on Top"
-                }
-                .to_string(),
-                cmd: MenuCommand::ToggleAlwaysOnTop,
-            },
-            MenuRow {
-                label: if cfg.live2d_motion {
-                    "✓ ✨ Live2D モーション · Motion"
-                } else {
-                    "   ✨ Live2D モーション · Motion"
-                }
-                .to_string(),
-                cmd: MenuCommand::ToggleLive2dMotion,
-            },
-            MenuRow {
-                label: "🛠 Live2D スタジオを開く · Rig Studio".to_string(),
-                cmd: MenuCommand::OpenLive2dStudio,
-            },
-            MenuRow {
-                label: "📂 Live2D サイドカーフォルダ · Sidecar Folder".to_string(),
-                cmd: MenuCommand::OpenLive2dFolder,
-            },
-            MenuRow {
-                label: if cfg.hourly_chime {
-                    "✓ 🕒 時報 (毎時00分) · Hourly Chime"
-                } else {
-                    "   🕒 時報 (毎時00分) · Hourly Chime"
-                }
-                .to_string(),
-                cmd: MenuCommand::ToggleHourlyChime,
-            },
-            MenuRow {
-                label: if cfg.voice_tts {
-                    "✓ 🔊 音声読み上げ · Voice (TTS)"
-                } else {
-                    "   🔊 音声読み上げ · Voice (TTS)"
-                }
-                .to_string(),
-                cmd: MenuCommand::ToggleVoiceTts,
             },
             MenuRow {
                 label: String::new(),
@@ -4193,7 +5415,92 @@ impl AppRuntime {
             },
         ];
 
-        {
+        // 1) Skins & Dress-up collapsible section
+        let skins_open = self.expanded_menu_section == Some(MenuSection::Skins);
+        rows.push(MenuRow {
+            label: format!(
+                "{} {} ({})",
+                if skins_open { "▾" } else { "▸" },
+                ui_s.menu_sec_skins_prefix,
+                cfg.active_shell_id
+            ),
+            cmd: MenuCommand::ToggleMenuSection(MenuSection::Skins),
+        });
+        if skins_open {
+            rows.push(MenuRow {
+                label: ui_s.menu_install_nar.to_string(),
+                cmd: MenuCommand::InstallNarDialog,
+            });
+            rows.push(MenuRow {
+                label: ui_s.menu_sec_shells.to_string(),
+                cmd: MenuCommand::Separator,
+            });
+            for sh in shells {
+                let mark = if cfg.active_shell_id == sh.id { "✓" } else { " " };
+                rows.push(MenuRow {
+                    label: format!("  {mark} {}", sh.name),
+                    cmd: MenuCommand::SwitchShell(sh.id),
+                });
+            }
+            rows.push(MenuRow {
+                label: ui_s.menu_sec_balloons.to_string(),
+                cmd: MenuCommand::Separator,
+            });
+            for b in balloons {
+                let mark = if cfg.active_balloon_id == b.id { "✓" } else { " " };
+                rows.push(MenuRow {
+                    label: format!("  {mark} {}", b.name),
+                    cmd: MenuCommand::SwitchBalloon(b.id),
+                });
+            }
+            let (bind_groups, active_binds) = {
+                let m = self.manifest.lock().expect("manifest mutex poisoned");
+                let groups = m.effective_bind_groups();
+                let active = self
+                    .config_store
+                    .get_active_binds(&cfg.active_shell_id, &m.default_bind_ids());
+                (groups, active)
+            };
+            if !bind_groups.is_empty() {
+                rows.push(MenuRow {
+                    label: ui_s.menu_sec_bind.to_string(),
+                    cmd: MenuCommand::Separator,
+                });
+                for bg in bind_groups {
+                    let mark = if active_binds.contains(&bg.bind_id) {
+                        "✓"
+                    } else {
+                        " "
+                    };
+                    let target_tag = if bg.scope == 1 { "\\1" } else { "\\0" };
+                    rows.push(MenuRow {
+                        label: format!("  {mark} ({target_tag}) {} / {}", bg.category, bg.name),
+                        cmd: MenuCommand::ToggleBind(bg.bind_id),
+                    });
+                }
+            }
+        }
+
+        // 2) Voice & TTS collapsible section
+        let voice_open = self.expanded_menu_section == Some(MenuSection::Voice);
+        rows.push(MenuRow {
+            label: format!(
+                "{} {} ({})",
+                if voice_open { "▾" } else { "▸" },
+                ui_s.menu_sec_voice_prefix,
+                if cfg.voice_tts { "ON" } else { "OFF" }
+            ),
+            cmd: MenuCommand::ToggleMenuSection(MenuSection::Voice),
+        });
+        if voice_open {
+            rows.push(MenuRow {
+                label: format!(
+                    "  {} {}",
+                    if cfg.voice_tts { "✓" } else { " " },
+                    ui_s.menu_voice_tts
+                ),
+                cmd: MenuCommand::ToggleVoiceTts,
+            });
             let (eng_lbl, all_voices) = crate::companion_extras::cached_tts_voices();
             let base_url = crate::companion_extras::cached_tts_base_url();
             let installed_uuids = crate::companion_extras::cached_installed_aivm_uuids();
@@ -4207,17 +5514,17 @@ impl AppRuntime {
                 sak_sp,
                 ker_sp,
             );
-
             rows.push(MenuRow {
-                label: format!("[🎤 声色選択 · {eng_lbl}]"),
+                label: format!("{}{eng_lbl}]", ui_s.menu_voices_hdr_prefix),
                 cmd: MenuCommand::Separator,
             });
             if !all_voices.is_empty() {
                 let sample = Self::representative_voice_options(&all_voices, 8);
                 rows.push(MenuRow {
                     label: format!(
-                        "{} (\\0) 声: 自動 ({})",
+                        "  {} {} ({})",
                         if sak_sp.is_none() { "✓" } else { " " },
+                        ui_s.menu_voice_sakura_auto_prefix,
                         resolved.sakura_label
                     ),
                     cmd: MenuCommand::SelectVoiceSpeaker {
@@ -4228,7 +5535,7 @@ impl AppRuntime {
                 for v in &sample {
                     let mark = if sak_sp == Some(v.style_id) { "✓" } else { " " };
                     rows.push(MenuRow {
-                        label: format!("{mark} (\\0) {}", v.label),
+                        label: format!("  {mark} (\\0) {}", v.label),
                         cmd: MenuCommand::SelectVoiceSpeaker {
                             scope: 0,
                             style_id: Some(v.style_id),
@@ -4237,8 +5544,9 @@ impl AppRuntime {
                 }
                 rows.push(MenuRow {
                     label: format!(
-                        "{} (\\1) 声: 自動 ({})",
+                        "  {} {} ({})",
                         if ker_sp.is_none() { "✓" } else { " " },
+                        ui_s.menu_voice_kero_auto_prefix,
                         resolved.kero_label
                     ),
                     cmd: MenuCommand::SelectVoiceSpeaker {
@@ -4249,7 +5557,7 @@ impl AppRuntime {
                 for v in &sample {
                     let mark = if ker_sp == Some(v.style_id) { "✓" } else { " " };
                     rows.push(MenuRow {
-                        label: format!("{mark} (\\1) {}", v.label),
+                        label: format!("  {mark} (\\1) {}", v.label),
                         cmd: MenuCommand::SelectVoiceSpeaker {
                             scope: 1,
                             style_id: Some(v.style_id),
@@ -4258,53 +5566,49 @@ impl AppRuntime {
                 }
             } else {
                 rows.push(MenuRow {
-                    label: "   ⏳ 音声エンジン検出中… (AivisSpeech/VOICEVOX)".to_string(),
+                    label: ui_s.menu_voice_discovering.to_string(),
                     cmd: MenuCommand::SelectTtsEngine("auto".to_string()),
                 });
             }
-
             rows.push(MenuRow {
-                label: "[\\1 パートナー声タイプ]".to_string(),
+                label: ui_s.menu_voice_arch_hdr.to_string(),
                 cmd: MenuCommand::Separator,
             });
             rows.push(MenuRow {
                 label: format!(
-                    "{} 自動 ({})",
+                    "  {} {} ({})",
                     if arch_override.is_none() { "✓" } else { " " },
-                    arch.label_ja()
+                    ui_s.voice_auto_prefix,
+                    crate::i18n::kero_archetype_label(ui_lang, arch.short_code())
                 ),
                 cmd: MenuCommand::SelectKeroVoiceArchetype(None),
             });
-            for (code, albl) in KERO_ARCHETYPE_CHOICES {
-                let mark = if arch_override.as_deref() == Some(*code) {
-                    "✓"
-                } else {
-                    " "
-                };
+            for (code, _) in KERO_ARCHETYPE_CHOICES {
+                let mark = if arch_override.as_deref() == Some(*code) { "✓" } else { " " };
+                let albl = crate::i18n::kero_archetype_label(ui_lang, code);
                 rows.push(MenuRow {
-                    label: format!("{mark} {albl}"),
+                    label: format!("  {mark} {albl}"),
                     cmd: MenuCommand::SelectKeroVoiceArchetype(Some((*code).to_string())),
                 });
             }
-
             rows.push(MenuRow {
-                label: "[音声エンジン · TTS Engine]".to_string(),
+                label: ui_s.menu_voice_engine_hdr.to_string(),
                 cmd: MenuCommand::Separator,
             });
-            for (eid, elbl) in TTS_ENGINE_CHOICES {
+            for (eid, _) in TTS_ENGINE_CHOICES {
                 let mark = if cfg.tts_engine == *eid { "✓" } else { " " };
+                let elbl = crate::i18n::tts_engine_label(ui_lang, eid);
                 rows.push(MenuRow {
-                    label: format!("{mark} {elbl}"),
+                    label: format!("  {mark} {elbl}"),
                     cmd: MenuCommand::SelectTtsEngine((*eid).to_string()),
                 });
             }
-
             let show_aivis_catalog = cfg.tts_engine == "auto"
                 || cfg.tts_engine == "aivisspeech"
                 || base_url.as_deref().is_some_and(|u| u.contains(":10101"));
             if show_aivis_catalog {
                 rows.push(MenuRow {
-                    label: "[📥 音声モデル追加 · AivisHub]".to_string(),
+                    label: ui_s.menu_aivis_hdr.to_string(),
                     cmd: MenuCommand::Separator,
                 });
                 for m in crate::companion_extras::CURATED_AIVISHUB_MODELS {
@@ -4312,9 +5616,9 @@ impl AppRuntime {
                         .iter()
                         .any(|u| u.eq_ignore_ascii_case(m.uuid));
                     let mark = if installed { "✓" } else { " " };
-                    let suffix = if installed { " [導入済]" } else { "" };
+                    let suffix = if installed { ui_s.suffix_installed } else { "" };
                     rows.push(MenuRow {
-                        label: format!("{mark} {}{suffix}", m.menu_label),
+                        label: format!("  {mark} {}{suffix}", m.menu_label),
                         cmd: MenuCommand::InstallAivmModel {
                             uuid: m.uuid.to_string(),
                             name: m.name.to_string(),
@@ -4324,69 +5628,120 @@ impl AppRuntime {
             }
         }
 
+        // 3) AI Providers collapsible section
+        let ai_open = self.expanded_menu_section == Some(MenuSection::Ai);
         rows.push(MenuRow {
-            label: "[キャラクターシェル · Shells]".to_string(),
-            cmd: MenuCommand::Separator,
+            label: format!(
+                "{} {} ({})",
+                if ai_open { "▾" } else { "▸" },
+                ui_s.menu_sec_ai_prefix,
+                cfg.provider
+            ),
+            cmd: MenuCommand::ToggleMenuSection(MenuSection::Ai),
         });
-
-        for s in shells {
-            let mark = if cfg.active_shell_id == s.id { "✓" } else { " " };
+        if ai_open {
             rows.push(MenuRow {
-                label: format!("{mark} {}", s.name),
-                cmd: MenuCommand::SwitchShell(s.id),
+                label: ui_s.menu_setup_local_ai.to_string(),
+                cmd: MenuCommand::SetupLocalAi,
             });
-        }
-
-        rows.push(MenuRow {
-            label: "[バルーン · Balloons]".to_string(),
-            cmd: MenuCommand::Separator,
-        });
-        for b in balloons {
-            let mark = if cfg.active_balloon_id == b.id { "✓" } else { " " };
-            rows.push(MenuRow {
-                label: format!("{mark} {}", b.name),
-                cmd: MenuCommand::SwitchBalloon(b.id),
-            });
-        }
-
-        rows.push(MenuRow {
-            label: "[AI プロバイダー · Providers]".to_string(),
-            cmd: MenuCommand::Separator,
-        });
-        for p in provider_catalog() {
-            let active = cfg.provider == p.id;
-            let mark = if active { "✓" } else { " " };
-            rows.push(MenuRow {
-                label: format!("{mark} {}", p.label),
-                cmd: MenuCommand::SwitchProvider(p.id, p.default_model),
-            });
-        }
-
-        let (bind_groups, active_binds) = {
-            let m = self.manifest.lock().expect("manifest mutex poisoned");
-            let groups = m.effective_bind_groups();
-            let active = self
-                .config_store
-                .get_active_binds(&cfg.active_shell_id, &m.default_bind_ids());
-            (groups, active)
-        };
-        if !bind_groups.is_empty() {
-            rows.push(MenuRow {
-                label: "[着せ替え · Dress-up]".to_string(),
-                cmd: MenuCommand::Separator,
-            });
-            for bg in bind_groups {
-                let mark = if active_binds.contains(&bg.bind_id) {
-                    "✓"
-                } else {
-                    " "
-                };
-                let target_tag = if bg.scope == 1 { "\\1" } else { "\\0" };
+            for p in provider_catalog() {
+                let mark = if cfg.provider == p.id { "✓" } else { " " };
+                let plbl = crate::i18n::provider_label(ui_lang, &p.id, &p.label);
                 rows.push(MenuRow {
-                    label: format!("{mark} ({target_tag}) {} / {}", bg.category, bg.name),
-                    cmd: MenuCommand::ToggleBind(bg.bind_id),
+                    label: format!("  {mark} {plbl}"),
+                    cmd: MenuCommand::SwitchProvider(p.id, p.default_model),
                 });
             }
+        }
+
+        // 4) Tools & Language collapsible section
+        let tools_open = self.expanded_menu_section == Some(MenuSection::Tools);
+        rows.push(MenuRow {
+            label: format!(
+                "{} {}",
+                if tools_open { "▾" } else { "▸" },
+                ui_s.menu_sec_tools
+            ),
+            cmd: MenuCommand::ToggleMenuSection(MenuSection::Tools),
+        });
+        if tools_open {
+            rows.push(MenuRow {
+                label: crate::i18n::format_menu_ui_lang_row(ui_lang, &cfg.ui_language, false),
+                cmd: MenuCommand::CycleUiLanguage,
+            });
+            rows.push(MenuRow {
+                label: format!(
+                    "  {} {}",
+                    if cfg.quiet_mode { "✓" } else { " " },
+                    ui_s.menu_quiet_mode
+                ),
+                cmd: MenuCommand::ToggleQuietMode,
+            });
+            rows.push(MenuRow {
+                label: self.pomodoro.format_menu_label(ui_lang, false),
+                cmd: MenuCommand::TogglePomodoro,
+            });
+            if self.pomodoro.is_active() {
+                rows.push(MenuRow {
+                    label: format!("  {}", ui_s.menu_pomo_stop),
+                    cmd: MenuCommand::StopPomodoro,
+                });
+            }
+            rows.push(MenuRow {
+                label: format!("  {}", ui_s.menu_show_backlog),
+                cmd: MenuCommand::ShowBacklog,
+            });
+            rows.push(MenuRow {
+                label: format!("  {}", ui_s.menu_copy_last),
+                cmd: MenuCommand::CopyLastReply,
+            });
+            rows.push(MenuRow {
+                label: format!("  {}", ui_s.menu_next_monitor),
+                cmd: MenuCommand::MoveNextMonitor,
+            });
+            rows.push(MenuRow {
+                label: format!(
+                    "  {}",
+                    if self.characters_hidden_by_user {
+                        ui_s.menu_show_chars
+                    } else {
+                        ui_s.menu_hide_chars
+                    }
+                ),
+                cmd: MenuCommand::ToggleHideCharacters,
+            });
+            rows.push(MenuRow {
+                label: crate::i18n::format_menu_autotalk_row(
+                    ui_lang,
+                    cfg.auto_talk_interval_sec,
+                    false,
+                ),
+                cmd: MenuCommand::CycleAutoTalk,
+            });
+            rows.push(MenuRow {
+                label: format!(
+                    "  {} {}",
+                    if cfg.hourly_chime { "✓" } else { " " },
+                    ui_s.menu_hourly_chime
+                ),
+                cmd: MenuCommand::ToggleHourlyChime,
+            });
+            rows.push(MenuRow {
+                label: format!("  {}", ui_s.menu_l2d_studio),
+                cmd: MenuCommand::OpenLive2dStudio,
+            });
+            rows.push(MenuRow {
+                label: format!("  {}", ui_s.menu_l2d_folder),
+                cmd: MenuCommand::OpenLive2dFolder,
+            });
+            rows.push(MenuRow {
+                label: format!("  {}", ui_s.menu_check_updates),
+                cmd: MenuCommand::CheckUpdates,
+            });
+            rows.push(MenuRow {
+                label: format!("  {}", ui_s.menu_clear_history),
+                cmd: MenuCommand::ClearHistory,
+            });
         }
 
         rows.push(MenuRow {
@@ -4394,19 +5749,39 @@ impl AppRuntime {
             cmd: MenuCommand::Separator,
         });
         rows.push(MenuRow {
-            label: "🔄 更新確認 · Check Updates".to_string(),
-            cmd: MenuCommand::CheckUpdates,
+            label: format!(
+                "{} {}",
+                if cfg.show_kero { "✓" } else { "  " },
+                ui_s.menu_kero
+            ),
+            cmd: MenuCommand::ToggleKero,
         });
         rows.push(MenuRow {
-            label: "🧭 位置リセット · Reset Positions".to_string(),
+            label: format!(
+                "{} {}",
+                if cfg.always_on_top { "✓" } else { "  " },
+                ui_s.menu_always_on_top
+            ),
+            cmd: MenuCommand::ToggleAlwaysOnTop,
+        });
+        rows.push(MenuRow {
+            label: format!(
+                "{} {}",
+                if cfg.live2d_motion { "✓" } else { "  " },
+                ui_s.menu_live2d_motion
+            ),
+            cmd: MenuCommand::ToggleLive2dMotion,
+        });
+        rows.push(MenuRow {
+            label: ui_s.menu_reset_pos.to_string(),
             cmd: MenuCommand::ResetPositions,
         });
         rows.push(MenuRow {
-            label: "🧹 履歴クリア · Clear History".to_string(),
-            cmd: MenuCommand::ClearHistory,
+            label: ui_s.menu_open_cfg_folder.to_string(),
+            cmd: MenuCommand::OpenConfigFolder,
         });
         rows.push(MenuRow {
-            label: "❌ 終了 · Quit".to_string(),
+            label: ui_s.menu_quit.to_string(),
             cmd: MenuCommand::Quit,
         });
         rows
@@ -4426,80 +5801,43 @@ impl AppRuntime {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn create_tray_menu_model(&self) -> (Menu, HashMap<MenuId, MenuCommand>) {
         let cfg = self.config_store.get();
+        let ui_lang = crate::i18n::resolve_ui_lang(&cfg.ui_language);
+        let ui_s = crate::i18n::ui_strings(ui_lang);
         let menu = Menu::new();
         let mut map = HashMap::new();
 
-        let chat_item = MenuItem::new("💬 話しかける · Chat", true, None);
+        let chat_item = MenuItem::new(ui_s.tray_chat, true, None);
         map.insert(chat_item.id().clone(), MenuCommand::OpenCommunicate);
         let _ = menu.append(&chat_item);
 
-        let reset_skin_item = MenuItem::new("🎨 デフォルトスキンに戻す · Default Skin", true, None);
+        let settings_item = MenuItem::new(ui_s.menu_settings, true, None);
+        map.insert(settings_item.id().clone(), MenuCommand::OpenSettings);
+        let _ = menu.append(&settings_item);
+
+        let hide_lbl = if self.characters_hidden_by_user {
+            ui_s.menu_show_chars
+        } else {
+            ui_s.menu_hide_chars
+        };
+        let hide_item = MenuItem::new(hide_lbl, true, None);
+        map.insert(hide_item.id().clone(), MenuCommand::ToggleHideCharacters);
+        let _ = menu.append(&hide_item);
+
+        let quiet_item = MenuItem::new(
+            format!(
+                "{}{}",
+                if cfg.quiet_mode { "✓ " } else { "   " },
+                ui_s.menu_quiet_mode
+            ),
+            true,
+            None,
+        );
+        map.insert(quiet_item.id().clone(), MenuCommand::ToggleQuietMode);
+        let _ = menu.append(&quiet_item);
+
+        let reset_skin_item = MenuItem::new(ui_s.menu_default_skin, true, None);
         map.insert(reset_skin_item.id().clone(), MenuCommand::ResetDefaultSkin);
         let _ = menu.append(&reset_skin_item);
-
-        let nar_item = MenuItem::new("📁 スキン追加 (.nar / .zip)...", true, None);
-        map.insert(nar_item.id().clone(), MenuCommand::InstallNarDialog);
-        let _ = menu.append(&nar_item);
-
-        let kero_item = MenuItem::new(
-            if cfg.show_kero { "✓ パートナー · Partner" } else { "パートナー · Partner" },
-            true,
-            None,
-        );
-        map.insert(kero_item.id().clone(), MenuCommand::ToggleKero);
-        let _ = menu.append(&kero_item);
-
-        let aot_item = MenuItem::new(
-            if cfg.always_on_top { "✓ 常に手前 · Pin Top" } else { "常に手前 · Pin Top" },
-            true,
-            None,
-        );
-        map.insert(aot_item.id().clone(), MenuCommand::ToggleAlwaysOnTop);
-        let _ = menu.append(&aot_item);
-
-        let live2d_item = MenuItem::new(
-            if cfg.live2d_motion {
-                "✓ ✨ Live2D モーション · Motion"
-            } else {
-                "✨ Live2D モーション · Motion"
-            },
-            true,
-            None,
-        );
-        map.insert(live2d_item.id().clone(), MenuCommand::ToggleLive2dMotion);
-        let _ = menu.append(&live2d_item);
-
-        let studio_item = MenuItem::new("🛠 Live2D スタジオを開く · Rig Studio", true, None);
-        map.insert(studio_item.id().clone(), MenuCommand::OpenLive2dStudio);
-        let _ = menu.append(&studio_item);
-
-        let l2d_dir_item = MenuItem::new("📂 Live2D サイドカーフォルダ · Sidecar Folder", true, None);
-        map.insert(l2d_dir_item.id().clone(), MenuCommand::OpenLive2dFolder);
-        let _ = menu.append(&l2d_dir_item);
-
-        let chime_item = MenuItem::new(
-            if cfg.hourly_chime {
-                "✓ 🕒 時報 (毎時00分) · Hourly Chime"
-            } else {
-                "🕒 時報 (毎時00分) · Hourly Chime"
-            },
-            true,
-            None,
-        );
-        map.insert(chime_item.id().clone(), MenuCommand::ToggleHourlyChime);
-        let _ = menu.append(&chime_item);
-
-        let tts_item = MenuItem::new(
-            if cfg.voice_tts {
-                "✓ 🔊 音声読み上げ · Voice (TTS)"
-            } else {
-                "🔊 音声読み上げ · Voice (TTS)"
-            },
-            true,
-            None,
-        );
-        map.insert(tts_item.id().clone(), MenuCommand::ToggleVoiceTts);
-        let _ = menu.append(&tts_item);
 
         let _ = menu.append(&PredefinedMenuItem::separator());
 
@@ -4509,30 +5847,29 @@ impl AppRuntime {
             let _ = target.append(&item);
         };
 
-        let shell_sub = Submenu::new("キャラクターシェル · Shells", true);
-        for s in self.shell_manager.list_shells() {
-            let mark = if cfg.active_shell_id == s.id { "✓ " } else { "   " };
-            add_item(&shell_sub, &format!("{mark}{}", s.name), MenuCommand::SwitchShell(s.id));
+        // 1) Skins Submenu (Shells, Balloons, Dress-up, Install .nar)
+        let skins_sub = Submenu::new(
+            format!("{} ({})", ui_s.menu_sec_skins_prefix, cfg.active_shell_id),
+            true,
+        );
+        add_item(
+            &skins_sub,
+            ui_s.menu_install_nar.trim_start(),
+            MenuCommand::InstallNarDialog,
+        );
+        let shell_sub = Submenu::new(ui_s.tray_sub_shells, true);
+        for sh in self.shell_manager.list_shells() {
+            let mark = if cfg.active_shell_id == sh.id { "✓ " } else { "   " };
+            add_item(&shell_sub, &format!("{mark}{}", sh.name), MenuCommand::SwitchShell(sh.id));
         }
-        let _ = menu.append(&shell_sub);
+        let _ = skins_sub.append(&shell_sub);
 
-        let bal_sub = Submenu::new("バルーン · Balloons", true);
+        let bal_sub = Submenu::new(ui_s.tray_sub_balloons, true);
         for b in self.balloon_manager.list_balloons() {
             let mark = if cfg.active_balloon_id == b.id { "✓ " } else { "   " };
             add_item(&bal_sub, &format!("{mark}{}", b.name), MenuCommand::SwitchBalloon(b.id));
         }
-        let _ = menu.append(&bal_sub);
-
-        let prov_sub = Submenu::new("AI プロバイダー · Providers", true);
-        for p in provider_catalog() {
-            let mark = if cfg.provider == p.id { "✓ " } else { "   " };
-            add_item(
-                &prov_sub,
-                &format!("{mark}{}", p.label),
-                MenuCommand::SwitchProvider(p.id, p.default_model),
-            );
-        }
-        let _ = menu.append(&prov_sub);
+        let _ = skins_sub.append(&bal_sub);
 
         let (bind_groups, active_binds) = {
             let m = self.manifest.lock().expect("manifest mutex poisoned");
@@ -4543,7 +5880,7 @@ impl AppRuntime {
             (groups, active)
         };
         if !bind_groups.is_empty() {
-            let bind_sub = Submenu::new("着せ替え · Dress-up", true);
+            let bind_sub = Submenu::new(ui_s.tray_sub_bind, true);
             for bg in bind_groups {
                 let mark = if active_binds.contains(&bg.bind_id) {
                     "✓ "
@@ -4557,9 +5894,28 @@ impl AppRuntime {
                     MenuCommand::ToggleBind(bg.bind_id),
                 );
             }
-            let _ = menu.append(&bind_sub);
+            let _ = skins_sub.append(&bind_sub);
         }
+        let _ = menu.append(&skins_sub);
 
+        // 2) Voice & TTS Submenu
+        let voice_sub = Submenu::new(
+            format!(
+                "{} ({})",
+                ui_s.menu_sec_voice_prefix,
+                if cfg.voice_tts { "ON" } else { "OFF" }
+            ),
+            true,
+        );
+        add_item(
+            &voice_sub,
+            &format!(
+                "{}{}",
+                if cfg.voice_tts { "✓ " } else { "   " },
+                ui_s.menu_voice_tts
+            ),
+            MenuCommand::ToggleVoiceTts,
+        );
         {
             let (eng_lbl, all_voices) = crate::companion_extras::cached_tts_voices();
             let base_url = crate::companion_extras::cached_tts_base_url();
@@ -4575,49 +5931,56 @@ impl AppRuntime {
                 ker_sp,
             );
 
-            let eng_sub = Submenu::new("音声エンジン · TTS Engine", true);
-            for (eid, elbl) in TTS_ENGINE_CHOICES {
+            let eng_sub = Submenu::new(ui_s.tray_sub_engine, true);
+            for (eid, _) in TTS_ENGINE_CHOICES {
                 let mark = if cfg.tts_engine == *eid { "✓ " } else { "   " };
+                let elbl = crate::i18n::tts_engine_label(ui_lang, eid);
                 add_item(
                     &eng_sub,
                     &format!("{mark}{elbl}"),
                     MenuCommand::SelectTtsEngine((*eid).to_string()),
                 );
             }
-            let _ = menu.append(&eng_sub);
+            let _ = voice_sub.append(&eng_sub);
 
-            let arch_sub = Submenu::new("\\1 パートナー声タイプ", true);
+            let arch_sub = Submenu::new(ui_s.tray_sub_arch, true);
             add_item(
                 &arch_sub,
                 &format!(
-                    "{}自動 ({})",
+                    "{}{} ({})",
                     if arch_override.is_none() { "✓ " } else { "   " },
-                    arch.label_ja()
+                    ui_s.voice_auto_prefix,
+                    crate::i18n::kero_archetype_label(ui_lang, arch.short_code())
                 ),
                 MenuCommand::SelectKeroVoiceArchetype(None),
             );
-            for (code, albl) in KERO_ARCHETYPE_CHOICES {
+            for (code, _) in KERO_ARCHETYPE_CHOICES {
                 let mark = if arch_override.as_deref() == Some(*code) {
                     "✓ "
                 } else {
                     "   "
                 };
+                let albl = crate::i18n::kero_archetype_label(ui_lang, code);
                 add_item(
                     &arch_sub,
                     &format!("{mark}{albl}"),
                     MenuCommand::SelectKeroVoiceArchetype(Some((*code).to_string())),
                 );
             }
-            let _ = menu.append(&arch_sub);
+            let _ = voice_sub.append(&arch_sub);
 
             if !all_voices.is_empty() {
                 let choices = Self::representative_voice_options(&all_voices, 20);
-                let sak_voice_sub = Submenu::new(format!("\\0 声色 ({eng_lbl})"), true);
+                let sak_voice_sub = Submenu::new(
+                    format!("{} ({eng_lbl})", ui_s.tray_sub_sak_voice),
+                    true,
+                );
                 add_item(
                     &sak_voice_sub,
                     &format!(
-                        "{}自動 ({})",
+                        "{}{} ({})",
                         if sak_sp.is_none() { "✓ " } else { "   " },
+                        ui_s.voice_auto_prefix,
                         resolved.sakura_label
                     ),
                     MenuCommand::SelectVoiceSpeaker {
@@ -4636,14 +5999,18 @@ impl AppRuntime {
                         },
                     );
                 }
-                let _ = menu.append(&sak_voice_sub);
+                let _ = voice_sub.append(&sak_voice_sub);
 
-                let ker_voice_sub = Submenu::new(format!("\\1 パートナー声色 ({eng_lbl})"), true);
+                let ker_voice_sub = Submenu::new(
+                    format!("{} ({eng_lbl})", ui_s.tray_sub_ker_voice),
+                    true,
+                );
                 add_item(
                     &ker_voice_sub,
                     &format!(
-                        "{}自動 ({})",
+                        "{}{} ({})",
                         if ker_sp.is_none() { "✓ " } else { "   " },
+                        ui_s.voice_auto_prefix,
                         resolved.kero_label
                     ),
                     MenuCommand::SelectVoiceSpeaker {
@@ -4662,20 +6029,20 @@ impl AppRuntime {
                         },
                     );
                 }
-                let _ = menu.append(&ker_voice_sub);
+                let _ = voice_sub.append(&ker_voice_sub);
             }
 
             let show_aivis_catalog = cfg.tts_engine == "auto"
                 || cfg.tts_engine == "aivisspeech"
                 || base_url.as_deref().is_some_and(|u| u.contains(":10101"));
             if show_aivis_catalog {
-                let hub_sub = Submenu::new("📥 音声モデル追加 (AivisHub)", true);
+                let hub_sub = Submenu::new(ui_s.tray_sub_aivis, true);
                 for m in crate::companion_extras::CURATED_AIVISHUB_MODELS {
                     let installed = installed_uuids
                         .iter()
                         .any(|u| u.eq_ignore_ascii_case(m.uuid));
                     let mark = if installed { "✓ " } else { "   " };
-                    let suffix = if installed { " [導入済]" } else { "" };
+                    let suffix = if installed { ui_s.suffix_installed } else { "" };
                     add_item(
                         &hub_sub,
                         &format!("{mark}{}{suffix}", m.menu_label),
@@ -4685,25 +6052,119 @@ impl AppRuntime {
                         },
                     );
                 }
-                let _ = menu.append(&hub_sub);
+                let _ = voice_sub.append(&hub_sub);
             }
         }
+        let _ = menu.append(&voice_sub);
+
+        // 3) AI Providers Submenu
+        let prov_sub = Submenu::new(
+            format!("{} ({})", ui_s.menu_sec_ai_prefix, cfg.provider),
+            true,
+        );
+        add_item(
+            &prov_sub,
+            ui_s.menu_setup_local_ai.trim_start(),
+            MenuCommand::SetupLocalAi,
+        );
+        let _ = prov_sub.append(&PredefinedMenuItem::separator());
+        for p in provider_catalog() {
+            let mark = if cfg.provider == p.id { "✓ " } else { "   " };
+            let plbl = crate::i18n::provider_label(ui_lang, &p.id, &p.label);
+            add_item(
+                &prov_sub,
+                &format!("{mark}{plbl}"),
+                MenuCommand::SwitchProvider(p.id, p.default_model),
+            );
+        }
+        let _ = menu.append(&prov_sub);
+
+        // 4) View, Language & Tools Submenu (also accessible while Click-Through is active)
+        let view_sub = Submenu::new(ui_s.tray_sec_view_tools, true);
+        add_item(
+            &view_sub,
+            &format!("{}{}", if cfg.show_kero { "✓ " } else { "   " }, ui_s.menu_kero),
+            MenuCommand::ToggleKero,
+        );
+        add_item(
+            &view_sub,
+            &format!(
+                "{}{}",
+                if cfg.always_on_top { "✓ " } else { "   " },
+                ui_s.menu_always_on_top
+            ),
+            MenuCommand::ToggleAlwaysOnTop,
+        );
+        add_item(
+            &view_sub,
+            &format!(
+                "{}{}",
+                if cfg.live2d_motion { "✓ " } else { "   " },
+                ui_s.menu_live2d_motion
+            ),
+            MenuCommand::ToggleLive2dMotion,
+        );
+        add_item(
+            &view_sub,
+            &format!(
+                "{}{}",
+                if cfg.click_through_mode { "✓ " } else { "   " },
+                ui_s.menu_click_through
+            ),
+            MenuCommand::ToggleClickThrough,
+        );
+        add_item(
+            &view_sub,
+            &crate::i18n::format_menu_ui_lang_row(ui_lang, &cfg.ui_language, true),
+            MenuCommand::CycleUiLanguage,
+        );
+        add_item(
+            &view_sub,
+            &self.pomodoro.format_menu_label(ui_lang, true),
+            MenuCommand::TogglePomodoro,
+        );
+        if self.pomodoro.is_active() {
+            add_item(&view_sub, ui_s.menu_pomo_stop, MenuCommand::StopPomodoro);
+        }
+        add_item(&view_sub, ui_s.menu_show_backlog, MenuCommand::ShowBacklog);
+        add_item(&view_sub, ui_s.menu_copy_last, MenuCommand::CopyLastReply);
+        add_item(&view_sub, ui_s.menu_next_monitor, MenuCommand::MoveNextMonitor);
+        add_item(
+            &view_sub,
+            &crate::i18n::format_menu_autotalk_row(
+                ui_lang,
+                cfg.auto_talk_interval_sec,
+                true,
+            ),
+            MenuCommand::CycleAutoTalk,
+        );
+        add_item(
+            &view_sub,
+            &format!(
+                "{}{}",
+                if cfg.hourly_chime { "✓ " } else { "   " },
+                ui_s.menu_hourly_chime
+            ),
+            MenuCommand::ToggleHourlyChime,
+        );
+        add_item(&view_sub, ui_s.menu_l2d_studio, MenuCommand::OpenLive2dStudio);
+        add_item(&view_sub, ui_s.menu_l2d_folder, MenuCommand::OpenLive2dFolder);
+        add_item(
+            &view_sub,
+            ui_s.menu_open_cfg_folder,
+            MenuCommand::OpenConfigFolder,
+        );
+        add_item(&view_sub, ui_s.menu_check_updates, MenuCommand::CheckUpdates);
+        add_item(&view_sub, ui_s.menu_clear_history, MenuCommand::ClearHistory);
+        let _ = menu.append(&view_sub);
 
         let _ = menu.append(&PredefinedMenuItem::separator());
 
-        let update_item = MenuItem::new("🔄 更新確認 · Check Updates", true, None);
-        map.insert(update_item.id().clone(), MenuCommand::CheckUpdates);
-        let _ = menu.append(&update_item);
-
-        let reset_item = MenuItem::new("🧭 位置リセット · Reset", true, None);
+        let reset_item = MenuItem::new(ui_s.menu_reset_pos, true, None);
         map.insert(reset_item.id().clone(), MenuCommand::ResetPositions);
         let _ = menu.append(&reset_item);
 
-        let clear_item = MenuItem::new("🧹 履歴クリア · Clear", true, None);
-        map.insert(clear_item.id().clone(), MenuCommand::ClearHistory);
-        let _ = menu.append(&clear_item);
-
-        let quit_item = MenuItem::new("❌ 終了 · Quit", true, None);
+        let quit_item = MenuItem::new(ui_s.menu_quit, true, None);
         map.insert(quit_item.id().clone(), MenuCommand::Quit);
         let _ = menu.append(&quit_item);
 
@@ -4711,85 +6172,104 @@ impl AppRuntime {
     }
 
     fn execute_menu_command(&mut self, event_loop: &ActiveEventLoop, cmd: MenuCommand) {
+        self.execute_menu_command_inner(Some(event_loop), cmd);
+    }
+
+    fn execute_menu_command_inner(
+        &mut self,
+        event_loop: Option<&ActiveEventLoop>,
+        cmd: MenuCommand,
+    ) {
         match cmd {
             MenuCommand::Separator => {}
             MenuCommand::OpenCommunicate => {
                 self.open_communicate_near_sakura();
+            }
+            MenuCommand::OpenSettings => {
+                self.open_settings_panel();
+            }
+            MenuCommand::ToggleMenuSection(sec) => {
+                self.expanded_menu_section = if self.expanded_menu_section == Some(sec) {
+                    None
+                } else {
+                    Some(sec)
+                };
+            }
+            MenuCommand::OpenConfigFolder => {
+                let dir = self.config_store.config_dir.clone();
+                let _ = std::fs::create_dir_all(&dir);
+                if !self.smoke_mode {
+                    let _ = open_local_path_in_os(&dir);
+                }
+            }
+            MenuCommand::ToggleClickThrough => {
+                let cur = self.config_store.get().click_through_mode;
+                let updated = self.config_store.update(ConfigPatch {
+                    click_through_mode: Some(!cur),
+                    ..Default::default()
+                });
+                self.apply_live_settings();
+                self.redraw_settings_panel();
+                self.rebuild_tray_menu();
+                if !self.smoke_mode {
+                    let msg = if updated.click_through_mode {
+                        "\\0\\s[5]すり抜けモード（クリック透過）を ON にしたよ！解除はトレイアイコンまたは設定パネルから行えるよ。\\e"
+                    } else {
+                        "\\0\\s[5]すり抜けモードを解除したよ！またドラッグして動かせるよ。\\e"
+                    };
+                    let _ = self.proxy.send_event(UserEvent::PlayActions(parse_dialogue(msg)));
+                }
             }
             MenuCommand::ResetDefaultSkin => {
                 let _ = self.apply_skin_switch(
                     Some("neo_default".to_string()),
                     Some("clean_default".to_string()),
                 );
+                self.redraw_settings_panel();
             }
             MenuCommand::SwitchShell(sid) => {
                 let _ = self.apply_skin_switch(Some(sid), None);
+                self.redraw_settings_panel();
             }
             MenuCommand::SwitchBalloon(bid) => {
                 let _ = self.apply_skin_switch(None, Some(bid));
+                self.redraw_settings_panel();
             }
             MenuCommand::SwitchProvider(pid, model) => {
                 let _ = self.handle_provider_switch(pid, Some(model));
+                self.redraw_settings_panel();
+            }
+            MenuCommand::SetupLocalAi => {
+                self.start_one_click_local_ai_setup();
             }
             MenuCommand::ToggleKero => {
                 let cur = self.config_store.get().show_kero;
-                let updated = self.config_store.update(ConfigPatch {
+                self.config_store.update(ConfigPatch {
                     show_kero: Some(!cur),
                     ..Default::default()
                 });
-                if let Some(ref mut k) = self.kero {
-                    k.visible = updated.show_kero;
-                    k.ws.window.set_visible(updated.show_kero);
-                }
-                if !updated.show_kero {
-                    if let Some(ref mut kb) = self.kero_balloon {
-                        kb.visible = false;
-                        kb.ws.window.set_visible(false);
-                    }
-                }
+                self.apply_live_settings();
+                self.redraw_settings_panel();
                 self.rebuild_tray_menu();
             }
             MenuCommand::ToggleAlwaysOnTop => {
                 let cur = self.config_store.get().always_on_top;
-                let updated = self.config_store.update(ConfigPatch {
+                self.config_store.update(ConfigPatch {
                     always_on_top: Some(!cur),
                     ..Default::default()
                 });
-                let lvl = if updated.always_on_top {
-                    WindowLevel::AlwaysOnTop
-                } else {
-                    WindowLevel::Normal
-                };
-                if let Some(ref s) = self.sakura {
-                    s.ws.window.set_window_level(lvl);
-                }
-                if let Some(ref k) = self.kero {
-                    k.ws.window.set_window_level(lvl);
-                }
-                if let Some(ref sb) = self.sakura_balloon {
-                    sb.ws.window.set_window_level(lvl);
-                }
-                if let Some(ref kb) = self.kero_balloon {
-                    kb.ws.window.set_window_level(lvl);
-                }
+                self.apply_live_settings();
+                self.redraw_settings_panel();
                 self.rebuild_tray_menu();
             }
             MenuCommand::ToggleLive2dMotion => {
                 let cur = self.config_store.get().live2d_motion;
-                let updated = self.config_store.update(ConfigPatch {
+                self.config_store.update(ConfigPatch {
                     live2d_motion: Some(!cur),
                     ..Default::default()
                 });
-                if !updated.live2d_motion {
-                    if let Some(ref gpu) = self.gpu {
-                        if let Some(ref mut s) = self.sakura {
-                            s.tick_live2d(gpu, false, None, false);
-                        }
-                        if let Some(ref mut k) = self.kero {
-                            k.tick_live2d(gpu, false, None, false);
-                        }
-                    }
-                }
+                self.apply_live_settings();
+                self.redraw_settings_panel();
                 self.rebuild_tray_menu();
             }
             MenuCommand::OpenLive2dStudio => {
@@ -4852,6 +6332,7 @@ impl AppRuntime {
                     }
                 }
                 self.rebuild_tray_menu();
+                self.redraw_settings_panel();
                 if !self.smoke_mode {
                     let state_str = if enabled { "装着" } else { "外し" };
                     let msg = format!("\\0\\s[5]「{label}」を{state_str}たよ！\\e");
@@ -4867,12 +6348,78 @@ impl AppRuntime {
                     ..Default::default()
                 });
                 self.rebuild_tray_menu();
+                self.redraw_settings_panel();
                 if !self.smoke_mode {
                     let st = if updated.hourly_chime { "ON" } else { "OFF" };
                     let _ = self.proxy.send_event(UserEvent::PlayActions(parse_dialogue(&format!(
                         "\\0\\s[5]毎時00分の時報を {st} にしたよ！\\e"
                     ))));
                 }
+            }
+            MenuCommand::CycleAutoTalk => {
+                self.cycle_autotalk(1);
+                let sec = self.config_store.get().auto_talk_interval_sec;
+                let msg = crate::i18n::format_autotalk_status(self.effective_ui_lang(), sec);
+                self.apply_status_feedback(msg);
+                self.rebuild_tray_menu();
+                self.redraw_settings_panel();
+            }
+            MenuCommand::CycleUiLanguage => {
+                self.cycle_ui_language(1);
+                let setting_now = self.config_store.get().ui_language;
+                let msg = crate::i18n::format_ui_lang_status(
+                    &setting_now,
+                    self.effective_ui_lang(),
+                );
+                self.apply_status_feedback(msg);
+                self.rebuild_tray_menu();
+                self.redraw_settings_panel();
+                self.redraw_communicate_if_visible();
+            }
+            MenuCommand::ToggleQuietMode => {
+                let next = !self.config_store.get().quiet_mode;
+                self.config_store.update(ConfigPatch {
+                    quiet_mode: Some(next),
+                    ..Default::default()
+                });
+                let msg = if next {
+                    self.ui_strings().status_quiet_on
+                } else {
+                    self.ui_strings().status_quiet_off
+                }
+                .to_string();
+                self.apply_status_feedback(msg);
+                self.rebuild_tray_menu();
+                self.redraw_settings_panel();
+            }
+            MenuCommand::ToggleHideCharacters => {
+                self.characters_hidden_by_user = !self.characters_hidden_by_user;
+                self.apply_visibility_state();
+                if !self.characters_hidden_by_user {
+                    let msg = self.ui_strings().status_chars_shown.to_string();
+                    self.apply_status_feedback(msg);
+                }
+                self.rebuild_tray_menu();
+                self.redraw_settings_panel();
+            }
+            MenuCommand::TogglePomodoro => {
+                self.apply_pomodoro_action("toggle");
+                self.rebuild_tray_menu();
+                self.redraw_settings_panel();
+            }
+            MenuCommand::StopPomodoro => {
+                self.apply_pomodoro_action("stop");
+                self.rebuild_tray_menu();
+                self.redraw_settings_panel();
+            }
+            MenuCommand::ShowBacklog => {
+                self.show_backlog_in_balloon();
+            }
+            MenuCommand::CopyLastReply => {
+                self.copy_last_reply_to_clipboard();
+            }
+            MenuCommand::MoveNextMonitor => {
+                self.move_to_next_monitor_or_edge();
             }
             MenuCommand::ToggleVoiceTts => {
                 let cur = self.config_store.get().voice_tts;
@@ -4885,14 +6432,14 @@ impl AppRuntime {
                     .get_shell_voice_profile(&updated.active_shell_id);
                 let (arch, _) = self.active_kero_voice_archetype();
                 self.rebuild_tray_menu();
+                self.redraw_settings_panel();
                 if !updated.voice_tts {
                     crate::companion_extras::stop_managed_tts_engine();
                 }
                 if !self.smoke_mode {
                     if updated.voice_tts {
-                        self.apply_status_feedback(
-                            "音声エンジン準備中 (AivisSpeech / VOICEVOX / OS)…".to_string(),
-                        );
+                        let prep_msg = self.ui_strings().status_tts_preparing.to_string();
+                        self.apply_status_feedback(prep_msg);
                         let proxy = self.proxy.clone();
                         let v_url = updated.voicevox_url.clone();
                         let eng_mode = updated.tts_engine.clone();
@@ -4961,6 +6508,7 @@ impl AppRuntime {
                     crate::companion_extras::stop_managed_tts_engine();
                 }
                 self.rebuild_tray_menu();
+                self.redraw_settings_panel();
                 if !self.smoke_mode {
                     self.apply_status_feedback(format!("音声エンジンを「{norm}」へ切替中…"));
                     let proxy = self.proxy.clone();
@@ -5015,6 +6563,7 @@ impl AppRuntime {
                     .set_shell_kero_archetype(&shell_id, arch_opt);
                 let (arch, _) = self.active_kero_voice_archetype();
                 self.rebuild_tray_menu();
+                self.redraw_settings_panel();
                 if !self.smoke_mode {
                     let msg = format!(
                         "\\1\\s[10]パートナー声タイプを「{}」にしたで！\\e",
@@ -5034,6 +6583,7 @@ impl AppRuntime {
                 self.config_store
                     .set_shell_voice_speaker(&shell_id, scope, style_id);
                 self.rebuild_tray_menu();
+                self.redraw_settings_panel();
                 if !self.smoke_mode {
                     let (_, voices) = crate::companion_extras::cached_tts_voices();
                     let v_name = match style_id {
@@ -5088,7 +6638,8 @@ impl AppRuntime {
                 });
             }
             MenuCommand::CheckUpdates => {
-                self.apply_status_feedback("GitHub リリース確認中…".to_string());
+                let msg = self.ui_strings().status_checking_updates.to_string();
+                self.apply_status_feedback(msg);
                 let proxy = self.proxy.clone();
                 std::thread::spawn(move || {
                     let msg = match crate::companion_extras::check_github_release_update(
@@ -5133,7 +6684,9 @@ impl AppRuntime {
                 )));
             }
             MenuCommand::Quit => {
-                self.begin_graceful_quit(event_loop);
+                if let Some(el) = event_loop {
+                    self.begin_graceful_quit(el);
+                }
             }
         }
     }
@@ -5141,6 +6694,7 @@ impl AppRuntime {
     fn begin_graceful_quit(&mut self, event_loop: &ActiveEventLoop) {
         if self.smoke_mode || self.closing_at.is_some() {
             crate::companion_extras::stop_managed_tts_engine();
+            crate::companion_extras::stop_managed_ollama_engine();
             if let Some(mut srv) = self.server.take() {
                 srv.stop();
             }
@@ -5219,11 +6773,11 @@ impl AppRuntime {
     }
 
     fn maybe_speak_actions(&self, actions: &[DialogueAction]) {
-        if self.smoke_mode {
+        if self.smoke_mode || self.characters_effectively_hidden() {
             return;
         }
         let cfg = self.config_store.get();
-        if !cfg.voice_tts {
+        if !cfg.voice_tts || cfg.quiet_mode {
             return;
         }
         let segs = crate::companion_extras::extract_speech_segments_from_actions(actions);
@@ -5296,6 +6850,7 @@ impl AppRuntime {
             (400.0, 400.0, 220.0, 300.0)
         };
         let (mx, my, mw, mh) = self.desktop_safe_work_area();
+        let ui_lang = self.effective_ui_lang();
         if let Some(ref mut cw) = self.communicate {
             let x = (sx + sw * 0.5 - cw.win_size.0 as f64 * 0.5)
                 .clamp(mx + 12.0, (mx + mw - cw.win_size.0 as f64 - 12.0).max(mx + 12.0));
@@ -5314,7 +6869,7 @@ impl AppRuntime {
             cw.ws.window.set_visible(true);
             cw.ws.window.focus_window();
             if let Some(ref gpu) = self.gpu {
-                cw.redraw(&self.balloon_skin, &mut self.text_renderer, gpu);
+                cw.redraw(&self.balloon_skin, &mut self.text_renderer, gpu, ui_lang);
             }
         }
     }
@@ -5361,6 +6916,7 @@ impl AppRuntime {
         }
         .unwrap_or((300.0, 300.0));
 
+        self.expanded_menu_section = None;
         let rows = self.build_menu_rows();
         let Some(ref mut menu) = self.menu else { return };
         menu.rows = rows;
@@ -5411,17 +6967,20 @@ impl AppRuntime {
         if trimmed.is_empty() {
             return;
         }
+        self.auto_talk_last = Instant::now();
         // Immediate visual responsiveness: character reacts & thinking indicator appears synchronously (< 50ms)
         if let Some(ref mut s) = self.sakura {
             s.trigger_bounce(0.016);
         }
-        self.apply_status_feedback("AI 応答準備中… / Thinking…".to_string());
+        let thinking = self.ui_strings().status_thinking.to_string();
+        self.apply_status_feedback(thinking);
 
         let eng = self.engine.clone();
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
             let reply = eng.handle_user_message(&trimmed);
             let _ = proxy.send_event(UserEvent::PlayActions(reply.actions));
+            let _ = proxy.send_event(UserEvent::RefreshMenus);
         });
     }
 
@@ -5436,6 +6995,9 @@ impl AppRuntime {
     }
 
     fn apply_status_feedback(&mut self, msg: String) {
+        if self.characters_effectively_hidden() {
+            return;
+        }
         let sp_sak = self.speaker_name(Scope::Sakura);
         let mut need_repo = false;
         if let Some(ref mut sb) = self.sakura_balloon {
@@ -5527,6 +7089,7 @@ impl AppRuntime {
                 }
             }
             Some(UiWindowTarget::Communicate) => {
+                let ui_lang = self.effective_ui_lang();
                 if let Some(ref mut cw) = self.communicate {
                     cw.last_local_cursor = Some(local);
                     let in_rect = |r: (f64, f64, f64, f64)| -> bool {
@@ -5539,7 +7102,7 @@ impl AppRuntime {
                         cw.hovered_close = new_close;
                         cw.hovered_send = new_send;
                         if let Some(ref gpu) = self.gpu {
-                            cw.redraw(&self.balloon_skin, &mut self.text_renderer, gpu);
+                            cw.redraw(&self.balloon_skin, &mut self.text_renderer, gpu, ui_lang);
                         }
                     }
                 }
@@ -5563,6 +7126,39 @@ impl AppRuntime {
                             m.redraw(&mut self.text_renderer, gpu);
                         }
                     }
+                }
+            }
+            Some(UiWindowTarget::Settings) => {
+                let mut drag_pos: Option<(f64, f64)> = None;
+                let mut action_opt: Option<SettingsAction> = None;
+                let mut need_redraw = false;
+                if let Some(ref mut sw) = self.settings {
+                    sw.last_local_cursor = Some(local);
+                    if sw.dragging_header {
+                        if let Mouse::Position { x, y } = Mouse::get_mouse_position() {
+                            #[cfg(target_os = "macos")]
+                            let (gx, gy) = (x as f64, y as f64);
+                            #[cfg(not(target_os = "macos"))]
+                            let (gx, gy) = {
+                                let scale = sw.ws.window.scale_factor().max(1.0);
+                                (x as f64 / scale, y as f64 / scale)
+                            };
+                            let dx = gx - sw.drag_start_cursor.0;
+                            let dy = gy - sw.drag_start_cursor.1;
+                            drag_pos = Some((sw.drag_start_pos.0 + dx, sw.drag_start_pos.1 + dy));
+                        }
+                    } else {
+                        let (changed, act) = sw.model.handle_pointer_move(local);
+                        need_redraw = changed;
+                        action_opt = act;
+                    }
+                }
+                if let (Some((px, py)), Some(ref sw)) = (drag_pos, &self.settings) {
+                    sw.ws.window.set_outer_position(LogicalPosition::new(px, py));
+                } else if let Some(act) = action_opt {
+                    self.execute_settings_action(act);
+                } else if need_redraw {
+                    self.redraw_settings_panel();
                 }
             }
             None => {}
@@ -5636,6 +7232,15 @@ impl AppRuntime {
                     }
                 }
             }
+            Some(UiWindowTarget::Settings) => {
+                let scrolled = self
+                    .settings
+                    .as_mut()
+                    .is_some_and(|sw| sw.model.scroll_by(dy as f32));
+                if scrolled {
+                    self.redraw_settings_panel();
+                }
+            }
             _ => {}
         }
     }
@@ -5654,37 +7259,61 @@ impl AppRuntime {
                 }
                 (MouseButton::Left, ElementState::Pressed) => {
                     self.hide_menu();
+                    let locked = self.config_store.get().lock_position;
                     let cw = if sc == Scope::Sakura { self.sakura.as_mut() } else { self.kero.as_mut() };
                     if let Some(c) = cw {
-                        c.sync_pos_from_window();
-                        c.dragging = true;
-                        c.drag_moved = false;
-                        c.drag_start_win_pos = c.logical_pos;
-                        if let Mouse::Position { x, y } = Mouse::get_mouse_position() {
-                            #[cfg(target_os = "macos")]
-                            {
-                                c.drag_start_cursor_global = (x as f64, y as f64);
+                        if !locked {
+                            c.sync_pos_from_window();
+                            c.dragging = true;
+                            c.drag_moved = false;
+                            c.drag_start_win_pos = c.logical_pos;
+                            if let Mouse::Position { x, y } = Mouse::get_mouse_position() {
+                                #[cfg(target_os = "macos")]
+                                {
+                                    c.drag_start_cursor_global = (x as f64, y as f64);
+                                }
+                                #[cfg(not(target_os = "macos"))]
+                                {
+                                    let scale = c.ws.window.scale_factor().max(1.0);
+                                    c.drag_start_cursor_global = (x as f64 / scale, y as f64 / scale);
+                                }
+                            } else if c.ws.window.outer_position().is_err() {
+                                let _ = c.ws.window.drag_window();
                             }
-                            #[cfg(not(target_os = "macos"))]
-                            {
-                                let scale = c.ws.window.scale_factor().max(1.0);
-                                c.drag_start_cursor_global = (x as f64 / scale, y as f64 / scale);
-                            }
-                        } else if c.ws.window.outer_position().is_err() {
-                            let _ = c.ws.window.drag_window();
                         }
                     }
                 }
                 (MouseButton::Left, ElementState::Released) => {
                     let mut open_chat = false;
                     let mut touch_region = None;
+                    let mut snapped_balloon = false;
+                    let snap_floor = self.config_store.get().snap_to_bottom;
+                    let (_, sy_safe, _, sh_safe) = self.desktop_safe_work_area();
+                    let safe_bottom = sy_safe + sh_safe;
                     {
                         let cw = if sc == Scope::Sakura { self.sakura.as_mut() } else { self.kero.as_mut() };
                         if let Some(c) = cw {
                             let was_drag = c.drag_moved;
                             c.dragging = false;
                             c.drag_moved = false;
-                            if !was_drag {
+                            if was_drag && snap_floor {
+                                c.sync_pos_from_window();
+                                let foot_off = if c.is_full_feet() {
+                                    c.foot_bottom_offset_logical()
+                                } else {
+                                    0.0
+                                };
+                                let floor_y = if c.is_full_feet() {
+                                    safe_bottom - 6.0
+                                } else {
+                                    safe_bottom
+                                };
+                                let target_y = floor_y - c.win_size.1 as f64 + foot_off;
+                                if (c.logical_pos.1 - target_y).abs() <= 32.0 {
+                                    c.set_logical_pos(c.logical_pos.0, target_y);
+                                    snapped_balloon = true;
+                                }
+                            } else if !was_drag {
                                 let now = Instant::now();
                                 let is_dbl = c
                                     .last_click_at
@@ -5692,8 +7321,9 @@ impl AppRuntime {
                                 c.last_click_at = if is_dbl { None } else { Some(now) };
                                 if is_dbl {
                                     if let Some((lx, ly)) = c.last_local_cursor {
-                                        let ix = (lx * c.display_scale).floor() as i32;
-                                        let iy = (ly * c.display_scale).floor() as i32;
+                                        let ds = c.effective_display_scale();
+                                        let ix = (lx * ds).floor() as i32;
+                                        let iy = (ly * ds).floor() as i32;
                                         let m = self.manifest.lock().expect("manifest mutex poisoned");
                                         let col = c.base_bmp.as_ref().and_then(|bb| {
                                             m.hit_collision(c.surface_id, sc, bb, ix, iy)
@@ -5709,6 +7339,9 @@ impl AppRuntime {
                                 }
                             }
                         }
+                    }
+                    if snapped_balloon {
+                        self.reposition_balloon(sc);
                     }
                     if open_chat {
                         self.open_communicate_near_sakura();
@@ -5756,15 +7389,36 @@ impl AppRuntime {
                     }
                     if let Some((lbl, cid, is_url)) = picked_choice {
                         if is_url {
+                            let ui_s = self.ui_strings();
                             link_status = Some(
                                 match crate::companion_extras::open_validated_browser_url(
                                     &cid,
                                     self.smoke_mode,
                                 ) {
-                                    Ok(url) => format!("🔗 リンクを開きました: {url}"),
-                                    Err(err) => format!("⚠️ URLブロック: {err}"),
+                                    Ok(url) => format!("{}{url}", ui_s.status_link_opened_prefix),
+                                    Err(err) => format!("{}{err}", ui_s.status_url_blocked_prefix),
                                 },
                             );
+                        } else if cid == "__setup_local_ai__" {
+                            self.playback.sakura_choices.clear();
+                            self.playback.kero_choices.clear();
+                            self.start_one_click_local_ai_setup();
+                        } else if cid == "__open_settings_ai__" {
+                            self.playback.sakura_choices.clear();
+                            self.playback.kero_choices.clear();
+                            self.open_settings_panel();
+                            if let Some(ref mut sw) = self.settings {
+                                sw.model.select_tab(3);
+                            }
+                            self.redraw_settings_panel();
+                        } else if cid == "__copy_last_reply__" {
+                            self.copy_last_reply_to_clipboard();
+                        } else if cid == "__pomo_start__" {
+                            self.playback.sakura_choices.clear();
+                            self.playback.kero_choices.clear();
+                            self.apply_pomodoro_action("start");
+                            self.rebuild_tray_menu();
+                            self.redraw_settings_panel();
                         } else {
                             self.playback.sakura_choices.clear();
                             self.playback.kero_choices.clear();
@@ -5806,6 +7460,7 @@ impl AppRuntime {
             Some(UiWindowTarget::Communicate) if button == MouseButton::Left && state == ElementState::Pressed => {
                 let mut submit_text: Option<String> = None;
                 let mut closed_now = false;
+                let ui_lang = self.effective_ui_lang();
                 if let Some(ref mut cw) = self.communicate {
                     let in_rect = |r: (f64, f64, f64, f64), p: (f64, f64)| -> bool {
                         r.2 > r.0 && p.0 >= r.0 && p.0 <= r.2 && p.1 >= r.1 && p.1 <= r.3
@@ -5841,7 +7496,7 @@ impl AppRuntime {
                         cw.last_blink = Instant::now();
                         cw.ws.window.focus_window();
                         if let Some(ref gpu) = self.gpu {
-                            cw.redraw(&self.balloon_skin, &mut self.text_renderer, gpu);
+                            cw.redraw(&self.balloon_skin, &mut self.text_renderer, gpu, ui_lang);
                         }
                     }
                 }
@@ -5853,9 +7508,113 @@ impl AppRuntime {
                 let chosen = self.menu.as_ref().and_then(|m| {
                     m.hovered_idx.and_then(|i| m.rows.get(i).map(|r| r.cmd.clone()))
                 });
-                self.hide_menu();
-                if let Some(cmd) = chosen {
-                    self.execute_menu_command(event_loop, cmd);
+                match chosen {
+                    Some(MenuCommand::ToggleMenuSection(sec)) => {
+                        self.expanded_menu_section = if self.expanded_menu_section == Some(sec) {
+                            None
+                        } else {
+                            Some(sec)
+                        };
+                        let (mx, my, mw, mh) = self.desktop_safe_work_area();
+                        let rows = self.build_menu_rows();
+                        if let (Some(ref gpu), Some(ref mut m)) = (&self.gpu, &mut self.menu) {
+                            m.rows = rows;
+                            m.scroll_row = 0;
+                            m.scroll_accum = 0.0;
+                            m.hovered_idx = m.rows.iter().position(|r| {
+                                matches!(r.cmd, MenuCommand::ToggleMenuSection(s) if s == sec)
+                            });
+                            m.redraw(&mut self.text_renderer, gpu);
+                            if let Ok(outer) = m.ws.window.outer_position() {
+                                let sc = m.ws.window.scale_factor().max(1.0);
+                                let ol = outer.to_logical::<f64>(sc);
+                                let cx = ol
+                                    .x
+                                    .clamp(mx + 8.0, (mx + mw - m.win_size.0 as f64 - 8.0).max(mx + 8.0));
+                                let cy = ol
+                                    .y
+                                    .clamp(my + 6.0, (my + mh - m.win_size.1 as f64 - 8.0).max(my + 6.0));
+                                m.ws.window.set_outer_position(LogicalPosition::new(cx, cy));
+                            }
+                        }
+                    }
+                    Some(cmd) => {
+                        self.hide_menu();
+                        self.execute_menu_command(event_loop, cmd);
+                    }
+                    None => {
+                        self.hide_menu();
+                    }
+                }
+            }
+            Some(UiWindowTarget::Settings) if button == MouseButton::Left => {
+                if state == ElementState::Pressed {
+                    let mut action_opt: Option<SettingsAction> = None;
+                    let mut need_redraw = false;
+                    if let Some(ref mut sw) = self.settings {
+                        let local_opt = sw.last_local_cursor.or_else(|| {
+                            let scale = sw.ws.window.scale_factor().max(1.0);
+                            if let (Mouse::Position { x, y }, Ok(outer)) =
+                                (Mouse::get_mouse_position(), sw.ws.window.outer_position())
+                            {
+                                #[cfg(target_os = "macos")]
+                                {
+                                    let wl = outer.to_logical::<f64>(scale);
+                                    Some((x as f64 - wl.x, y as f64 - wl.y))
+                                }
+                                #[cfg(not(target_os = "macos"))]
+                                {
+                                    Some((
+                                        (x as f64 - outer.x as f64) / scale,
+                                        (y as f64 - outer.y as f64) / scale,
+                                    ))
+                                }
+                            } else {
+                                None
+                            }
+                        });
+                        if let Some(local) = local_opt {
+                            sw.last_local_cursor = Some(local);
+                            let (red, start_drag, act) = sw.model.handle_mouse_press(local);
+                            need_redraw = red;
+                            action_opt = act;
+                            if start_drag {
+                                sw.dragging_header = true;
+                                let scale = sw.ws.window.scale_factor().max(1.0);
+                                if let Ok(outer) = sw.ws.window.outer_position() {
+                                    let wl = outer.to_logical::<f64>(scale);
+                                    sw.drag_start_pos = (wl.x, wl.y);
+                                }
+                                if let Mouse::Position { x, y } = Mouse::get_mouse_position() {
+                                    #[cfg(target_os = "macos")]
+                                    {
+                                        sw.drag_start_cursor = (x as f64, y as f64);
+                                    }
+                                    #[cfg(not(target_os = "macos"))]
+                                    {
+                                        sw.drag_start_cursor =
+                                            (x as f64 / scale, y as f64 / scale);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if let Some(act) = action_opt {
+                        self.execute_settings_action(act);
+                    } else if need_redraw {
+                        self.redraw_settings_panel();
+                    }
+                } else if state == ElementState::Released {
+                    let mut was_interacting = false;
+                    if let Some(ref mut sw) = self.settings {
+                        was_interacting =
+                            sw.dragging_header || sw.model.dragging_slider.is_some();
+                        sw.dragging_header = false;
+                        sw.model.handle_mouse_release();
+                    }
+                    if was_interacting {
+                        self.redraw_settings_panel();
+                    }
                 }
             }
             _ => {}
@@ -5866,6 +7625,7 @@ impl AppRuntime {
         if self.classify_window(window_id) != Some(UiWindowTarget::Communicate) {
             return;
         }
+        let ui_lang = self.effective_ui_lang();
         if let Some(ref mut cw) = self.communicate {
             cw.focused = true;
             cw.cursor_on = true;
@@ -5884,13 +7644,14 @@ impl AppRuntime {
                 }
             }
             if let Some(ref gpu) = self.gpu {
-                cw.redraw(&self.balloon_skin, &mut self.text_renderer, gpu);
+                cw.redraw(&self.balloon_skin, &mut self.text_renderer, gpu, ui_lang);
             }
         }
     }
 
     fn handle_communicate_key(&mut self, logical_key: &Key, text: Option<&str>) {
         let mut submit_text: Option<String> = None;
+        let ui_lang = self.effective_ui_lang();
         if let Some(ref mut cw) = self.communicate {
             cw.focused = true;
             cw.cursor_on = true;
@@ -5947,7 +7708,7 @@ impl AppRuntime {
             }
             if cw.visible {
                 if let Some(ref gpu) = self.gpu {
-                    cw.redraw(&self.balloon_skin, &mut self.text_renderer, gpu);
+                    cw.redraw(&self.balloon_skin, &mut self.text_renderer, gpu, ui_lang);
                 }
             }
         }
@@ -6137,6 +7898,7 @@ impl AppRuntime {
     }
 
     fn sync_balloons_to_playback(&mut self) {
+        let eff_hidden = self.characters_effectively_hidden();
         let sp_sak = self.speaker_name(Scope::Sakura);
         let sp_ker = self.speaker_name(Scope::Kero);
         if self.playback.sakura_dirty {
@@ -6160,7 +7922,7 @@ impl AppRuntime {
                         &mut self.text_renderer,
                         gpu,
                     );
-                    if !was_vis {
+                    if !was_vis && !eff_hidden {
                         sb.ws.window.set_visible(true);
                     }
                     need_reposition = !was_vis || resized;
@@ -6169,7 +7931,7 @@ impl AppRuntime {
                     need_reposition = false;
                 }
             }
-            if self.playback.sakura_show && need_reposition {
+            if self.playback.sakura_show && need_reposition && !eff_hidden {
                 self.reposition_balloon(Scope::Sakura);
             }
         }
@@ -6195,7 +7957,7 @@ impl AppRuntime {
                         &mut self.text_renderer,
                         gpu,
                     );
-                    if !was_vis {
+                    if !was_vis && !eff_hidden {
                         kb.ws.window.set_visible(true);
                     }
                     need_reposition = !was_vis || resized;
@@ -6204,7 +7966,7 @@ impl AppRuntime {
                     need_reposition = false;
                 }
             }
-            if self.playback.kero_show && show_kero && need_reposition {
+            if self.playback.kero_show && show_kero && need_reposition && !eff_hidden {
                 self.reposition_balloon(Scope::Kero);
             }
         }
@@ -6212,6 +7974,7 @@ impl AppRuntime {
 
     fn poll_cursor_and_strokes(&mut self) {
         let now = Instant::now();
+        let cfg_cur = self.config_store.get();
         let pos_opt = match Mouse::get_mouse_position() {
             Mouse::Position { x, y } => Some((x as f64, y as f64)),
             Mouse::Error => None,
@@ -6226,6 +7989,21 @@ impl AppRuntime {
             };
             let Some(cw) = cw else { continue };
             if !cw.visible {
+                continue;
+            }
+            if cfg_cur.click_through_mode {
+                if !cw.dragging && cw.last_hittest != Some(false) {
+                    if cw.ws.window.set_cursor_hittest(false).is_ok() {
+                        cw.last_hittest = Some(false);
+                    }
+                }
+                if cw.hovered_opaque {
+                    cw.hovered_opaque = false;
+                    if let Some(ref gpu) = self.gpu {
+                        cw.ws.set_opacity(gpu, cfg_cur.skin_opacity);
+                    }
+                }
+                cw.stroke_detector.clear_if_stale(now);
                 continue;
             }
             let local_opt = if let Some((mx, my)) = pos_opt {
@@ -6247,15 +8025,19 @@ impl AppRuntime {
                 cw.last_local_cursor
             };
 
+            let prev_hover = cw.hovered_opaque;
             if let Some((lx, ly)) = local_opt {
                 let inside = lx >= 0.0
                     && ly >= 0.0
                     && lx < cw.win_size.0 as f64
                     && ly < cw.win_size.1 as f64;
                 if inside {
-                    let ix = (lx * cw.display_scale).floor() as i32;
-                    let iy = (ly * cw.display_scale).floor() as i32;
-                    let opaque = cw.dragging || cw.composited.is_opaque_at(ix, iy);
+                    let ds = cw.effective_display_scale();
+                    let ix = (lx * ds).floor() as i32;
+                    let iy = (ly * ds).floor() as i32;
+                    let pixel_opaque = cw.composited.is_opaque_at(ix, iy);
+                    cw.hovered_opaque = pixel_opaque;
+                    let opaque = cw.dragging || pixel_opaque;
                     if cw.last_hittest != Some(opaque) {
                         if cw.ws.window.set_cursor_hittest(opaque).is_ok() {
                             cw.last_hittest = Some(opaque);
@@ -6269,12 +8051,25 @@ impl AppRuntime {
                         stroke_hit = Some((scope, region));
                     }
                 } else {
+                    cw.hovered_opaque = false;
                     cw.stroke_detector.clear_if_stale(now);
                     if !cw.dragging && cw.last_hittest != Some(false) {
                         if cw.ws.window.set_cursor_hittest(false).is_ok() {
                             cw.last_hittest = Some(false);
                         }
                     }
+                }
+            } else {
+                cw.hovered_opaque = false;
+            }
+            if cfg_cur.opaque_on_hover && cw.hovered_opaque != prev_hover {
+                if let Some(ref gpu) = self.gpu {
+                    let op = if cw.hovered_opaque {
+                        1.0
+                    } else {
+                        cfg_cur.skin_opacity
+                    };
+                    cw.ws.set_opacity(gpu, op);
                 }
             }
         }
@@ -6406,9 +8201,17 @@ impl AppRuntime {
             }
 
             // Optional local classic-shell visual proof export (.pna / seriko compatibility)
-            let user_shells_dir = crate::config_store::default_user_data_dir().join("shells");
-            if user_shells_dir.is_dir() {
-                let user_mgr = crate::shell_parser::ShellManager::new(vec![user_shells_dir]);
+            let mut classic_shell_roots =
+                vec![crate::config_store::default_user_data_dir().join("shells")];
+            for legacy in crate::config_store::legacy_user_data_dirs() {
+                let d = legacy.join("shells");
+                if !classic_shell_roots.contains(&d) {
+                    classic_shell_roots.push(d);
+                }
+            }
+            classic_shell_roots.retain(|d| d.is_dir());
+            if !classic_shell_roots.is_empty() {
+                let user_mgr = crate::shell_parser::ShellManager::new(classic_shell_roots);
                 for classic_id in ["mayura", "dokuko"] {
                     if let Ok(mut cm) = user_mgr.load_shell(classic_id) {
                         sak_win.display_scale = cm.descript.display_scale.clamp(0.5, 4.0);
@@ -6495,16 +8298,17 @@ impl AppRuntime {
             }
 
             // Phase C: Communicate Siri-style sapphire input bar proofs
+            let smoke_ui_lang = self.effective_ui_lang();
             if let Some(ref mut cw) = self.communicate {
                 cw.focused = true;
                 cw.cursor_on = true;
                 cw.text.clear();
                 cw.ime_preedit.clear();
-                cw.render_bitmap(&mut self.text_renderer, 2.0, 0.35)
+                cw.render_bitmap(&mut self.text_renderer, 2.0, 0.35, smoke_ui_lang)
                     .save_png(&proof_dir.join("proof-comm-empty.png"))?;
                 cw.text = "入力".to_string();
                 cw.ime_preedit = "中です".to_string();
-                cw.render_bitmap(&mut self.text_renderer, 2.0, 1.10)
+                cw.render_bitmap(&mut self.text_renderer, 2.0, 1.10, smoke_ui_lang)
                     .save_png(&proof_dir.join("proof-comm-ime.png"))?;
                 cw.text.clear();
                 cw.ime_preedit.clear();
@@ -6687,10 +8491,11 @@ impl AppRuntime {
             if self.communicate.as_ref().is_some_and(|c| c.visible) {
                 return Err("送信ボタンクリック後に入力バーが閉じませんでした".to_string());
             }
+            let expected_thinking = self.ui_strings().status_thinking;
             if !self
                 .sakura_balloon
                 .as_ref()
-                .is_some_and(|b| b.visible && b.status_line.contains("AI 応答準備中"))
+                .is_some_and(|b| b.visible && b.status_line.contains(expected_thinking))
             {
                 return Err("送信ボタン押下後の即時応答ステータス（…表示）が反映されませんでした".to_string());
             }
@@ -6740,10 +8545,11 @@ impl AppRuntime {
             if !self.playback.sakura_choices.is_empty() {
                 return Err("選択肢クリック後の choices クリア失敗".to_string());
             }
+            let expected_thinking = self.ui_strings().status_thinking;
             if !self
                 .sakura_balloon
                 .as_ref()
-                .is_some_and(|b| b.visible && b.status_line.contains("AI 応答準備中"))
+                .is_some_and(|b| b.visible && b.status_line.contains(expected_thinking))
             {
                 return Err("選択肢クリック後の即時反応表示失敗".to_string());
             }
@@ -6808,13 +8614,317 @@ impl AppRuntime {
             };
             self.handle_pointer_move(sb_id, link_center);
             self.handle_mouse_button(event_loop, sb_id, MouseButton::Left, ElementState::Pressed);
+            let expected_link_prefix = self.ui_strings().status_link_opened_prefix.trim();
             if !self
                 .sakura_balloon
                 .as_ref()
-                .is_some_and(|b| b.status_line.contains("リンクを開きました"))
+                .is_some_and(|b| b.status_line.contains(expected_link_prefix))
             {
                 return Err("リンククリックのブラウザ起動dry-runステータス検証に失敗しました".to_string());
             }
+
+            // E7: Compact Menu Accordion & Native Settings Panel Operability
+            let t_settings = Instant::now();
+            self.handle_mouse_button(event_loop, sak_id, MouseButton::Right, ElementState::Pressed);
+            let collapsed_len = {
+                let m = self.menu.as_ref().ok_or("메뉴 창 없음")?;
+                if !m.visible || m.rows.len() > 20 {
+                    return Err(format!(
+                        "右クリックメニューが折りたたみ表示されませんでした: rows={}",
+                        m.rows.len()
+                    ));
+                }
+                m.rows.len()
+            };
+            let skins_sec_idx = self
+                .menu
+                .as_ref()
+                .and_then(|m| {
+                    m.rows
+                        .iter()
+                        .position(|r| matches!(r.cmd, MenuCommand::ToggleMenuSection(MenuSection::Skins)))
+                })
+                .ok_or("右クリックメニューに Skins セクション行がありません")?;
+            self.handle_pointer_move(
+                menu_id,
+                (60.0, 7.0 + menu_row_h * (skins_sec_idx as f64 + 0.5)),
+            );
+            self.handle_mouse_button(event_loop, menu_id, MouseButton::Left, ElementState::Released);
+            if !self
+                .menu
+                .as_ref()
+                .is_some_and(|m| m.visible && m.rows.len() > collapsed_len)
+            {
+                return Err("メニューアコーディオン展開に失敗しました".to_string());
+            }
+            self.hide_menu();
+
+            self.execute_menu_command(event_loop, MenuCommand::OpenSettings);
+            let settings_id = {
+                let sw = self.settings.as_ref().ok_or("設定パネルウィンドウなし")?;
+                if !sw.visible {
+                    return Err("OpenSettings 後に設定パネルが表示されませんでした".to_string());
+                }
+                if sw.last_render_bmp.count_opaque_pixels() <= 50_000 {
+                    return Err(format!(
+                        "設定パネル描画ピクセル不足: {}",
+                        sw.last_render_bmp.count_opaque_pixels()
+                    ));
+                }
+                sw.last_render_bmp
+                    .save_png(&proof_dir.join("proof-settings-appearance.png"))?;
+                sw.ws.window.id()
+            };
+
+            let pt_slider = self
+                .settings
+                .as_ref()
+                .and_then(|sw| sw.model.slider_point(SliderKind::SkinOpacity, 0.65))
+                .ok_or("SkinOpacity スライダーのヒット領域が見つかりません")?;
+            self.handle_pointer_move(settings_id, pt_slider);
+            self.handle_mouse_button(event_loop, settings_id, MouseButton::Left, ElementState::Pressed);
+            self.handle_mouse_button(event_loop, settings_id, MouseButton::Left, ElementState::Released);
+            if self.config_store.get().skin_opacity >= 0.85 {
+                return Err(format!(
+                    "SkinOpacity スライダークリックが config に反映されませんでした: {}",
+                    self.config_store.get().skin_opacity
+                ));
+            }
+            if self.sakura.as_ref().is_some_and(|s| s.ws.opacity >= 0.85) {
+                return Err("SkinOpacity スライダー変更がキャラウィンドウ GPU opacity に反映されませんでした".to_string());
+            }
+
+            let pt_tab1 = self
+                .settings
+                .as_ref()
+                .and_then(|sw| sw.model.target_center("tab_1"))
+                .ok_or("設定パネル tab_1 が見つかりません")?;
+            self.handle_pointer_move(settings_id, pt_tab1);
+            self.handle_mouse_button(event_loop, settings_id, MouseButton::Left, ElementState::Pressed);
+            self.handle_mouse_button(event_loop, settings_id, MouseButton::Left, ElementState::Released);
+            if let Some(ref sw) = self.settings {
+                sw.last_render_bmp
+                    .save_png(&proof_dir.join("proof-settings-os.png"))?;
+            }
+            for (expected_lang, proof_name) in [
+                ("ja", None),
+                ("ko", Some("proof-settings-os-ko.png")),
+                ("en", Some("proof-settings-os-en.png")),
+            ] {
+                let pt_lang = self
+                    .settings
+                    .as_ref()
+                    .and_then(|sw| sw.model.target_center("cyc_ui_lang_next"))
+                    .ok_or("設定パネル cyc_ui_lang_next が見つかりません")?;
+                self.handle_pointer_move(settings_id, pt_lang);
+                self.handle_mouse_button(event_loop, settings_id, MouseButton::Left, ElementState::Pressed);
+                self.handle_mouse_button(event_loop, settings_id, MouseButton::Left, ElementState::Released);
+                let got_lang = self.config_store.get().ui_language;
+                if got_lang != expected_lang {
+                    return Err(format!(
+                        "UI 言語切替 (cyc_ui_lang_next) 不一致: expected={expected_lang}, got={got_lang}"
+                    ));
+                }
+                if let Some(file_name) = proof_name {
+                    if let Some(ref sw) = self.settings {
+                        sw.last_render_bmp.save_png(&proof_dir.join(file_name))?;
+                    }
+                }
+            }
+
+            // Cycle 1 more time back to "auto" (OS default) and inspect the new Focus/Utilities section
+            let pt_lang_back = self
+                .settings
+                .as_ref()
+                .and_then(|sw| sw.model.target_center("cyc_ui_lang_next"))
+                .ok_or("設定パネル cyc_ui_lang_next (return) が見つかりません")?;
+            self.handle_pointer_move(settings_id, pt_lang_back);
+            self.handle_mouse_button(event_loop, settings_id, MouseButton::Left, ElementState::Pressed);
+            self.handle_mouse_button(event_loop, settings_id, MouseButton::Left, ElementState::Released);
+
+            self.handle_scroll(settings_id, -312.0);
+            if let Some(ref sw) = self.settings {
+                sw.last_render_bmp
+                    .save_png(&proof_dir.join("proof-settings-os-accessories.png"))?;
+            }
+
+            let click_target = |app: &mut Self, key: &str| -> Result<(), String> {
+                let pt = app
+                    .settings
+                    .as_ref()
+                    .and_then(|sw| sw.model.target_center(key))
+                    .ok_or_else(|| format!("設定パネル {key} が見つかりません"))?;
+                app.handle_pointer_move(settings_id, pt);
+                app.handle_mouse_button(event_loop, settings_id, MouseButton::Left, ElementState::Pressed);
+                app.handle_mouse_button(event_loop, settings_id, MouseButton::Left, ElementState::Released);
+                Ok(())
+            };
+
+            click_target(self, "tog_quiet_mode")?;
+            if !self.config_store.get().quiet_mode {
+                return Err("tog_quiet_mode で quiet_mode が ON になりませんでした".to_string());
+            }
+            click_target(self, "btn_pomo_toggle")?;
+            if !self.pomodoro.is_focusing() {
+                return Err("btn_pomo_toggle でポモドーロ集中が開始されませんでした".to_string());
+            }
+            click_target(self, "btn_pomo_stop")?;
+            if self.pomodoro.is_active() {
+                return Err("btn_pomo_stop でポモドーロが停止されませんでした".to_string());
+            }
+            self.backlog.push_from_actions(
+                &parse_dialogue("\\0\\s[5]バックログ検証メッセージ\\e"),
+                "08:00:00".to_string(),
+            );
+            click_target(self, "btn_show_backlog")?;
+            click_target(self, "btn_copy_last")?;
+            let expected_copied = self.ui_strings().status_copied_reply;
+            if !self
+                .sakura_balloon
+                .as_ref()
+                .is_some_and(|b| b.status_line.contains(expected_copied))
+            {
+                return Err("btn_copy_last 実行後のコピー通知ステータスが反映されませんでした".to_string());
+            }
+            click_target(self, "btn_hide_chars")?;
+            if !self.characters_hidden_by_user {
+                return Err("btn_hide_chars で一時非表示になりませんでした".to_string());
+            }
+            click_target(self, "btn_hide_chars")?;
+            if self.characters_hidden_by_user {
+                return Err("btn_hide_chars 再クリックでキャラが復帰しませんでした".to_string());
+            }
+            click_target(self, "btn_next_monitor")?;
+
+            self.handle_scroll(settings_id, -90.0);
+            click_target(self, "cyc_power_save_next")?;
+            if self.config_store.get().power_save_mode != "on" {
+                return Err(format!(
+                    "cyc_power_save_next が反映されませんでした: {}",
+                    self.config_store.get().power_save_mode
+                ));
+            }
+            click_target(self, "tog_low_batt_alert")?;
+            if self.config_store.get().low_battery_alert {
+                return Err("tog_low_batt_alert のトグルが反映されませんでした".to_string());
+            }
+
+            let pt_tab3 = self
+                .settings
+                .as_ref()
+                .and_then(|sw| sw.model.target_center("tab_3"))
+                .ok_or("設定パネル tab_3 が見つかりません")?;
+            self.handle_pointer_move(settings_id, pt_tab3);
+            self.handle_mouse_button(event_loop, settings_id, MouseButton::Left, ElementState::Pressed);
+            self.handle_mouse_button(event_loop, settings_id, MouseButton::Left, ElementState::Released);
+
+            let pt_autotalk = self
+                .settings
+                .as_ref()
+                .and_then(|sw| sw.model.slider_point(SliderKind::AutoTalkInterval, 0.06))
+                .ok_or("AutoTalkInterval スライダーのヒット領域が見つかりません")?;
+            self.handle_pointer_move(settings_id, pt_autotalk);
+            self.handle_mouse_button(event_loop, settings_id, MouseButton::Left, ElementState::Pressed);
+            self.handle_mouse_button(event_loop, settings_id, MouseButton::Left, ElementState::Released);
+            let cur_interval = self.config_store.get().auto_talk_interval_sec;
+            if !(30..=60).contains(&cur_interval) {
+                return Err(format!(
+                    "AutoTalkInterval スライダー変更が config に反映されませんでした: {cur_interval}"
+                ));
+            }
+
+            let pt_weight = self
+                .settings
+                .as_ref()
+                .and_then(|sw| sw.model.slider_point(SliderKind::InterestWeight, 0.85))
+                .ok_or("InterestWeight スライダーのヒット領域が見つかりません")?;
+            self.handle_pointer_move(settings_id, pt_weight);
+            self.handle_mouse_button(event_loop, settings_id, MouseButton::Left, ElementState::Pressed);
+            self.handle_mouse_button(event_loop, settings_id, MouseButton::Left, ElementState::Released);
+            let cur_weight = self.config_store.get().interest_news_weight;
+            if !(0.60..=0.80).contains(&cur_weight) {
+                return Err(format!(
+                    "InterestWeight スライダー変更が config に反映されませんでした: {cur_weight}"
+                ));
+            }
+
+            if let Some(ref sw) = self.settings {
+                sw.last_render_bmp
+                    .save_png(&proof_dir.join("proof-settings-ai.png"))?;
+            }
+
+            let pt_setup_ai = self
+                .settings
+                .as_ref()
+                .and_then(|sw| sw.model.target_center("btn_setup_local_ai"))
+                .ok_or("設定パネル btn_setup_local_ai が見つかりません")?;
+            self.handle_pointer_move(settings_id, pt_setup_ai);
+            self.handle_mouse_button(event_loop, settings_id, MouseButton::Left, ElementState::Pressed);
+            self.handle_mouse_button(event_loop, settings_id, MouseButton::Left, ElementState::Released);
+            if self.config_store.get().provider != "ollama" {
+                return Err(format!(
+                    "btn_setup_local_ai で provider が ollama になりませんでした: {}",
+                    self.config_store.get().provider
+                ));
+            }
+            let expected_dry_run = self.ui_strings().status_local_ai_dry_run;
+            if !self
+                .sakura_balloon
+                .as_ref()
+                .is_some_and(|b| b.status_line.contains(expected_dry_run))
+            {
+                return Err(format!(
+                    "btn_setup_local_ai 実行後の status_line が期待値と異なります: {:?}",
+                    self.sakura_balloon.as_ref().map(|b| &b.status_line)
+                ));
+            }
+
+            let pt_reset = self
+                .settings
+                .as_ref()
+                .and_then(|sw| sw.model.target_center("btn_reset_defaults"))
+                .ok_or("設定パネル btn_reset_defaults が見つかりません")?;
+            self.handle_pointer_move(settings_id, pt_reset);
+            self.handle_mouse_button(event_loop, settings_id, MouseButton::Left, ElementState::Pressed);
+            self.handle_mouse_button(event_loop, settings_id, MouseButton::Left, ElementState::Released);
+            let reset_cfg = self.config_store.get();
+            if (reset_cfg.skin_opacity - 1.0).abs() > 0.01 {
+                return Err(format!(
+                    "設定パネルの初期値復元 (btn_reset_defaults) が機能しませんでした: {}",
+                    reset_cfg.skin_opacity
+                ));
+            }
+            if reset_cfg.auto_talk_interval_sec != 180
+                || (reset_cfg.interest_news_weight - 0.50).abs() > 0.02
+                || reset_cfg.ui_language != "auto"
+                || reset_cfg.quiet_mode
+                || !reset_cfg.auto_hide_on_fullscreen
+                || reset_cfg.power_save_mode != "auto"
+                || reset_cfg.pomodoro_preset_idx != 0
+            {
+                return Err(format!(
+                    "btn_reset_defaults で既定値（雑談/関心/UI言語/アクセサリ設定）が復元されませんでした: interval={}, weight={}, ui_language={}, quiet={}, ps={}",
+                    reset_cfg.auto_talk_interval_sec,
+                    reset_cfg.interest_news_weight,
+                    reset_cfg.ui_language,
+                    reset_cfg.quiet_mode,
+                    reset_cfg.power_save_mode
+                ));
+            }
+
+            self.window_event(event_loop, settings_id, WindowEvent::CloseRequested);
+            if self.settings.as_ref().is_some_and(|sw| sw.visible) {
+                return Err("CloseRequested で設定パネルが閉じませんでした".to_string());
+            }
+            if self.closing_at.is_some() {
+                return Err("設定パネル閉じでアプリ全体が終了遷移しました".to_string());
+            }
+            self.execute_menu_command(event_loop, MenuCommand::OpenSettings);
+            self.handle_settings_key(&Key::Named(NamedKey::Escape));
+            if self.settings.as_ref().is_some_and(|sw| sw.visible) {
+                return Err("Escape キーで設定パネルが閉じませんでした".to_string());
+            }
+            check_sla("折りたたみメニュー・設定パネル操作", t_settings)?;
 
             self.execute_menu_command(event_loop, MenuCommand::ResetPositions);
             self.execute_menu_command(event_loop, MenuCommand::ResetDefaultSkin);
@@ -6922,13 +9032,29 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                 .unwrap_or_else(|| RgbaBitmap::from_solid(400, 500, 150, 180, 230, 220));
             (ds, binds, s, k)
         };
-        let sak_lw = ((sak_init.width as f64) / init_ds).round().max(40.0) as u32;
-        let sak_lh = ((sak_init.height as f64) / init_ds).round().max(40.0) as u32;
-        let kero_lw = ((kero_init.width as f64) / init_ds).round().max(40.0) as u32;
-        let kero_lh = ((kero_init.height as f64) / init_ds).round().max(40.0) as u32;
+        let init_user_scale = (cfg.character_scale as f64).clamp(0.50, 1.50);
+        let init_eff_ds = (init_ds / init_user_scale).clamp(0.25, 8.0);
+        let sak_lw = ((sak_init.width as f64) / init_eff_ds).round().max(40.0) as u32;
+        let sak_lh = ((sak_init.height as f64) / init_eff_ds).round().max(40.0) as u32;
+        let kero_lw = ((kero_init.width as f64) / init_eff_ds).round().max(40.0) as u32;
+        let kero_lh = ((kero_init.height as f64) / init_eff_ds).round().max(40.0) as u32;
 
+        let char_shadow = {
+            #[cfg(target_os = "macos")]
+            {
+                cfg.macos_window_shadow
+            }
+            #[cfg(target_os = "windows")]
+            {
+                cfg.windows_undecorated_shadow
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            {
+                false
+            }
+        };
         let instance = wgpu::Instance::default();
-        let sak_win = match Self::create_borderless_window(
+        let sak_win = match Self::create_borderless_window_opts(
             event_loop,
             "NanikaAi Sakura",
             sak_lw,
@@ -6936,6 +9062,9 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
             cfg.always_on_top,
             false,
             true,
+            char_shadow,
+            cfg.macos_accept_first_mouse,
+            cfg.windows_skip_taskbar,
         ) {
             Ok(w) => w,
             Err(e) => {
@@ -6969,18 +9098,48 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
             Some(WindowSurface::from_existing(surf, win, &gpu))
         };
 
-        let kero_ws = make_ws(
+        let kero_ws = Self::create_borderless_window_opts(
+            event_loop,
             "NanikaAi Kero",
             kero_lw,
             kero_lh,
             cfg.always_on_top,
             false,
             cfg.show_kero,
-        );
+            char_shadow,
+            cfg.macos_accept_first_mouse,
+            cfg.windows_skip_taskbar,
+        )
+        .ok()
+        .and_then(|win| {
+            gpu._instance
+                .create_surface(Arc::clone(&win))
+                .ok()
+                .map(|surf| WindowSurface::from_existing(surf, win, &gpu))
+        });
         let sak_bal_ws = make_ws("NanikaAi Balloon Sakura", 260, 108, cfg.always_on_top, false, false);
         let kero_bal_ws = make_ws("NanikaAi Balloon Kero", 240, 96, cfg.always_on_top, false, false);
         let comm_ws = make_ws("NanikaAi Communicate", 452, 92, true, true, false);
         let menu_ws = make_ws("NanikaAi Menu", 304, 420, true, true, false);
+        let settings_ws = Self::create_borderless_window_opts(
+            event_loop,
+            "NanikaAi Settings",
+            SETTINGS_LOGICAL_W,
+            SETTINGS_LOGICAL_H,
+            true,
+            true,
+            false,
+            true,
+            true,
+            false,
+        )
+        .ok()
+        .and_then(|win| {
+            gpu._instance
+                .create_surface(Arc::clone(&win))
+                .ok()
+                .map(|surf| WindowSurface::from_existing(surf, win, &gpu))
+        });
 
         self.sakura = Some(CharacterWindowState {
             scope: Scope::Sakura,
@@ -6991,6 +9150,8 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
             composited: sak_init.clone(),
             win_size: (sak_lw, sak_lh),
             display_scale: init_ds,
+            user_scale: init_user_scale,
+            hovered_opaque: false,
             logical_pos: (0.0, 0.0),
             anim_next: HashMap::new(),
             active_run: None,
@@ -7032,6 +9193,8 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                 composited: kero_init.clone(),
                 win_size: (kero_lw, kero_lh),
                 display_scale: init_ds,
+                user_scale: init_user_scale,
+                hovered_opaque: false,
                 logical_pos: (0.0, 0.0),
                 anim_next: HashMap::new(),
                 active_run: None,
@@ -7135,6 +9298,19 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                 last_render_bmp: RgbaBitmap::new_transparent(16, 16),
             });
         }
+        if let Some(sws) = settings_ws {
+            self.settings = Some(SettingsWindowState {
+                ws: sws,
+                visible: false,
+                win_size: (SETTINGS_LOGICAL_W, SETTINGS_LOGICAL_H),
+                model: SettingsPanelModel::new(),
+                dragging_header: false,
+                drag_start_cursor: (0.0, 0.0),
+                drag_start_pos: (0.0, 0.0),
+                last_local_cursor: None,
+                last_render_bmp: RgbaBitmap::new_transparent(16, 16),
+            });
+        }
 
         self.gpu = Some(gpu);
 
@@ -7152,6 +9328,7 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
             k.set_surface(&mut m, gpu, 10, true);
         }
         self.reset_character_positions();
+        self.apply_live_settings();
 
         // Tray icon (skip during automated headless/ephemeral smoke test if desired, or build safely)
         #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -7197,6 +9374,46 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
             let _ = self.proxy.send_event(UserEvent::TriggerSmokeStep);
         } else {
             self.spawn_tts_discovery_refresh(cfg.voice_tts);
+            // Background fullscreen & battery monitor (no permission prompts)
+            let probe_proxy = self.proxy.clone();
+            let probe_store = self.config_store.clone();
+            std::thread::spawn(move || {
+                let mut last_fs: Option<bool> = None;
+                let mut last_batt: Option<crate::accessory_utils::BatteryStatus> = None;
+                let mut last_batt_poll = Instant::now() - Duration::from_secs(120);
+                let sleep_step = if cfg!(target_os = "windows") {
+                    Duration::from_secs(6)
+                } else {
+                    Duration::from_secs(3)
+                };
+                loop {
+                    let fs_enabled = probe_store.get().auto_hide_on_fullscreen;
+                    let fs_now = if fs_enabled {
+                        crate::accessory_utils::probe_fullscreen_app_active()
+                    } else {
+                        false
+                    };
+                    let mut batt_now = last_batt.clone().unwrap_or_default();
+                    if last_batt_poll.elapsed() >= Duration::from_secs(60) {
+                        batt_now = crate::accessory_utils::probe_battery_status();
+                        last_batt_poll = Instant::now();
+                    }
+                    if last_fs != Some(fs_now) || last_batt.as_ref() != Some(&batt_now) {
+                        last_fs = Some(fs_now);
+                        last_batt = Some(batt_now.clone());
+                        if probe_proxy
+                            .send_event(UserEvent::SystemProbeUpdate {
+                                fullscreen: fs_now,
+                                battery: batt_now,
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    std::thread::sleep(sleep_step);
+                }
+            });
             // Boot greeting on background thread
             let eng = self.engine.clone();
             let proxy = self.proxy.clone();
@@ -7210,6 +9427,11 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::PlayActions(actions) => {
+                if !actions.is_empty() {
+                    self.auto_talk_last = Instant::now();
+                    let ts = Local::now().format("%H:%M:%S").to_string();
+                    self.backlog.push_from_actions(&actions, ts);
+                }
                 if actions.iter().any(|a| a.scope == Scope::Sakura) {
                     if let Some(ref mut sb) = self.sakura_balloon {
                         sb.scroll_px = 0.0;
@@ -7225,6 +9447,23 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                     }
                 }
                 self.maybe_speak_actions(&actions);
+                self.playback.enqueue(actions);
+            }
+            UserEvent::PlayActionsNoBacklog(actions) => {
+                if actions.iter().any(|a| a.scope == Scope::Sakura) {
+                    if let Some(ref mut sb) = self.sakura_balloon {
+                        sb.scroll_px = 0.0;
+                        sb.user_scrolled_up = false;
+                        sb.utterance_min_w = 0;
+                    }
+                }
+                if actions.iter().any(|a| a.scope == Scope::Kero) {
+                    if let Some(ref mut kb) = self.kero_balloon {
+                        kb.scroll_px = 0.0;
+                        kb.user_scrolled_up = false;
+                        kb.utterance_min_w = 0;
+                    }
+                }
                 self.playback.enqueue(actions);
             }
             UserEvent::StatusUpdate(msg, _active) => {
@@ -7309,7 +9548,117 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                     }
                 }
                 self.rebuild_tray_menu();
+                self.redraw_settings_panel();
                 let _ = reply.send(Ok(json!({ "updated": true })));
+            }
+            UserEvent::ServerGetSettings(tx) => {
+                let _ = tx.send(self.build_settings_snapshot());
+            }
+            UserEvent::ServerGetBacklog(tx) => {
+                let entries = self.backlog.entries_newest_first();
+                let _ = tx.send(json!({
+                    "count": entries.len(),
+                    "entries": entries,
+                }));
+            }
+            UserEvent::ServerUpdateSettings { req, reply } => {
+                if let Err(err) = crate::sstp_server::validate_settings_patch(&req) {
+                    let _ = reply.send(Err(err));
+                    return;
+                }
+                if req.reset_defaults {
+                    self.config_store.reset_convenience_and_appearance_defaults();
+                }
+                if req.clear_interests {
+                    self.config_store.clear_interests();
+                } else if let Some(ref topics) = req.interests {
+                    self.config_store.set_interests(topics);
+                }
+                if let Some(en) = req.auto_start_at_login {
+                    self.apply_autostart_toggle(en);
+                }
+                let updated_autotalk = req.auto_talk_interval_sec.is_some() || req.reset_defaults;
+                let updated_cfg = self.config_store.update(ConfigPatch {
+                    ui_language: req.ui_language,
+                    quiet_mode: req.quiet_mode,
+                    auto_hide_on_fullscreen: req.auto_hide_on_fullscreen,
+                    power_save_mode: req.power_save_mode,
+                    low_battery_alert: req.low_battery_alert,
+                    pomodoro_preset_idx: req.pomodoro_preset_idx,
+                    skin_opacity: req.skin_opacity,
+                    balloon_opacity: req.balloon_opacity,
+                    character_scale: req.character_scale,
+                    opaque_on_hover: req.opaque_on_hover,
+                    eye_tracking: req.eye_tracking,
+                    lock_position: req.lock_position,
+                    snap_to_bottom: req.snap_to_bottom,
+                    click_through_mode: req.click_through_mode,
+                    show_kero: req.show_kero,
+                    always_on_top: req.always_on_top,
+                    live2d_motion: req.live2d_motion,
+                    hourly_chime: req.hourly_chime,
+                    auto_talk_interval_sec: req.auto_talk_interval_sec,
+                    interest_news_weight: req.interest_news_weight,
+                    macos_accept_first_mouse: req.macos_accept_first_mouse,
+                    macos_window_shadow: req.macos_window_shadow,
+                    macos_show_in_dock: req.macos_show_in_dock,
+                    windows_skip_taskbar: req.windows_skip_taskbar,
+                    windows_undecorated_shadow: req.windows_undecorated_shadow,
+                    linux_prefer_x11: req.linux_prefer_x11,
+                    linux_respect_workarea: req.linux_respect_workarea,
+                    ..Default::default()
+                });
+                self.pomodoro.set_preset(updated_cfg.pomodoro_preset_idx);
+                if let Some(ref act) = req.pomodoro_action {
+                    self.apply_pomodoro_action(act);
+                }
+                if let Some(hidden) = req.characters_hidden {
+                    self.characters_hidden_by_user = hidden;
+                }
+                if !updated_cfg.auto_hide_on_fullscreen {
+                    self.hidden_by_fullscreen = false;
+                }
+                if updated_autotalk {
+                    self.auto_talk_last = Instant::now();
+                }
+                self.apply_live_settings();
+                self.apply_visibility_state();
+                self.redraw_settings_panel();
+                self.redraw_communicate_if_visible();
+                self.rebuild_tray_menu();
+                let _ = reply.send(Ok(self.build_settings_snapshot()));
+            }
+            UserEvent::SystemProbeUpdate { fullscreen, battery } => {
+                let cfg_now = self.config_store.get();
+                let target_fs_hide = cfg_now.auto_hide_on_fullscreen && fullscreen;
+                if self.hidden_by_fullscreen != target_fs_hide {
+                    self.hidden_by_fullscreen = target_fs_hide;
+                    self.apply_visibility_state();
+                }
+                self.battery_status = battery.clone();
+                if !battery.on_battery {
+                    self.low_battery_notified = false;
+                } else if cfg_now.low_battery_alert {
+                    if let Some(pct) = battery.percent {
+                        if pct <= 20 && !self.low_battery_notified {
+                            self.low_battery_notified = true;
+                            if !cfg_now.quiet_mode
+                                && !self.characters_effectively_hidden()
+                                && !self.pomodoro.is_focusing()
+                            {
+                                let script = crate::accessory_utils::build_low_battery_script(
+                                    pct,
+                                    self.effective_ui_lang(),
+                                );
+                                let _ = self
+                                    .proxy
+                                    .send_event(UserEvent::PlayActions(parse_dialogue(&script)));
+                            }
+                        } else if pct >= 30 {
+                            self.low_battery_notified = false;
+                        }
+                    }
+                }
             }
             UserEvent::ServerSwitchSkin { shell, balloon, reply } => {
                 let _ = reply.send(self.apply_skin_switch(shell, balloon));
@@ -7319,6 +9668,8 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
             }
             UserEvent::RefreshMenus => {
                 self.rebuild_tray_menu();
+                self.redraw_settings_panel();
+                self.redraw_communicate_if_visible();
                 if self.menu.as_ref().is_some_and(|m| m.visible) {
                     let rows = self.build_menu_rows();
                     if let (Some(ref gpu), Some(ref mut m)) = (&self.gpu, &mut self.menu) {
@@ -7343,6 +9694,7 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
         let win_target = self.classify_window(window_id);
         let is_comm = win_target == Some(UiWindowTarget::Communicate);
         let is_menu = win_target == Some(UiWindowTarget::Menu);
+        let is_settings = win_target == Some(UiWindowTarget::Settings);
 
         match event {
             WindowEvent::CloseRequested => {
@@ -7353,6 +9705,8 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                     }
                 } else if is_menu {
                     self.hide_menu();
+                } else if is_settings {
+                    self.hide_settings_panel();
                 } else {
                     self.begin_graceful_quit(event_loop);
                 }
@@ -7393,6 +9747,11 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                                 m.ws.resize(gpu, phys);
                             }
                         }
+                        Some(UiWindowTarget::Settings) => {
+                            if let Some(ref mut s) = self.settings {
+                                s.ws.resize(gpu, phys);
+                            }
+                        }
                         None => {}
                     }
                 }
@@ -7430,6 +9789,11 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                                 m.ws.render(gpu);
                             }
                         }
+                        Some(UiWindowTarget::Settings) => {
+                            if let Some(ref mut s) = self.settings {
+                                s.ws.render(gpu);
+                            }
+                        }
                         None => {}
                     }
                 }
@@ -7438,6 +9802,7 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                 if is_menu && !focused {
                     self.hide_menu();
                 } else if is_comm {
+                    let ui_lang = self.effective_ui_lang();
                     if let Some(ref mut cw) = self.communicate {
                         cw.focused = focused;
                         if focused {
@@ -7446,7 +9811,7 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                         }
                         if cw.visible {
                             if let Some(ref gpu) = self.gpu {
-                                cw.redraw(&self.balloon_skin, &mut self.text_renderer, gpu);
+                                cw.redraw(&self.balloon_skin, &mut self.text_renderer, gpu, ui_lang);
                             }
                         }
                     }
@@ -7520,18 +9885,40 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
             } if is_comm => {
                 self.handle_communicate_key(&logical_key, text.as_deref());
             }
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        logical_key,
+                        state: ElementState::Pressed,
+                        ..
+                    },
+                ..
+            } if is_settings => {
+                self.handle_settings_key(&logical_key);
+            }
             _ => {}
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let live2d_on = self.config_store.get().live2d_motion;
+        let cfg_now = self.config_store.get();
+        let live2d_on = cfg_now.live2d_motion;
         let comm_visible = self.communicate.as_ref().is_some_and(|c| c.visible);
-        let poll_ms = if live2d_on || comm_visible { 20 } else { POLL_INTERVAL_MS };
+        let settings_visible = self.settings.as_ref().is_some_and(|s| s.visible);
+        let eff_hidden = self.characters_effectively_hidden();
+        let poll_ms = crate::accessory_utils::effective_poll_interval_ms(
+            live2d_on,
+            comm_visible || settings_visible,
+            eff_hidden,
+            &cfg_now.power_save_mode,
+            self.battery_status.on_battery,
+            POLL_INTERVAL_MS,
+        );
         let mut next_wakeup = Instant::now() + Duration::from_millis(poll_ms);
         if let Some(deadline) = self.closing_at {
             if Instant::now() >= deadline {
                 crate::companion_extras::stop_managed_tts_engine();
+                crate::companion_extras::stop_managed_ollama_engine();
                 if let Some(mut srv) = self.server.take() {
                     srv.stop();
                 }
@@ -7566,6 +9953,7 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
         thread_local! {
             static LAST_COMM_AURA: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
         }
+        let comm_ui_lang = self.effective_ui_lang();
         if let Some(ref mut cw) = self.communicate {
             if cw.visible {
                 let mut need_redraw = false;
@@ -7591,7 +9979,7 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                 }
                 if need_redraw {
                     if let Some(ref gpu) = self.gpu {
-                        cw.redraw(&self.balloon_skin, &mut self.text_renderer, gpu);
+                        cw.redraw(&self.balloon_skin, &mut self.text_renderer, gpu, comm_ui_lang);
                     }
                 }
             }
@@ -7600,26 +9988,62 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
         self.poll_cursor_and_strokes();
         self.tick_playback();
 
-        // SERIKO animation & GPU Live2D 2.5D motion tick
-        let speaking_sakura = self.playback.is_speaking(Scope::Sakura);
-        let speaking_kero = self.playback.is_speaking(Scope::Kero);
-        let global_cursor = match Mouse::get_mouse_position() {
-            Mouse::Position { x, y } => Some((x as f64, y as f64)),
-            Mouse::Error => None,
-        };
-        if let Some(ref gpu) = self.gpu {
-            let m = self.manifest.lock().expect("manifest mutex poisoned");
-            if let Some(ref mut s) = self.sakura {
-                s.tick_seriko(&m, gpu, speaking_sakura);
-                s.tick_live2d(gpu, live2d_on, global_cursor, speaking_sakura);
-            }
-            if let Some(ref mut k) = self.kero {
-                if k.visible {
-                    k.tick_seriko(&m, gpu, speaking_kero);
-                    k.tick_live2d(gpu, live2d_on, global_cursor, speaking_kero);
+        // SERIKO animation & GPU Live2D 2.5D motion tick (paused when hidden / fullscreen-hidden)
+        if !eff_hidden {
+            let speaking_sakura = self.playback.is_speaking(Scope::Sakura);
+            let speaking_kero = self.playback.is_speaking(Scope::Kero);
+            let global_cursor = if cfg_now.eye_tracking {
+                match Mouse::get_mouse_position() {
+                    Mouse::Position { x, y } => Some((x as f64, y as f64)),
+                    Mouse::Error => None,
+                }
+            } else {
+                None
+            };
+            if let Some(ref gpu) = self.gpu {
+                let m = self.manifest.lock().expect("manifest mutex poisoned");
+                if let Some(ref mut s) = self.sakura {
+                    s.tick_seriko(&m, gpu, speaking_sakura);
+                    s.tick_live2d(gpu, live2d_on, global_cursor, speaking_sakura);
+                }
+                if let Some(ref mut k) = self.kero {
+                    if k.visible {
+                        k.tick_seriko(&m, gpu, speaking_kero);
+                        k.tick_live2d(gpu, live2d_on, global_cursor, speaking_kero);
+                    }
                 }
             }
         }
+
+        // Pomodoro countdown & phase transition notifications
+        if let Some(trans) = self.pomodoro.tick() {
+            if !eff_hidden {
+                let script = crate::accessory_utils::build_pomodoro_transition_script(
+                    trans,
+                    self.effective_ui_lang(),
+                );
+                let _ = self
+                    .proxy
+                    .send_event(UserEvent::PlayActions(parse_dialogue(&script)));
+            }
+            self.rebuild_tray_menu();
+            self.redraw_settings_panel();
+        } else if self.pomodoro.is_active()
+            && !self.pomodoro.paused
+            && self.last_pomo_ui_refresh.elapsed() >= Duration::from_secs(1)
+        {
+            self.last_pomo_ui_refresh = Instant::now();
+            if self
+                .settings
+                .as_ref()
+                .is_some_and(|sw| sw.visible && sw.model.active_tab == 1)
+            {
+                self.redraw_settings_panel();
+            }
+        }
+
+        let suppress_interruptions =
+            cfg_now.quiet_mode || eff_hidden || self.pomodoro.is_focusing();
 
         // Poll due reminders & hourly chime every second when idle/not closing
         if self.closing_at.is_none() && self.reminder_poll_last.elapsed() >= Duration::from_secs(1) {
@@ -7634,7 +10058,10 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                 let _ = self
                     .proxy
                     .send_event(UserEvent::PlayActions(parse_dialogue(&msg)));
-            } else if self.config_store.get().hourly_chime && self.playback.steps.is_empty() {
+            } else if cfg_now.hourly_chime
+                && !suppress_interruptions
+                && self.playback.steps.is_empty()
+            {
                 let now_local = Local::now();
                 let key = (now_local.ordinal() as i32, now_local.hour());
                 if now_local.minute() == 0 && self.last_chime_key != Some(key) {
@@ -7645,9 +10072,12 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
             }
         }
 
-        // Auto-talk periodic idle talk
-        let interval = self.config_store.get().auto_talk_interval_sec;
-        if interval > 0 && self.auto_talk_last.elapsed() >= Duration::from_secs(interval) {
+        // Auto-talk periodic idle talk (paused during Quiet Mode, Hidden, or Pomodoro Focus)
+        let interval = cfg_now.auto_talk_interval_sec;
+        if interval > 0
+            && !suppress_interruptions
+            && self.auto_talk_last.elapsed() >= Duration::from_secs(interval)
+        {
             self.auto_talk_last = Instant::now();
             if self.playback.steps.is_empty() {
                 let eng = self.engine.clone();
@@ -7690,12 +10120,19 @@ pub fn run(smoke_test: bool) -> Result<(), String> {
 
     let cfg = config_store.get();
     let user_data = default_user_data_dir();
-    let legacy_data = legacy_user_data_dir();
     let mut shell_roots = vec![user_data.join("shells"), bundled_shells];
     let mut balloon_roots = vec![user_data.join("balloons"), bundled_balloons];
-    if legacy_data != user_data && legacy_data.is_dir() {
-        shell_roots.push(legacy_data.join("shells"));
-        balloon_roots.push(legacy_data.join("balloons"));
+    for legacy_data in legacy_user_data_dirs() {
+        if legacy_data != user_data && legacy_data.is_dir() {
+            let ls = legacy_data.join("shells");
+            if !shell_roots.contains(&ls) {
+                shell_roots.push(ls);
+            }
+            let lb = legacy_data.join("balloons");
+            if !balloon_roots.contains(&lb) {
+                balloon_roots.push(lb);
+            }
+        }
     }
 
     let shell_manager = ShellManager::new(shell_roots);
@@ -7711,7 +10148,11 @@ pub fn run(smoke_test: bool) -> Result<(), String> {
     let mut builder = EventLoop::<UserEvent>::with_user_event();
     #[cfg(target_os = "macos")]
     {
-        builder.with_activation_policy(ActivationPolicy::Accessory);
+        builder.with_activation_policy(if cfg.macos_show_in_dock && !smoke_test {
+            ActivationPolicy::Regular
+        } else {
+            ActivationPolicy::Accessory
+        });
     }
     let event_loop = builder
         .build()
@@ -7753,6 +10194,8 @@ pub fn run(smoke_test: bool) -> Result<(), String> {
         kero_balloon: None,
         communicate: None,
         menu: None,
+        settings: None,
+        expanded_menu_section: None,
         playback: PlaybackQueue::new(),
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         tray: None,
@@ -7773,6 +10216,14 @@ pub fn run(smoke_test: bool) -> Result<(), String> {
         reminder_poll_last: Instant::now(),
         closing_at: None,
         initialized: false,
+        characters_hidden_by_user: false,
+        hidden_by_fullscreen: false,
+        dock_left_edge: false,
+        pomodoro: crate::accessory_utils::PomodoroTimer::new(cfg.pomodoro_preset_idx),
+        backlog: crate::accessory_utils::DialogueBacklog::default(),
+        battery_status: crate::accessory_utils::BatteryStatus::default(),
+        low_battery_notified: false,
+        last_pomo_ui_refresh: Instant::now(),
     };
 
     event_loop
@@ -7780,6 +10231,7 @@ pub fn run(smoke_test: bool) -> Result<(), String> {
         .map_err(|e| format!("GUI 이벤트 루프 오류: {e}"))?;
 
     crate::companion_extras::stop_managed_tts_engine();
+    crate::companion_extras::stop_managed_ollama_engine();
 
     if smoke_test && !*smoke_passed.lock().expect("smoke mutex poisoned") {
         return Err("스모크 테스트가 통과되지 않았습니다.".to_string());

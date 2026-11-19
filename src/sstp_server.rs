@@ -47,6 +47,15 @@ pub trait ServerBackend: Send + Sync + 'static {
     fn on_configure_voice(&self, _req: VoiceConfigReq) -> Result<Value, String> {
         Err("voice configuration not supported".to_string())
     }
+    fn get_settings(&self) -> Value {
+        json!({"error": "settings configuration not supported"})
+    }
+    fn get_backlog(&self) -> Value {
+        json!({ "count": 0, "entries": [] })
+    }
+    fn on_update_settings(&self, _req: SettingsPatchReq) -> Result<Value, String> {
+        Err("settings configuration not supported".to_string())
+    }
 }
 
 #[derive(Clone)]
@@ -97,6 +106,106 @@ pub struct VoiceConfigReq {
     pub clear_kero_speaker: bool,
     pub kero_voice_archetype: Option<String>,
     pub install_aivm_uuid: Option<String>,
+}
+
+/// JSON payload for reading/updating skin opacity, scale, and OS convenience settings.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SettingsPatchReq {
+    pub skin_opacity: Option<f32>,
+    pub balloon_opacity: Option<f32>,
+    pub character_scale: Option<f32>,
+    pub opaque_on_hover: Option<bool>,
+    pub eye_tracking: Option<bool>,
+    pub lock_position: Option<bool>,
+    pub snap_to_bottom: Option<bool>,
+    pub click_through_mode: Option<bool>,
+    pub show_kero: Option<bool>,
+    pub always_on_top: Option<bool>,
+    pub live2d_motion: Option<bool>,
+    pub hourly_chime: Option<bool>,
+    pub auto_talk_interval_sec: Option<u64>,
+    pub interest_news_weight: Option<f32>,
+    pub interests: Option<Vec<String>>,
+    #[serde(default)]
+    pub clear_interests: bool,
+    pub ui_language: Option<String>,
+    pub quiet_mode: Option<bool>,
+    pub auto_hide_on_fullscreen: Option<bool>,
+    pub characters_hidden: Option<bool>,
+    pub auto_start_at_login: Option<bool>,
+    pub power_save_mode: Option<String>,
+    pub low_battery_alert: Option<bool>,
+    pub pomodoro_preset_idx: Option<usize>,
+    pub pomodoro_action: Option<String>,
+    pub macos_accept_first_mouse: Option<bool>,
+    pub macos_window_shadow: Option<bool>,
+    pub macos_show_in_dock: Option<bool>,
+    pub windows_skip_taskbar: Option<bool>,
+    pub windows_undecorated_shadow: Option<bool>,
+    pub linux_prefer_x11: Option<bool>,
+    pub linux_respect_workarea: Option<bool>,
+    #[serde(default)]
+    pub reset_defaults: bool,
+}
+
+pub fn validate_settings_patch(req: &SettingsPatchReq) -> Result<(), String> {
+    if let Some(v) = req.skin_opacity {
+        if !v.is_finite() || !(0.15..=1.0).contains(&v) {
+            return Err("Invalid skin_opacity: must be finite and within 0.15..=1.0".to_string());
+        }
+    }
+    if let Some(v) = req.balloon_opacity {
+        if !v.is_finite() || !(0.25..=1.0).contains(&v) {
+            return Err("Invalid balloon_opacity: must be finite and within 0.25..=1.0".to_string());
+        }
+    }
+    if let Some(v) = req.character_scale {
+        if !v.is_finite() || !(0.50..=1.50).contains(&v) {
+            return Err("Invalid character_scale: must be finite and within 0.50..=1.50".to_string());
+        }
+    }
+    if let Some(v) = req.auto_talk_interval_sec {
+        if v != 0 && !(30..=1800).contains(&v) {
+            return Err(
+                "Invalid auto_talk_interval_sec: must be 0 (OFF) or within 30..=1800".to_string(),
+            );
+        }
+    }
+    if let Some(v) = req.interest_news_weight {
+        if !v.is_finite() || !(0.0..=0.80).contains(&v) {
+            return Err(
+                "Invalid interest_news_weight: must be finite and within 0.0..=0.80".to_string(),
+            );
+        }
+    }
+    if let Some(ref lang) = req.ui_language {
+        if !crate::i18n::is_valid_ui_language_setting(lang) {
+            return Err("Invalid ui_language: must be one of auto, ja, ko, en".to_string());
+        }
+    }
+    if let Some(ref ps) = req.power_save_mode {
+        if !crate::accessory_utils::is_valid_power_save_mode(ps) {
+            return Err("Invalid power_save_mode: must be one of auto, on, off".to_string());
+        }
+    }
+    if let Some(idx) = req.pomodoro_preset_idx {
+        if idx >= crate::accessory_utils::POMODORO_PRESETS.len() {
+            return Err(format!(
+                "Invalid pomodoro_preset_idx: must be 0..{}",
+                crate::accessory_utils::POMODORO_PRESETS.len() - 1
+            ));
+        }
+    }
+    if let Some(ref act) = req.pomodoro_action {
+        let low = act.trim().to_ascii_lowercase();
+        if !matches!(low.as_str(), "start" | "pause" | "toggle" | "stop" | "skip") {
+            return Err(
+                "Invalid pomodoro_action: must be one of start, pause, toggle, stop, skip"
+                    .to_string(),
+            );
+        }
+    }
+    Ok(())
 }
 
 async fn handle_health(State(st): State<AppState>) -> Json<Value> {
@@ -288,6 +397,64 @@ async fn handle_post_voice(
     }
 }
 
+async fn handle_get_settings(State(st): State<AppState>) -> Json<Value> {
+    let b = st.backend.clone();
+    let mut obj = tokio::task::spawn_blocking(move || b.get_settings())
+        .await
+        .unwrap_or_else(|_| json!({}));
+    if let Some(map) = obj.as_object_mut() {
+        map.insert("ok".to_string(), json!(true));
+    }
+    Json(obj)
+}
+
+async fn handle_get_backlog(State(st): State<AppState>) -> Json<Value> {
+    let b = st.backend.clone();
+    let mut obj = tokio::task::spawn_blocking(move || b.get_backlog())
+        .await
+        .unwrap_or_else(|_| json!({ "count": 0, "entries": [] }));
+    if let Some(map) = obj.as_object_mut() {
+        map.insert("ok".to_string(), json!(true));
+    }
+    Json(obj)
+}
+
+async fn handle_post_settings(
+    State(st): State<AppState>,
+    Json(req): Json<SettingsPatchReq>,
+) -> Response {
+    if let Err(err) = validate_settings_patch(&req) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"ok": false, "error": err})),
+        )
+            .into_response();
+    }
+    let b = st.backend.clone();
+    let res = tokio::task::spawn_blocking(move || b.on_update_settings(req)).await;
+    match res {
+        Ok(Ok(mut val)) => {
+            if let Some(m) = val.as_object_mut() {
+                m.insert("ok".to_string(), json!(true));
+            }
+            (StatusCode::OK, Json(val)).into_response()
+        }
+        Ok(Err(e)) => {
+            let status = if e.contains("Invalid") || e.contains("range") || e.contains("不正") {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (status, Json(json!({"ok": false, "error": e}))).into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"ok": false, "error": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
 async fn handle_http_sstp(State(st): State<AppState>, body: String) -> Response {
     let (_, script) = parse_sstp_text(&body);
     if script.is_empty() {
@@ -387,6 +554,8 @@ pub fn start_dual_server(
                     .route("/api/skins", get(handle_skins))
                     .route("/api/providers", get(handle_providers))
                     .route("/api/voices", get(handle_get_voices))
+                    .route("/api/backlog", get(handle_get_backlog))
+                    .route("/api/settings", get(handle_get_settings).post(handle_post_settings))
                     .route("/api/speak", post(handle_speak))
                     .route("/api/chat", post(handle_chat))
                     .route("/api/event", post(handle_event))

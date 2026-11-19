@@ -216,6 +216,11 @@ fn fullwidth_sakura_re() -> &'static Regex {
     })
 }
 
+fn escaped_bracket_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"\\([()（）\[\]【】])").unwrap())
+}
+
 fn speaker_tag_prefix_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
@@ -374,10 +379,11 @@ pub fn normalize_sakura_script(text: &str) -> String {
     let halfwidth = fullwidth_sakura_re().replace_all(&unescaped, |caps: &regex::Captures| {
         format!("\\{}", &caps[1])
     });
+    let unescaped_brackets = escaped_bracket_re().replace_all(&halfwidth, "$1");
 
     // Strip speaker prefixes such as "さくら(\0): " or "\nうにゅう(\1): " safely without lookbehind.
-    let mut out = String::with_capacity(halfwidth.len());
-    for (idx, line) in halfwidth.split('\n').enumerate() {
+    let mut out = String::with_capacity(unescaped_brackets.len());
+    for (idx, line) in unescaped_brackets.split('\n').enumerate() {
         if idx > 0 {
             out.push('\n');
         }
@@ -1147,5 +1153,27 @@ mod tests {
             .map(|a| a.text.as_str())
             .collect();
         assert_eq!(t5, "(macOS) 100% Safe Rust だよ（笑）");
+
+        let a6 = parse_dialogue(r"\0\(照れ\) あ、ちょっと…！\e");
+        assert!(a6
+            .iter()
+            .any(|a| a.kind == ActionKind::Surface && a.scope == Scope::Sakura && a.surface_id == 1));
+        let t6: String = a6
+            .iter()
+            .filter(|a| a.kind == ActionKind::Text && a.scope == Scope::Sakura)
+            .map(|a| a.text.as_str())
+            .collect();
+        assert_eq!(t6, "あ、ちょっと…！");
+
+        let a7 = parse_dialogue(r"\0\（困り/照れ\） \[驚き\]ほんと！？ \(macOS\)\e");
+        assert!(a7
+            .iter()
+            .any(|a| a.kind == ActionKind::Surface && a.scope == Scope::Sakura && a.surface_id == 1));
+        let t7: String = a7
+            .iter()
+            .filter(|a| a.kind == ActionKind::Text && a.scope == Scope::Sakura)
+            .map(|a| a.text.as_str())
+            .collect();
+        assert_eq!(t7, "ほんと！？ (macOS)");
     }
 }

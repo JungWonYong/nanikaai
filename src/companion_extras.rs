@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -13,9 +13,11 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::agent_engine::wrap_untrusted_data;
-use crate::builtin_tools::{is_sensitive_path, validate_public_url};
-use crate::config_store::user_home_dir;
+use crate::agent_engine::{
+    assert_allowed_model, is_forbidden_model, wrap_untrusted_data, PREFERRED_MODELS,
+};
+use crate::builtin_tools::{is_sensitive_path, query_ram_gb, validate_public_url};
+use crate::config_store::{default_user_data_dir, user_home_dir};
 use crate::dialogue_parser::{parse_dialogue, ActionKind, Scope};
 
 pub const GITHUB_RELEASES_LATEST_API: &str =
@@ -1778,7 +1780,7 @@ fn extract_shortcut_url(ext: &str, text: &str) -> Option<String> {
 fn read_prefix_utf8(path: &Path, max_bytes: u64) -> Result<(String, bool), String> {
     let mut f = File::open(path).map_err(|e| format!("読み込みに失敗しました: {e}"))?;
     let mut buf = Vec::new();
-    f.by_ref()
+    std::io::Read::by_ref(&mut f)
         .take(max_bytes + 1)
         .read_to_end(&mut buf)
         .map_err(|e| format!("読み込みに失敗しました: {e}"))?;
@@ -1944,6 +1946,613 @@ pub fn inspect_dropped_path(path: &Path) -> Result<DroppedPayload, String> {
 /// Normalize a temp path helper if ever needed by tests.
 pub fn sanitize_dropped_preview_path(p: &Path) -> PathBuf {
     p.file_name().map(PathBuf::from).unwrap_or_default()
+}
+
+fn managed_ollama_process() -> &'static Mutex<Option<Child>> {
+    static CHILD: OnceLock<Mutex<Option<Child>>> = OnceLock::new();
+    CHILD.get_or_init(|| Mutex::new(None))
+}
+
+static LOCAL_AI_SETUP_RUNNING: AtomicBool = AtomicBool::new(false);
+
+struct LocalAiSetupGuard;
+
+impl Drop for LocalAiSetupGuard {
+    fn drop(&mut self) {
+        LOCAL_AI_SETUP_RUNNING.store(false, AtomicOrdering::Release);
+    }
+}
+
+/// Returns whether a 1-click local Ollama setup task is currently running.
+pub fn is_local_ai_setup_running() -> bool {
+    LOCAL_AI_SETUP_RUNNING.load(AtomicOrdering::Acquire)
+}
+
+/// Stop any local Ollama serve daemon spawned by NanikaAi during the current session.
+pub fn stop_managed_ollama_engine() {
+    if let Ok(mut guard) = managed_ollama_process().lock() {
+        if let Some(mut child) = guard.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// Recommend safe lightweight free local Ollama models ordered best-first for the detected system RAM.
+pub fn recommend_local_ollama_candidates(ram_total_gb: f64) -> Vec<&'static str> {
+    let raw = if ram_total_gb > 0.1 && ram_total_gb < 12.0 {
+        vec!["gemma4:e2b", "llama3.2:3b"]
+    } else if ram_total_gb >= 12.0 && ram_total_gb < 28.0 {
+        vec!["gemma4:e4b", "llama3.2:3b"]
+    } else if ram_total_gb >= 28.0 {
+        vec!["gemma4:e4b", "llama3.1:8b", "llama3.2:3b"]
+    } else {
+        vec!["llama3.2:3b", "gemma4:e2b"]
+    };
+    raw.into_iter()
+        .filter(|m| assert_allowed_model(m).is_ok())
+        .collect()
+}
+
+/// Format a concise user-facing hardware recommendation hint for Settings Tab 3 (cached).
+pub fn recommended_local_ai_summary() -> String {
+    static SUMMARY: OnceLock<String> = OnceLock::new();
+    SUMMARY
+        .get_or_init(|| {
+            let (ram_gb, _) = query_ram_gb();
+            let cands = recommend_local_ollama_candidates(ram_gb);
+            let primary = cands.first().copied().unwrap_or("gemma4:e4b");
+            let alt = cands.get(1).copied().unwrap_or("llama3.2:3b");
+            if ram_gb > 0.1 {
+                format!("RAM {:.0}GB → {primary} / {alt}", ram_gb)
+            } else {
+                format!("標準軽量構成 → {primary} / {alt}")
+            }
+        })
+        .clone()
+}
+
+fn find_in_path(bin: &str) -> Option<PathBuf> {
+    let path_env = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_env) {
+        let p = dir.join(bin);
+        if p.is_file() {
+            return Some(p);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let exe = dir.join(format!("{bin}.exe"));
+            if exe.is_file() {
+                return Some(exe);
+            }
+        }
+    }
+    None
+}
+
+/// Locate an installed `ollama` binary on macOS, Windows, or Linux.
+pub fn discover_ollama_binary() -> Option<PathBuf> {
+    if let Some(p) = find_in_path("ollama") {
+        return Some(p);
+    }
+    let home = user_home_dir();
+    #[cfg(target_os = "macos")]
+    let candidates = vec![
+        PathBuf::from("/opt/homebrew/bin/ollama"),
+        PathBuf::from("/usr/local/bin/ollama"),
+        PathBuf::from("/Applications/Ollama.app/Contents/Resources/ollama"),
+        home.join("Applications/Ollama.app/Contents/Resources/ollama"),
+    ];
+    #[cfg(target_os = "windows")]
+    let mut candidates = Vec::new();
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            candidates.push(PathBuf::from(local).join(r"Programs\Ollama\ollama.exe"));
+        }
+        if let Some(pf) = std::env::var_os("PROGRAMFILES") {
+            candidates.push(PathBuf::from(pf).join(r"Ollama\ollama.exe"));
+        }
+        candidates.push(home.join(r"AppData\Local\Programs\Ollama\ollama.exe"));
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let candidates = vec![
+        PathBuf::from("/usr/local/bin/ollama"),
+        PathBuf::from("/usr/bin/ollama"),
+        PathBuf::from("/snap/bin/ollama"),
+        home.join(".local/bin/ollama"),
+    ];
+    candidates.into_iter().find(|p| p.is_file())
+}
+
+#[cfg(target_os = "macos")]
+fn discover_ollama_macos_app() -> Option<PathBuf> {
+    let home = user_home_dir();
+    [
+        PathBuf::from("/Applications/Ollama.app"),
+        home.join("Applications/Ollama.app"),
+    ]
+    .into_iter()
+    .find(|p| p.is_dir())
+}
+
+fn ollama_endpoint_tags(base: &str, timeout_ms: u64) -> Option<Vec<String>> {
+    let clean = base.trim().trim_end_matches('/');
+    let client = Client::builder()
+        .connect_timeout(Duration::from_millis(timeout_ms))
+        .timeout(Duration::from_millis(timeout_ms))
+        .build()
+        .ok()?;
+    let resp = client.get(format!("{clean}/api/tags")).send().ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let val: serde_json::Value = resp.json().ok()?;
+    let models = val
+        .get("models")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m.get("name").and_then(|s| s.as_str()))
+                .filter(|n| !is_forbidden_model(n))
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Some(models)
+}
+
+#[derive(Debug, Clone)]
+pub struct LocalAiSetupResult {
+    pub installed_ready: bool,
+    pub chosen_model: String,
+    pub ram_gb: f64,
+    pub opened_installer_url: Option<String>,
+    pub summary_script: String,
+}
+
+/// Parse one streaming NDJSON status line returned by Ollama `POST /api/pull`.
+pub fn parse_ollama_pull_progress_line(
+    line: &str,
+) -> Result<Option<(String, Option<u8>, String)>, String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let val: serde_json::Value = match serde_json::from_str(trimmed) {
+        Ok(v) => v,
+        Err(_) => return Ok(None),
+    };
+    if let Some(err) = val.get("error").and_then(|v| v.as_str()) {
+        if !err.trim().is_empty() {
+            return Err(err.trim().to_string());
+        }
+    }
+    let status = val
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("preparing")
+        .trim()
+        .to_string();
+    let completed = val.get("completed").and_then(|v| v.as_u64()).unwrap_or(0);
+    let total = val.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+    if total > 0 && completed <= total {
+        let pct = ((completed as f64 / total as f64) * 100.0)
+            .round()
+            .clamp(0.0, 100.0) as u8;
+        let human = if total >= 1_073_741_824 {
+            format!(
+                "{pct}% ({:.1}/{:.1}GB)",
+                completed as f64 / 1_073_741_824.0,
+                total as f64 / 1_073_741_824.0
+            )
+        } else {
+            format!(
+                "{pct}% ({:.0}/{:.0}MB)",
+                completed as f64 / 1_048_576.0,
+                total as f64 / 1_048_576.0
+            )
+        };
+        Ok(Some((status, Some(pct), human)))
+    } else {
+        Ok(Some((status.clone(), None, status)))
+    }
+}
+
+fn pull_ollama_model_streaming<F>(
+    base: &str,
+    model: &str,
+    on_progress: &mut F,
+) -> Result<(), String>
+where
+    F: FnMut(String),
+{
+    assert_allowed_model(model)?;
+    let clean = base.trim().trim_end_matches('/');
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(4))
+        .timeout(Duration::from_secs(1800))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .post(format!("{clean}/api/pull"))
+        .json(&serde_json::json!({
+            "name": model,
+            "stream": true
+        }))
+        .send()
+        .map_err(|e| format!("Ollama /api/pull 接続失敗: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("Ollama /api/pull HTTP {}", resp.status()));
+    }
+
+    on_progress(format!("⬇️ 無料AI {model} をダウンロード準備中…"));
+    let mut reader = BufReader::new(resp);
+    let mut line = String::new();
+    let mut last_emit = Instant::now() - Duration::from_secs(1);
+    let mut saw_success = false;
+
+    loop {
+        line.clear();
+        let read_bytes = reader
+            .read_line(&mut line)
+            .map_err(|e| format!("ダウンロードストリーム読取エラー: {e}"))?;
+        if read_bytes == 0 {
+            break;
+        }
+        if let Some((status, pct_opt, human)) = parse_ollama_pull_progress_line(&line)? {
+            if status.eq_ignore_ascii_case("success") {
+                saw_success = true;
+            }
+            if last_emit.elapsed() >= Duration::from_millis(350) || pct_opt == Some(100) || saw_success {
+                on_progress(format!("⬇️ {model} 準備中: {human}"));
+                last_emit = Instant::now();
+            }
+        }
+    }
+
+    if let Some(tags) = ollama_endpoint_tags(clean, 1500) {
+        let model_base = model.split(':').next().unwrap_or(model);
+        if tags
+            .iter()
+            .any(|t| t == model || t.starts_with(&format!("{model_base}:")))
+            || (saw_success && !tags.is_empty())
+        {
+            return Ok(());
+        }
+    }
+    if saw_success {
+        Ok(())
+    } else {
+        Err(format!("モデル「{model}」の展開確認ができませんでした。"))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn try_auto_install_ollama_macos<F>(on_progress: &mut F) -> Result<(), String>
+where
+    F: FnMut(String),
+{
+    for brew_path in ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"] {
+        let bp = Path::new(brew_path);
+        if bp.is_file() {
+            on_progress("📦 Homebrew で Ollama を自動導入中…".to_string());
+            let ok_cask = Command::new(bp)
+                .args(["install", "--cask", "ollama"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if ok_cask && (discover_ollama_binary().is_some() || discover_ollama_macos_app().is_some()) {
+                return Ok(());
+            }
+            let ok_formula = Command::new(bp)
+                .args(["install", "ollama"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if ok_formula && (discover_ollama_binary().is_some() || discover_ollama_macos_app().is_some()) {
+                return Ok(());
+            }
+        }
+    }
+
+    let dl_url = "https://ollama.com/download/Ollama-darwin.zip";
+    validate_public_url(dl_url)?;
+    on_progress("⬇️ Ollama for macOS を公式サーバーから取得中…".to_string());
+
+    let cache_dir = default_user_data_dir().join("cache");
+    fs::create_dir_all(&cache_dir).map_err(|e| format!("キャッシュ作成失敗: {e}"))?;
+    let zip_path = cache_dir.join("Ollama-darwin.zip");
+    let apps_dir = user_home_dir().join("Applications");
+    let _ = fs::create_dir_all(&apps_dir);
+
+    let dl_res = (|| -> Result<(), String> {
+        let client = Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(600))
+            .build()
+            .map_err(|e| e.to_string())?;
+        let mut resp = client
+            .get(dl_url)
+            .send()
+            .map_err(|e| format!("Ollama ダウンロード失敗: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("Ollama ダウンロード HTTP {}", resp.status()));
+        }
+        let total = resp.content_length().unwrap_or(0);
+        let mut f = File::create(&zip_path).map_err(|e| format!("一時ZIP作成失敗: {e}"))?;
+        let mut buf = [0u8; 65536];
+        let mut got = 0u64;
+        let mut last_emit = Instant::now() - Duration::from_secs(1);
+        loop {
+            let n = resp
+                .read(&mut buf)
+                .map_err(|e| format!("ダウンロード読取失敗: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            f.write_all(&buf[..n])
+                .map_err(|e| format!("一時ZIP書込失敗: {e}"))?;
+            got += n as u64;
+            if last_emit.elapsed() >= Duration::from_millis(350) {
+                if total > 0 {
+                    let pct = ((got as f64 / total as f64) * 100.0).round().clamp(0.0, 100.0);
+                    on_progress(format!(
+                        "⬇️ Ollama 本体取得中… {pct:.0}% ({:.0}/{:.0}MB)",
+                        got as f64 / 1_048_576.0,
+                        total as f64 / 1_048_576.0
+                    ));
+                } else {
+                    on_progress(format!(
+                        "⬇️ Ollama 本体取得中… {:.0}MB",
+                        got as f64 / 1_048_576.0
+                    ));
+                }
+                last_emit = Instant::now();
+            }
+        }
+        drop(f);
+        on_progress("📂 ~/Applications へ Ollama.app を展開中…".to_string());
+        let ok = Command::new("ditto")
+            .args(["-x", "-k"])
+            .arg(&zip_path)
+            .arg(&apps_dir)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !ok {
+            return Err("Ollama-darwin.zip の展開に失敗しました。".to_string());
+        }
+        Ok(())
+    })();
+
+    let _ = fs::remove_file(&zip_path);
+    dl_res
+}
+
+fn ensure_ollama_daemon_running<F>(base: &str, on_progress: &mut F) -> Result<(), String>
+where
+    F: FnMut(String),
+{
+    if ollama_endpoint_tags(base, 800).is_some() {
+        return Ok(());
+    }
+    on_progress("🚀 ローカル Ollama エンジンを起動中…".to_string());
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(app_path) = discover_ollama_macos_app() {
+            let _ = Command::new("open")
+                .args(["-g", "-a"])
+                .arg(&app_path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
+            let started = Instant::now();
+            while started.elapsed() < Duration::from_secs(6) {
+                if ollama_endpoint_tags(base, 500).is_some() {
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(350));
+            }
+        }
+    }
+
+    let Some(bin) = discover_ollama_binary() else {
+        return Err("Ollama 実行ファイルが見つかりませんでした。".to_string());
+    };
+    let mut cmd = Command::new(&bin);
+    cmd.arg("serve")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    if let Ok(child) = cmd.spawn() {
+        if let Ok(mut guard) = managed_ollama_process().lock() {
+            *guard = Some(child);
+        }
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(12) {
+            if ollama_endpoint_tags(base, 500).is_some() {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(350));
+        }
+    }
+    if ollama_endpoint_tags(base, 800).is_some() {
+        Ok(())
+    } else {
+        Err("Ollama サービスの起動がタイムアウトしました。".to_string())
+    }
+}
+
+/// Prepare local Ollama (install/start if possible, or open official installer) and pull a
+/// lightweight safe free model matched to the machine's physical RAM.
+pub fn prepare_local_ollama_blocking<F>(
+    endpoint_url: &str,
+    mut on_progress: F,
+) -> Result<LocalAiSetupResult, String>
+where
+    F: FnMut(String),
+{
+    if LOCAL_AI_SETUP_RUNNING
+        .compare_exchange(false, true, AtomicOrdering::AcqRel, AtomicOrdering::Acquire)
+        .is_err()
+    {
+        return Err("すでに無料ローカルAIの自動セットアップが進行中です。".to_string());
+    }
+    let _guard = LocalAiSetupGuard;
+
+    let clean_base = if endpoint_url.trim().is_empty() {
+        "http://127.0.0.1:11434"
+    } else {
+        endpoint_url.trim().trim_end_matches('/')
+    };
+    let (ram_gb, _) = query_ram_gb();
+    let ram_label = if ram_gb > 0.1 {
+        format!("{:.0}GB", ram_gb)
+    } else {
+        "標準".to_string()
+    };
+    on_progress(format!("🔍 PCメモリ ({ram_label}) と Ollama 状態を確認中…"));
+
+    if ollama_endpoint_tags(clean_base, 800).is_none() {
+        let mut has_local = discover_ollama_binary().is_some();
+        #[cfg(target_os = "macos")]
+        {
+            has_local = has_local || discover_ollama_macos_app().is_some();
+        }
+        if !has_local {
+            #[cfg(target_os = "macos")]
+            {
+                if try_auto_install_ollama_macos(&mut on_progress).is_err() {
+                    let url = open_validated_browser_url("https://ollama.com/download", false)
+                        .unwrap_or_else(|_| "https://ollama.com/download".to_string());
+                    return Ok(LocalAiSetupResult {
+                        installed_ready: false,
+                        chosen_model: String::new(),
+                        ram_gb,
+                        opened_installer_url: Some(url.clone()),
+                        summary_script: format!(
+                            "\\0\\s[3]Ollama 本体のダウンロードページを開いたよ！（{_u}）\\nインストールして起動したあと、下のボタンでもう一度モデル自動取得を押してね。\\n\\q[🔄 インストール後に再試行する,__setup_local_ai__]\\1\\s[10]あと1クリックで無料AIモデルまで自動で入るで！\\e",
+                            _u = url
+                        ),
+                    });
+                }
+            }
+            #[cfg(target_os = "windows")]
+            {
+                on_progress("📦 winget で Ollama を自動導入中…".to_string());
+                let mut wcmd = Command::new("winget");
+                wcmd.args([
+                    "install",
+                    "-e",
+                    "--id",
+                    "Ollama.Ollama",
+                    "--accept-package-agreements",
+                    "--accept-source-agreements",
+                    "--silent",
+                ])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+                {
+                    use std::os::windows::process::CommandExt;
+                    wcmd.creation_flags(0x0800_0000);
+                }
+                let _ = wcmd.status();
+                if discover_ollama_binary().is_none() {
+                    let url = open_validated_browser_url("https://ollama.com/download/windows", false)
+                        .unwrap_or_else(|_| "https://ollama.com/download/windows".to_string());
+                    return Ok(LocalAiSetupResult {
+                        installed_ready: false,
+                        chosen_model: String::new(),
+                        ram_gb,
+                        opened_installer_url: Some(url.clone()),
+                        summary_script: format!(
+                            "\\0\\s[3]Windows 版 Ollama の公式ダウンロードページを開いたよ！({url})\\n導入が終わったら下のボタンで無料軽量モデルを自動取得できるよ。\\n\\q[🔄 インストール後に再試行する,__setup_local_ai__]\\1\\s[10]入れてから押せば自動接続やで！\\e"
+                        ),
+                    });
+                }
+            }
+            #[cfg(all(unix, not(target_os = "macos")))]
+            {
+                let url = open_validated_browser_url("https://ollama.com/download/linux", false)
+                    .unwrap_or_else(|_| "https://ollama.com/download/linux".to_string());
+                return Ok(LocalAiSetupResult {
+                    installed_ready: false,
+                    chosen_model: String::new(),
+                    ram_gb,
+                    opened_installer_url: Some(url.clone()),
+                    summary_script: format!(
+                        "\\0\\s[3]Linux 用 Ollama 導入ガイドを開いたよ！({url})\\nターミナルで公式コマンド実行後、下のボタンで推奨モデル（{cand}）を自動取得できるよ。\\n\\q[🔄 Ollama起動後にモデル自動取得,__setup_local_ai__]\\1\\s[10]待ってるで！\\e",
+                        cand = recommend_local_ollama_candidates(ram_gb)
+                            .first()
+                            .copied()
+                            .unwrap_or("gemma4:e2b")
+                    ),
+                });
+            }
+        }
+        ensure_ollama_daemon_running(clean_base, &mut on_progress)?;
+    }
+
+    let existing_tags = ollama_endpoint_tags(clean_base, 1200).unwrap_or_default();
+    for &pref in PREFERRED_MODELS {
+        let pref_base = pref.split(':').next().unwrap_or(pref);
+        if let Some(found) = existing_tags
+            .iter()
+            .find(|m| m.as_str() == pref || m.starts_with(&format!("{pref_base}:")))
+        {
+            return Ok(LocalAiSetupResult {
+                installed_ready: true,
+                chosen_model: found.clone(),
+                ram_gb,
+                opened_installer_url: None,
+                summary_script: format!(
+                    "\\0\\s[5]導入済みのローカルAI「{found}」（Ollama）に接続したよ！さっそくお話ししようね！\\1\\s[10]待ち時間ゼロで準備OKやで！\\e"
+                ),
+            });
+        }
+    }
+
+    let cands = recommend_local_ollama_candidates(ram_gb);
+    let mut last_err = String::new();
+    for cand in &cands {
+        match pull_ollama_model_streaming(clean_base, cand, &mut on_progress) {
+            Ok(()) => {
+                return Ok(LocalAiSetupResult {
+                    installed_ready: true,
+                    chosen_model: (*cand).to_string(),
+                    ram_gb,
+                    opened_installer_url: None,
+                    summary_script: format!(
+                        "\\0\\s[5]無料ローカルAI（Ollama + {cand}）の自動準備が完了したよ！これからはオフラインでも会話できるね。\\1\\s[10]ダブルクリックや入力バーから何でも話しかけてな！\\e"
+                    ),
+                });
+            }
+            Err(e) => {
+                last_err = e;
+            }
+        }
+    }
+
+    Err(if last_err.is_empty() {
+        "推奨無料AIモデルの自動取得に失敗しました。".to_string()
+    } else {
+        last_err
+    })
 }
 
 #[cfg(test)]
@@ -2112,5 +2721,34 @@ mod tests {
         assert!(!is_valid_aivm_uuid("not-a-uuid"));
         assert!(!is_valid_aivm_uuid("9f36ec0d-8dac-42dc-aff4-149c5f99faa"));
         assert!(!is_valid_aivm_uuid("../etc/passwd"));
+    }
+
+    #[test]
+    fn recommend_local_ollama_candidates_scale_with_ram_and_allow_safe_models() {
+        for ram in [8.0_f64, 16.0, 48.0, 0.0] {
+            let cands = recommend_local_ollama_candidates(ram);
+            assert!(!cands.is_empty(), "RAM={ram} must yield candidates");
+            for m in cands {
+                assert!(assert_allowed_model(m).is_ok(), "restricted model {m}");
+            }
+        }
+        assert_eq!(recommend_local_ollama_candidates(8.0)[0], "gemma4:e2b");
+        assert_eq!(recommend_local_ollama_candidates(16.0)[0], "gemma4:e4b");
+        assert_eq!(recommend_local_ollama_candidates(48.0)[0], "gemma4:e4b");
+        assert_eq!(recommend_local_ollama_candidates(0.0)[0], "llama3.2:3b");
+    }
+
+    #[test]
+    fn parse_ollama_pull_progress_handles_bytes_and_errors() {
+        let p = parse_ollama_pull_progress_line(
+            r#"{"status":"downloading digest","completed":1073741824,"total":2147483648}"#,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(p.1, Some(50));
+        assert!(p.2.contains("50%"));
+
+        let err = parse_ollama_pull_progress_line(r#"{"error":"pull model manifest: file does not exist"}"#);
+        assert!(err.is_err());
     }
 }

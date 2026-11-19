@@ -41,6 +41,16 @@ pub fn user_home_dir() -> PathBuf {
 }
 
 pub fn default_user_data_dir() -> PathBuf {
+    if let Some(override_dir) = std::env::var_os("NANIKAAI_HOME") {
+        let trimmed = override_dir.to_string_lossy().trim().to_string();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    user_home_dir().join(".nanikaai")
+}
+
+pub fn legacy_os_nanikaai_dir() -> PathBuf {
     #[cfg(target_os = "macos")]
     {
         return user_home_dir()
@@ -96,6 +106,40 @@ pub fn legacy_user_data_dir() -> PathBuf {
     }
 }
 
+pub fn legacy_user_data_dirs() -> Vec<PathBuf> {
+    let primary = default_user_data_dir();
+    let mut dirs = Vec::new();
+    for cand in [legacy_os_nanikaai_dir(), legacy_user_data_dir()] {
+        if cand != primary && !dirs.contains(&cand) {
+            dirs.push(cand);
+        }
+    }
+    dirs
+}
+
+/// Lightweight read-only probe used before GUI initialization on Linux to read `linux_prefer_x11`.
+pub fn read_linux_prefer_x11_hint() -> bool {
+    let primary = default_user_data_dir().join("config.json");
+    let target = if primary.is_file() {
+        Some(primary)
+    } else {
+        legacy_user_data_dirs()
+            .into_iter()
+            .map(|d| d.join("config.json"))
+            .find(|p| p.is_file())
+    };
+    let Some(path) = target else {
+        return true;
+    };
+    let Ok(txt) = fs::read_to_string(path) else {
+        return true;
+    };
+    serde_json::from_str::<serde_json::Value>(&txt)
+        .ok()
+        .and_then(|v| v.get("linux_prefer_x11").and_then(|b| b.as_bool()))
+        .unwrap_or(true)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MemoryItem {
     #[serde(default)]
@@ -121,8 +165,17 @@ fn default_model() -> String {
 fn default_true() -> bool {
     true
 }
+pub const MIN_AUTO_TALK_INTERVAL_SEC: u64 = 30;
+pub const MAX_AUTO_TALK_INTERVAL_SEC: u64 = 1800;
+pub const DEFAULT_INTEREST_NEWS_WEIGHT: f32 = 0.50;
+pub const MAX_INTEREST_NEWS_WEIGHT: f32 = 0.80;
+pub const MAX_INTEREST_TOPICS: usize = 16;
+
 fn default_autotalk() -> u64 {
     180
+}
+fn default_interest_news_weight() -> f32 {
+    DEFAULT_INTEREST_NEWS_WEIGHT
 }
 fn default_http_port() -> u16 {
     9821
@@ -146,6 +199,130 @@ fn default_voicevox() -> String {
 
 fn default_tts_engine() -> String {
     "auto".to_string()
+}
+
+fn default_ui_language() -> String {
+    "auto".to_string()
+}
+
+fn default_power_save_mode() -> String {
+    "auto".to_string()
+}
+
+pub fn clamp_pomodoro_preset_idx(v: usize) -> usize {
+    v.min(crate::accessory_utils::POMODORO_PRESETS.len().saturating_sub(1))
+}
+
+fn default_one_f32() -> f32 {
+    1.0
+}
+
+fn round_pct(v: f32) -> f32 {
+    (v * 100.0).round() / 100.0
+}
+
+pub fn clamp_auto_talk_interval_sec(v: u64) -> u64 {
+    if v == 0 {
+        0
+    } else {
+        v.clamp(MIN_AUTO_TALK_INTERVAL_SEC, MAX_AUTO_TALK_INTERVAL_SEC)
+    }
+}
+
+pub fn clamp_interest_news_weight(v: f32) -> f32 {
+    if v.is_finite() {
+        let clamped = v.clamp(0.0, MAX_INTEREST_NEWS_WEIGHT);
+        (clamped * 20.0).round() / 20.0
+    } else {
+        DEFAULT_INTEREST_NEWS_WEIGHT
+    }
+}
+
+/// Sanitize a conversational user interest topic before storing or using it in news queries.
+pub fn sanitize_interest_topic(raw: &str) -> Option<String> {
+    if raw.chars().any(|c| {
+        c.is_control()
+            || matches!(
+                c,
+                '\\' | '/' | '<' | '>' | '@' | ':' | ';' | '|' | '`' | '"' | '\''
+            )
+    }) {
+        return None;
+    }
+    let trim_chars: &[char] = &[
+        ' ', '\t', '\r', '\n', ',', '、', '。', '.', '!', '?', '！', '？', '(', ')', '[', ']',
+        '「', '」', '『', '』', '“', '”',
+    ];
+    let trimmed = raw
+        .trim_matches(trim_chars)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let char_count = trimmed.chars().count();
+    if char_count == 0 || char_count > 32 {
+        return None;
+    }
+    if char_count == 1 {
+        let ch = trimmed.chars().next()?;
+        if !('\u{4e00}'..='\u{9fff}').contains(&ch) {
+            return None;
+        }
+    }
+    if trimmed.chars().all(|c| c.is_ascii_digit() || c.is_whitespace()) {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    const STOPWORDS: &[&str] = &[
+        "너", "나", "우리", "당신", "이거", "그거", "저거", "뭐", "무엇", "아무것", "관심",
+        "관심사", "취미", "뉴스", "소식", "잡담", "これ", "それ", "あれ", "何", "なに", "私",
+        "僕", "俺", "あなた", "君", "興味", "関心", "趣味", "ニュース", "話題", "雑談", "今日",
+        "天気", "you", "me", "it", "this", "that", "what", "anything", "nothing", "news",
+        "interest", "interests", "hobby", "hobbies",
+    ];
+    if STOPWORDS.iter().any(|&sw| trimmed == sw || lower == sw) {
+        return None;
+    }
+    Some(trimmed)
+}
+
+fn sanitize_and_dedup_interests(raw: &[String]) -> Vec<String> {
+    let mut cleaned: Vec<String> = Vec::new();
+    for item in raw {
+        if let Some(topic) = sanitize_interest_topic(item) {
+            if !cleaned.iter().any(|t| t.eq_ignore_ascii_case(&topic)) {
+                cleaned.push(topic);
+            }
+        }
+    }
+    if cleaned.len() > MAX_INTEREST_TOPICS {
+        let drop_n = cleaned.len() - MAX_INTEREST_TOPICS;
+        cleaned.drain(0..drop_n);
+    }
+    cleaned
+}
+
+pub fn clamp_skin_opacity(v: f32) -> f32 {
+    if v.is_finite() {
+        round_pct(v.clamp(0.15, 1.0))
+    } else {
+        1.0
+    }
+}
+
+pub fn clamp_balloon_opacity(v: f32) -> f32 {
+    if v.is_finite() {
+        round_pct(v.clamp(0.25, 1.0))
+    } else {
+        1.0
+    }
+}
+
+pub fn clamp_character_scale(v: f32) -> f32 {
+    if v.is_finite() {
+        round_pct(v.clamp(0.50, 1.50))
+    } else {
+        1.0
+    }
 }
 
 pub fn normalize_tts_engine(raw: &str) -> String {
@@ -188,6 +365,8 @@ pub struct ShellGhostProfile {
     #[serde(default)]
     pub memories: Vec<MemoryItem>,
     #[serde(default)]
+    pub interests: Vec<String>,
+    #[serde(default)]
     pub active_binds: Option<Vec<i32>>,
     #[serde(default)]
     pub sakura_speaker_id: Option<i64>,
@@ -221,6 +400,8 @@ pub struct AgentConfig {
     pub enable_clipboard_tool: bool,
     #[serde(default = "default_autotalk")]
     pub auto_talk_interval_sec: u64,
+    #[serde(default = "default_interest_news_weight")]
+    pub interest_news_weight: f32,
     #[serde(default = "default_http_port")]
     pub http_port: u16,
     #[serde(default = "default_sstp_port")]
@@ -243,6 +424,50 @@ pub struct AgentConfig {
     pub tts_engine: String,
     #[serde(default = "default_voicevox")]
     pub voicevox_url: String,
+    #[serde(default = "default_one_f32")]
+    pub skin_opacity: f32,
+    #[serde(default = "default_one_f32")]
+    pub balloon_opacity: f32,
+    #[serde(default = "default_one_f32")]
+    pub character_scale: f32,
+    #[serde(default = "default_true")]
+    pub opaque_on_hover: bool,
+    #[serde(default = "default_true")]
+    pub eye_tracking: bool,
+    #[serde(default)]
+    pub lock_position: bool,
+    #[serde(default = "default_true")]
+    pub snap_to_bottom: bool,
+    #[serde(default)]
+    pub click_through_mode: bool,
+    #[serde(default = "default_ui_language")]
+    pub ui_language: String,
+    #[serde(default)]
+    pub quiet_mode: bool,
+    #[serde(default = "default_true")]
+    pub auto_hide_on_fullscreen: bool,
+    #[serde(default)]
+    pub auto_start_at_login: bool,
+    #[serde(default = "default_power_save_mode")]
+    pub power_save_mode: String,
+    #[serde(default = "default_true")]
+    pub low_battery_alert: bool,
+    #[serde(default)]
+    pub pomodoro_preset_idx: usize,
+    #[serde(default = "default_true")]
+    pub macos_accept_first_mouse: bool,
+    #[serde(default)]
+    pub macos_window_shadow: bool,
+    #[serde(default)]
+    pub macos_show_in_dock: bool,
+    #[serde(default = "default_true")]
+    pub windows_skip_taskbar: bool,
+    #[serde(default)]
+    pub windows_undecorated_shadow: bool,
+    #[serde(default = "default_true")]
+    pub linux_prefer_x11: bool,
+    #[serde(default = "default_true")]
+    pub linux_respect_workarea: bool,
     #[serde(default = "default_persona")]
     pub system_persona: String,
     #[serde(default)]
@@ -267,6 +492,7 @@ impl Default for AgentConfig {
             enable_tools: true,
             enable_clipboard_tool: true,
             auto_talk_interval_sec: default_autotalk(),
+            interest_news_weight: default_interest_news_weight(),
             http_port: default_http_port(),
             sstp_tcp_port: default_sstp_port(),
             active_shell_id: default_shell_id(),
@@ -278,6 +504,28 @@ impl Default for AgentConfig {
             voice_tts: false,
             tts_engine: default_tts_engine(),
             voicevox_url: default_voicevox(),
+            skin_opacity: 1.0,
+            balloon_opacity: 1.0,
+            character_scale: 1.0,
+            opaque_on_hover: true,
+            eye_tracking: true,
+            lock_position: false,
+            snap_to_bottom: true,
+            click_through_mode: false,
+            ui_language: default_ui_language(),
+            quiet_mode: false,
+            auto_hide_on_fullscreen: true,
+            auto_start_at_login: false,
+            power_save_mode: default_power_save_mode(),
+            low_battery_alert: true,
+            pomodoro_preset_idx: 0,
+            macos_accept_first_mouse: true,
+            macos_window_shadow: false,
+            macos_show_in_dock: false,
+            windows_skip_taskbar: true,
+            windows_undecorated_shadow: false,
+            linux_prefer_x11: true,
+            linux_respect_workarea: true,
             system_persona: default_persona(),
             memories: Vec::new(),
             ghost_profiles: BTreeMap::new(),
@@ -297,6 +545,7 @@ pub struct ConfigPatch {
     pub enable_tools: Option<bool>,
     pub enable_clipboard_tool: Option<bool>,
     pub auto_talk_interval_sec: Option<u64>,
+    pub interest_news_weight: Option<f32>,
     pub active_shell_id: Option<String>,
     pub active_balloon_id: Option<String>,
     pub show_kero: Option<bool>,
@@ -306,6 +555,28 @@ pub struct ConfigPatch {
     pub voice_tts: Option<bool>,
     pub tts_engine: Option<String>,
     pub voicevox_url: Option<String>,
+    pub skin_opacity: Option<f32>,
+    pub balloon_opacity: Option<f32>,
+    pub character_scale: Option<f32>,
+    pub opaque_on_hover: Option<bool>,
+    pub eye_tracking: Option<bool>,
+    pub lock_position: Option<bool>,
+    pub snap_to_bottom: Option<bool>,
+    pub click_through_mode: Option<bool>,
+    pub ui_language: Option<String>,
+    pub quiet_mode: Option<bool>,
+    pub auto_hide_on_fullscreen: Option<bool>,
+    pub auto_start_at_login: Option<bool>,
+    pub power_save_mode: Option<String>,
+    pub low_battery_alert: Option<bool>,
+    pub pomodoro_preset_idx: Option<usize>,
+    pub macos_accept_first_mouse: Option<bool>,
+    pub macos_window_shadow: Option<bool>,
+    pub macos_show_in_dock: Option<bool>,
+    pub windows_skip_taskbar: Option<bool>,
+    pub windows_undecorated_shadow: Option<bool>,
+    pub linux_prefer_x11: Option<bool>,
+    pub linux_respect_workarea: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -317,10 +588,16 @@ pub struct ConfigStore {
 
 impl ConfigStore {
     pub fn new(config_dir: Option<PathBuf>) -> Self {
-        let dir = config_dir.unwrap_or_else(default_user_data_dir);
+        match config_dir {
+            Some(dir) => Self::new_with_migration(dir, &[]),
+            None => Self::new_with_migration(default_user_data_dir(), &legacy_user_data_dirs()),
+        }
+    }
+
+    pub fn new_with_migration(dir: PathBuf, legacy_dirs: &[PathBuf]) -> Self {
         let _ = fs::create_dir_all(&dir);
         let file_path = dir.join("config.json");
-        let cfg = Self::load_from_path(&file_path);
+        let cfg = Self::load_or_migrate(&file_path, legacy_dirs);
         Self {
             config_dir: dir,
             file_path,
@@ -328,8 +605,91 @@ impl ConfigStore {
         }
     }
 
-    fn load_from_path(file_path: &Path) -> AgentConfig {
+    fn normalize_loaded_config(cfg: &mut AgentConfig) -> bool {
+        let mut changed = false;
+        if is_stock_default_persona(&cfg.system_persona) && cfg.system_persona != DEFAULT_PERSONA {
+            cfg.system_persona = DEFAULT_PERSONA.to_string();
+            changed = true;
+        }
+        if !cfg.memories.is_empty() {
+            let shell_id = if cfg.active_shell_id.trim().is_empty() {
+                default_shell_id()
+            } else {
+                cfg.active_shell_id.clone()
+            };
+            let profile = cfg.ghost_profiles.entry(shell_id).or_default();
+            if profile.memories.is_empty() {
+                profile.memories = std::mem::take(&mut cfg.memories);
+            } else {
+                cfg.memories.clear();
+            }
+            changed = true;
+        }
+        let clamped_skin = clamp_skin_opacity(cfg.skin_opacity);
+        if (clamped_skin - cfg.skin_opacity).abs() > 1e-4 {
+            cfg.skin_opacity = clamped_skin;
+            changed = true;
+        }
+        let clamped_bal = clamp_balloon_opacity(cfg.balloon_opacity);
+        if (clamped_bal - cfg.balloon_opacity).abs() > 1e-4 {
+            cfg.balloon_opacity = clamped_bal;
+            changed = true;
+        }
+        let clamped_scale = clamp_character_scale(cfg.character_scale);
+        if (clamped_scale - cfg.character_scale).abs() > 1e-4 {
+            cfg.character_scale = clamped_scale;
+            changed = true;
+        }
+        let clamped_interval = clamp_auto_talk_interval_sec(cfg.auto_talk_interval_sec);
+        if clamped_interval != cfg.auto_talk_interval_sec {
+            cfg.auto_talk_interval_sec = clamped_interval;
+            changed = true;
+        }
+        let clamped_weight = clamp_interest_news_weight(cfg.interest_news_weight);
+        if !cfg.interest_news_weight.is_finite()
+            || (clamped_weight - cfg.interest_news_weight).abs() > 1e-4
+        {
+            cfg.interest_news_weight = clamped_weight;
+            changed = true;
+        }
+        let norm_lang = crate::i18n::normalize_ui_language(&cfg.ui_language);
+        if norm_lang != cfg.ui_language {
+            cfg.ui_language = norm_lang;
+            changed = true;
+        }
+        let norm_ps = crate::accessory_utils::normalize_power_save_mode(&cfg.power_save_mode);
+        if norm_ps != cfg.power_save_mode {
+            cfg.power_save_mode = norm_ps;
+            changed = true;
+        }
+        let clamped_pomo = clamp_pomodoro_preset_idx(cfg.pomodoro_preset_idx);
+        if clamped_pomo != cfg.pomodoro_preset_idx {
+            cfg.pomodoro_preset_idx = clamped_pomo;
+            changed = true;
+        }
+        for profile in cfg.ghost_profiles.values_mut() {
+            let cleaned = sanitize_and_dedup_interests(&profile.interests);
+            if cleaned != profile.interests {
+                profile.interests = cleaned;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn load_or_migrate(file_path: &Path, legacy_dirs: &[PathBuf]) -> AgentConfig {
         if !file_path.is_file() {
+            for leg_dir in legacy_dirs {
+                let leg_file = leg_dir.join("config.json");
+                if leg_file.is_file() {
+                    if let Ok(txt) = fs::read_to_string(&leg_file) {
+                        let mut cfg = serde_json::from_str::<AgentConfig>(&txt).unwrap_or_default();
+                        Self::normalize_loaded_config(&mut cfg);
+                        Self::save_to_path(file_path, &cfg);
+                        return cfg;
+                    }
+                }
+            }
             let defaults = AgentConfig::default();
             Self::save_to_path(file_path, &defaults);
             return defaults;
@@ -337,28 +697,7 @@ impl ConfigStore {
         match fs::read_to_string(file_path) {
             Ok(txt) => {
                 let mut cfg = serde_json::from_str::<AgentConfig>(&txt).unwrap_or_default();
-                let mut changed = false;
-                if is_stock_default_persona(&cfg.system_persona)
-                    && cfg.system_persona != DEFAULT_PERSONA
-                {
-                    cfg.system_persona = DEFAULT_PERSONA.to_string();
-                    changed = true;
-                }
-                if !cfg.memories.is_empty() {
-                    let shell_id = if cfg.active_shell_id.trim().is_empty() {
-                        default_shell_id()
-                    } else {
-                        cfg.active_shell_id.clone()
-                    };
-                    let profile = cfg.ghost_profiles.entry(shell_id).or_default();
-                    if profile.memories.is_empty() {
-                        profile.memories = std::mem::take(&mut cfg.memories);
-                    } else {
-                        cfg.memories.clear();
-                    }
-                    changed = true;
-                }
-                if changed {
+                if Self::normalize_loaded_config(&mut cfg) {
                     Self::save_to_path(file_path, &cfg);
                 }
                 cfg
@@ -404,7 +743,10 @@ impl ConfigStore {
             guard.enable_clipboard_tool = v;
         }
         if let Some(v) = patch.auto_talk_interval_sec {
-            guard.auto_talk_interval_sec = v;
+            guard.auto_talk_interval_sec = clamp_auto_talk_interval_sec(v);
+        }
+        if let Some(v) = patch.interest_news_weight {
+            guard.interest_news_weight = clamp_interest_news_weight(v);
         }
         if let Some(v) = patch.active_shell_id {
             guard.active_shell_id = v;
@@ -433,6 +775,106 @@ impl ConfigStore {
         if let Some(v) = patch.voicevox_url {
             guard.voicevox_url = v;
         }
+        if let Some(v) = patch.skin_opacity {
+            guard.skin_opacity = clamp_skin_opacity(v);
+        }
+        if let Some(v) = patch.balloon_opacity {
+            guard.balloon_opacity = clamp_balloon_opacity(v);
+        }
+        if let Some(v) = patch.character_scale {
+            guard.character_scale = clamp_character_scale(v);
+        }
+        if let Some(v) = patch.opaque_on_hover {
+            guard.opaque_on_hover = v;
+        }
+        if let Some(v) = patch.eye_tracking {
+            guard.eye_tracking = v;
+        }
+        if let Some(v) = patch.lock_position {
+            guard.lock_position = v;
+        }
+        if let Some(v) = patch.snap_to_bottom {
+            guard.snap_to_bottom = v;
+        }
+        if let Some(v) = patch.click_through_mode {
+            guard.click_through_mode = v;
+        }
+        if let Some(v) = patch.ui_language {
+            guard.ui_language = crate::i18n::normalize_ui_language(&v);
+        }
+        if let Some(v) = patch.quiet_mode {
+            guard.quiet_mode = v;
+        }
+        if let Some(v) = patch.auto_hide_on_fullscreen {
+            guard.auto_hide_on_fullscreen = v;
+        }
+        if let Some(v) = patch.auto_start_at_login {
+            guard.auto_start_at_login = v;
+        }
+        if let Some(v) = patch.power_save_mode {
+            guard.power_save_mode = crate::accessory_utils::normalize_power_save_mode(&v);
+        }
+        if let Some(v) = patch.low_battery_alert {
+            guard.low_battery_alert = v;
+        }
+        if let Some(v) = patch.pomodoro_preset_idx {
+            guard.pomodoro_preset_idx = clamp_pomodoro_preset_idx(v);
+        }
+        if let Some(v) = patch.macos_accept_first_mouse {
+            guard.macos_accept_first_mouse = v;
+        }
+        if let Some(v) = patch.macos_window_shadow {
+            guard.macos_window_shadow = v;
+        }
+        if let Some(v) = patch.macos_show_in_dock {
+            guard.macos_show_in_dock = v;
+        }
+        if let Some(v) = patch.windows_skip_taskbar {
+            guard.windows_skip_taskbar = v;
+        }
+        if let Some(v) = patch.windows_undecorated_shadow {
+            guard.windows_undecorated_shadow = v;
+        }
+        if let Some(v) = patch.linux_prefer_x11 {
+            guard.linux_prefer_x11 = v;
+        }
+        if let Some(v) = patch.linux_respect_workarea {
+            guard.linux_respect_workarea = v;
+        }
+        Self::save_to_path(&self.file_path, &guard);
+        guard.clone()
+    }
+
+    pub fn reset_convenience_and_appearance_defaults(&self) -> AgentConfig {
+        let mut guard = self.inner.lock().expect("config mutex poisoned");
+        let defs = AgentConfig::default();
+        guard.show_kero = defs.show_kero;
+        guard.always_on_top = defs.always_on_top;
+        guard.live2d_motion = defs.live2d_motion;
+        guard.hourly_chime = defs.hourly_chime;
+        guard.skin_opacity = defs.skin_opacity;
+        guard.balloon_opacity = defs.balloon_opacity;
+        guard.character_scale = defs.character_scale;
+        guard.auto_talk_interval_sec = defs.auto_talk_interval_sec;
+        guard.interest_news_weight = defs.interest_news_weight;
+        guard.opaque_on_hover = defs.opaque_on_hover;
+        guard.eye_tracking = defs.eye_tracking;
+        guard.lock_position = defs.lock_position;
+        guard.snap_to_bottom = defs.snap_to_bottom;
+        guard.click_through_mode = defs.click_through_mode;
+        guard.ui_language = defs.ui_language;
+        guard.quiet_mode = defs.quiet_mode;
+        guard.auto_hide_on_fullscreen = defs.auto_hide_on_fullscreen;
+        guard.power_save_mode = defs.power_save_mode;
+        guard.low_battery_alert = defs.low_battery_alert;
+        guard.pomodoro_preset_idx = defs.pomodoro_preset_idx;
+        guard.macos_accept_first_mouse = defs.macos_accept_first_mouse;
+        guard.macos_window_shadow = defs.macos_window_shadow;
+        guard.macos_show_in_dock = defs.macos_show_in_dock;
+        guard.windows_skip_taskbar = defs.windows_skip_taskbar;
+        guard.windows_undecorated_shadow = defs.windows_undecorated_shadow;
+        guard.linux_prefer_x11 = defs.linux_prefer_x11;
+        guard.linux_respect_workarea = defs.linux_respect_workarea;
         Self::save_to_path(&self.file_path, &guard);
         guard.clone()
     }
@@ -452,6 +894,111 @@ impl ConfigStore {
             .get(shell_id)
             .map(|p| p.memories.as_slice())
             .unwrap_or(&[])
+    }
+
+    fn resolve_shell_key(cfg: &AgentConfig, shell_id: Option<&str>) -> String {
+        let raw = shell_id.unwrap_or(&cfg.active_shell_id).trim();
+        if raw.is_empty() {
+            default_shell_id()
+        } else {
+            raw.to_string()
+        }
+    }
+
+    pub fn active_interests(&self) -> Vec<String> {
+        let guard = self.inner.lock().expect("config mutex poisoned");
+        let shell_id = Self::resolve_shell_key(&guard, None);
+        guard
+            .ghost_profiles
+            .get(&shell_id)
+            .map(|p| p.interests.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn interests_for_shell(&self, shell_id: &str) -> Vec<String> {
+        let guard = self.inner.lock().expect("config mutex poisoned");
+        let key = Self::resolve_shell_key(&guard, Some(shell_id));
+        guard
+            .ghost_profiles
+            .get(&key)
+            .map(|p| p.interests.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn add_interests(&self, topics: &[String]) -> Vec<String> {
+        let active = self.get().active_shell_id;
+        self.add_interests_for_shell(&active, topics)
+    }
+
+    pub fn add_interests_for_shell(&self, shell_id: &str, topics: &[String]) -> Vec<String> {
+        let mut guard = self.inner.lock().expect("config mutex poisoned");
+        let key = Self::resolve_shell_key(&guard, Some(shell_id));
+        let mut changed = false;
+        let snapshot = {
+            let profile = guard.ghost_profiles.entry(key).or_default();
+            for raw in topics {
+                if let Some(clean) = sanitize_interest_topic(raw) {
+                    profile
+                        .interests
+                        .retain(|existing| !existing.eq_ignore_ascii_case(&clean));
+                    profile.interests.push(clean);
+                    changed = true;
+                }
+            }
+            if profile.interests.len() > MAX_INTEREST_TOPICS {
+                let drop_n = profile.interests.len() - MAX_INTEREST_TOPICS;
+                profile.interests.drain(0..drop_n);
+                changed = true;
+            }
+            profile.interests.clone()
+        };
+        if changed {
+            Self::save_to_path(&self.file_path, &guard);
+        }
+        snapshot
+    }
+
+    pub fn set_interests(&self, topics: &[String]) -> Vec<String> {
+        let mut guard = self.inner.lock().expect("config mutex poisoned");
+        let key = Self::resolve_shell_key(&guard, None);
+        let cleaned = sanitize_and_dedup_interests(topics);
+        let profile = guard.ghost_profiles.entry(key).or_default();
+        profile.interests = cleaned.clone();
+        Self::save_to_path(&self.file_path, &guard);
+        cleaned
+    }
+
+    pub fn remove_interest(&self, topic: &str) -> Vec<String> {
+        let target = topic.trim();
+        let mut guard = self.inner.lock().expect("config mutex poisoned");
+        let key = Self::resolve_shell_key(&guard, None);
+        let mut changed = false;
+        let out = if let Some(profile) = guard.ghost_profiles.get_mut(&key) {
+            let before = profile.interests.len();
+            profile
+                .interests
+                .retain(|existing| !existing.eq_ignore_ascii_case(target));
+            changed = profile.interests.len() != before;
+            profile.interests.clone()
+        } else {
+            Vec::new()
+        };
+        if changed {
+            Self::save_to_path(&self.file_path, &guard);
+        }
+        out
+    }
+
+    pub fn clear_interests(&self) -> Vec<String> {
+        let mut guard = self.inner.lock().expect("config mutex poisoned");
+        let key = Self::resolve_shell_key(&guard, None);
+        if let Some(profile) = guard.ghost_profiles.get_mut(&key) {
+            if !profile.interests.is_empty() {
+                profile.interests.clear();
+                Self::save_to_path(&self.file_path, &guard);
+            }
+        }
+        Vec::new()
     }
 
     pub fn persona_override_for_shell(&self, shell_id: &str) -> Option<String> {
@@ -722,6 +1269,91 @@ mod tests {
         assert_eq!(cfg.provider, "linux-ollama");
         assert_eq!(cfg.remote_endpoint_url, "http://127.0.0.1:21435");
         assert_eq!(reloaded.search_memories("grey").len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn settings_clamping_reset_and_legacy_migration() {
+        assert!((clamp_skin_opacity(0.02) - 0.15).abs() < 1e-4);
+        assert!((clamp_balloon_opacity(0.05) - 0.25).abs() < 1e-4);
+        assert!((clamp_character_scale(2.5) - 1.50).abs() < 1e-4);
+
+        let root = std::env::temp_dir().join(format!("nanikaai_mig_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let leg = root.join("legacy");
+        let target = root.join(".nanikaai");
+        fs::create_dir_all(&leg).unwrap();
+        fs::write(
+            leg.join("config.json"),
+            r#"{"provider":"openai","model":"gpt-4o","api_key":"secret-keep","skin_opacity":0.68}"#,
+        )
+        .unwrap();
+
+        let store = ConfigStore::new_with_migration(target.clone(), std::slice::from_ref(&leg));
+        assert!(target.join("config.json").is_file());
+        let cfg = store.get();
+        assert_eq!(cfg.provider, "openai");
+        assert_eq!(cfg.api_key, "secret-keep");
+        assert!((cfg.skin_opacity - 0.68).abs() < 1e-3);
+
+        store.update(ConfigPatch {
+            lock_position: Some(true),
+            click_through_mode: Some(true),
+            character_scale: Some(1.25),
+            auto_talk_interval_sec: Some(30),
+            interest_news_weight: Some(0.80),
+            ..Default::default()
+        });
+        let saved_interests = store.add_interests(&["Rust".to_string(), "AIエージェント".to_string()]);
+        assert_eq!(saved_interests.len(), 2);
+
+        let reset = store.reset_convenience_and_appearance_defaults();
+        assert!(!reset.lock_position);
+        assert!(!reset.click_through_mode);
+        assert!((reset.skin_opacity - 1.0).abs() < 1e-4);
+        assert!((reset.character_scale - 1.0).abs() < 1e-4);
+        assert_eq!(reset.auto_talk_interval_sec, 180);
+        assert!((reset.interest_news_weight - 0.50).abs() < 1e-4);
+        assert_eq!(store.active_interests(), vec!["Rust", "AIエージェント"]);
+        // Preserves AI credentials & provider
+        assert_eq!(reset.provider, "openai");
+        assert_eq!(reset.api_key, "secret-keep");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn autotalk_interval_weight_clamping_and_interest_storage() {
+        assert_eq!(clamp_auto_talk_interval_sec(0), 0);
+        assert_eq!(clamp_auto_talk_interval_sec(10), 30);
+        assert_eq!(clamp_auto_talk_interval_sec(30), 30);
+        assert_eq!(clamp_auto_talk_interval_sec(9999), 1800);
+
+        assert!((clamp_interest_news_weight(-0.2) - 0.0).abs() < 1e-4);
+        assert!((clamp_interest_news_weight(0.47) - 0.45).abs() < 1e-4);
+        assert!((clamp_interest_news_weight(0.95) - 0.80).abs() < 1e-4);
+        assert!((clamp_interest_news_weight(f32::NAN) - 0.50).abs() < 1e-4);
+
+        assert_eq!(sanitize_interest_topic("  반도체  뉴스?! ").as_deref(), Some("반도체 뉴스"));
+        assert_eq!(sanitize_interest_topic("猫").as_deref(), Some("猫"));
+        assert_eq!(sanitize_interest_topic("a"), None);
+        assert_eq!(sanitize_interest_topic("관심사"), None);
+        assert_eq!(sanitize_interest_topic("https://example.com"), None);
+        assert_eq!(sanitize_interest_topic("/etc/passwd"), None);
+
+        let dir = std::env::temp_dir().join(format!("nanikaai_int_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let store = ConfigStore::new(Some(dir.clone()));
+        store.add_interests(&["宇宙開発".to_string(), "Rust".to_string()]);
+        store.add_interests_for_shell("other_shell", &["料理".to_string()]);
+
+        let reloaded = ConfigStore::new(Some(dir.clone()));
+        assert_eq!(reloaded.active_interests(), vec!["宇宙開発", "Rust"]);
+        assert_eq!(reloaded.interests_for_shell("other_shell"), vec!["料理"]);
+        reloaded.remove_interest("rust");
+        assert_eq!(reloaded.active_interests(), vec!["宇宙開発"]);
+        reloaded.clear_interests();
+        assert!(reloaded.active_interests().is_empty());
+        assert_eq!(reloaded.interests_for_shell("other_shell"), vec!["料理"]);
         let _ = fs::remove_dir_all(&dir);
     }
 }

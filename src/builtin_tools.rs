@@ -1,6 +1,7 @@
 use arboard::Clipboard;
 use chrono::Local;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
@@ -151,6 +152,23 @@ pub fn tools_schema() -> Value {
         {
             "type": "function",
             "function": {
+                "name": "interest_save",
+                "description": "Save, remove, or clear the user's interest topics so periodic idle talk can mix recent related internet news with general headlines.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "topic": {"type": "string", "description": "Single interest topic or comma-separated topics"},
+                        "topics": {"type": "array", "items": {"type": "string"}, "description": "List of interest topics to remember"},
+                        "remove": {"type": "string", "description": "Optional topic to remove"},
+                        "clear": {"type": "boolean", "description": "Set true to clear all saved interests"}
+                    },
+                    "required": []
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "check_ollama_models",
                 "description": "Check reachable Ollama models on the configured endpoint.",
                 "parameters": {"type": "object", "properties": {}, "required": []}
@@ -211,6 +229,8 @@ pub fn is_sensitive_path(target: &Path) -> bool {
             Regex::new(r"(?i)[/\\]\.ssh(?:[/\\]|$)").unwrap(),
             Regex::new(r"(?i)[/\\]\.gnupg(?:[/\\]|$)").unwrap(),
             Regex::new(r"(?i)[/\\]\.aws(?:[/\\]|$)").unwrap(),
+            Regex::new(r"(?i)[/\\]\.nanikaai[/\\]config\.json$").unwrap(),
+            Regex::new(r"(?i)[/\\]nanikaai[/\\]config\.json$").unwrap(),
             Regex::new(r"(?i)credentials[^/\\]*\.json$").unwrap(),
             Regex::new(r"(?i)\.env(?:\.[^/\\]+)?$").unwrap(),
             Regex::new(r"(?i)^/etc/shadow$").unwrap(),
@@ -401,8 +421,14 @@ fn html_unescape(s: &str) -> String {
 }
 
 fn strip_html(raw: &str) -> String {
+    static CDATA_RE: OnceLock<Regex> = OnceLock::new();
     static TAG_RE: OnceLock<Regex> = OnceLock::new();
-    let no_tags = TAG_RE.get_or_init(|| Regex::new(r"<[^>]+>").unwrap()).replace_all(raw, "");
+    let unwrapped = CDATA_RE
+        .get_or_init(|| Regex::new(r"(?is)<!\[CDATA\[(.*?)\]\]>").unwrap())
+        .replace_all(raw, "$1");
+    let no_tags = TAG_RE
+        .get_or_init(|| Regex::new(r"<[^>]+>").unwrap())
+        .replace_all(&unwrapped, "");
     html_unescape(&no_tags)
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -725,6 +751,7 @@ impl BuiltinToolRunner {
             "calculate" => self.calculate(&str_arg("expression")),
             "memory_save" => self.memory_save(&str_arg("title"), &str_arg("content")),
             "memory_search" => self.memory_search(&str_arg("keyword")),
+            "interest_save" => self.interest_save(args),
             "check_ollama_models" => self.check_ollama_models(),
             "set_reminder" => self.set_reminder(args),
             "list_reminders" => self.list_reminders(args),
@@ -1039,6 +1066,56 @@ impl BuiltinToolRunner {
         json!({"ok": true, "count": items.len(), "items": items}).to_string()
     }
 
+    fn interest_save(&self, args: &Value) -> String {
+        if args.get("clear").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let list = self.config_store.clear_interests();
+            return json!({"ok": true, "interests": list}).to_string();
+        }
+        if let Some(rm) = args.get("remove").and_then(|v| v.as_str()) {
+            if !rm.trim().is_empty() {
+                let list = self.config_store.remove_interest(rm);
+                return json!({"ok": true, "interests": list}).to_string();
+            }
+        }
+        let mut to_add: Vec<String> = Vec::new();
+        if let Some(arr) = args.get("topics").and_then(|v| v.as_array()) {
+            for item in arr {
+                if let Some(s) = item.as_str() {
+                    for part in s.split([',', '、', '，']) {
+                        let p = part.trim();
+                        if !p.is_empty() {
+                            to_add.push(p.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(single) = args.get("topic").and_then(|v| v.as_str()) {
+            for part in single.split([',', '、', '，']) {
+                let p = part.trim();
+                if !p.is_empty() {
+                    to_add.push(p.to_string());
+                }
+            }
+        }
+        let list = if to_add.is_empty() {
+            self.config_store.active_interests()
+        } else {
+            self.config_store.add_interests(&to_add)
+        };
+        json!({"ok": true, "interests": list}).to_string()
+    }
+
+    pub fn fetch_recent_news_headlines(
+        &self,
+        query: &str,
+        prefer_lang: &str,
+        max_items: usize,
+    ) -> Vec<NewsHeadline> {
+        let client = http_client(4, false);
+        fetch_google_news_rss_headlines(&client, query, prefer_lang, max_items)
+    }
+
     fn set_reminder(&self, args: &Value) -> String {
         let message = args
             .get("message")
@@ -1111,58 +1188,110 @@ impl BuiltinToolRunner {
     }
 }
 
-fn search_google_news_rss(client: &reqwest::blocking::Client, query: &str) -> Vec<Value> {
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NewsHeadline {
+    pub title: String,
+    pub source: String,
+    pub pub_date: String,
+    pub link: String,
+}
+
+fn select_google_news_locale(query: &str, prefer_lang: &str) -> (&'static str, &'static str, &'static str) {
     let has_ko = query.chars().any(|c| ('\u{ac00}'..='\u{d7a3}').contains(&c));
-    let has_ja = query
+    let has_kana = query
         .chars()
         .any(|c| ('\u{3040}'..='\u{30ff}').contains(&c));
-    let (hl, gl, ceid) = if has_ko {
+    let has_cjk = query
+        .chars()
+        .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c));
+    if has_ko || (prefer_lang.eq_ignore_ascii_case("ko") && !has_kana) {
         ("ko", "KR", "KR:ko")
-    } else if has_ja {
+    } else if has_kana || has_cjk || prefer_lang.eq_ignore_ascii_case("ja") {
         ("ja", "JP", "JP:ja")
     } else {
         ("en-US", "US", "US:en")
-    };
-    let Ok(resp) = client
-        .get("https://news.google.com/rss/search")
-        .query(&[("q", query), ("hl", hl), ("gl", gl), ("ceid", ceid)])
-        .send()
-    else {
-        return Vec::new();
-    };
-    let Ok(xml) = resp.text() else {
-        return Vec::new();
-    };
+    }
+}
 
+/// Parse headlines from a Google News RSS XML feed response.
+pub fn parse_google_news_rss_xml(xml: &str, max_items: usize) -> Vec<NewsHeadline> {
+    if max_items == 0 {
+        return Vec::new();
+    }
     static ITEM_RE: OnceLock<Regex> = OnceLock::new();
+    static TITLE_RE: OnceLock<Regex> = OnceLock::new();
+    static LINK_RE: OnceLock<Regex> = OnceLock::new();
+    static DATE_RE: OnceLock<Regex> = OnceLock::new();
+    static SOURCE_RE: OnceLock<Regex> = OnceLock::new();
+
     let item_re = ITEM_RE.get_or_init(|| Regex::new(r"(?is)<item>(.*?)</item>").unwrap());
-    let extract_tag = |blk: &str, tag: &str| -> String {
-        let pat = format!(r"(?is)<{tag}[^>]*>(.*?)</{tag}>");
-        Regex::new(&pat)
-            .ok()
-            .and_then(|re| re.captures(blk))
+    let title_re = TITLE_RE.get_or_init(|| Regex::new(r"(?is)<title[^>]*>(.*?)</title>").unwrap());
+    let link_re = LINK_RE.get_or_init(|| Regex::new(r"(?is)<link[^>]*>(.*?)</link>").unwrap());
+    let date_re = DATE_RE.get_or_init(|| Regex::new(r"(?is)<pubDate[^>]*>(.*?)</pubDate>").unwrap());
+    let source_re = SOURCE_RE.get_or_init(|| Regex::new(r"(?is)<source[^>]*>(.*?)</source>").unwrap());
+
+    let extract = |re: &Regex, blk: &str| -> String {
+        re.captures(blk)
             .map(|c| strip_html(&c[1]))
             .unwrap_or_default()
     };
 
     item_re
-        .captures_iter(&xml)
-        .take(6)
+        .captures_iter(xml)
         .filter_map(|c| {
             let blk = &c[1];
-            let title = extract_tag(blk, "title");
+            let title = extract(title_re, blk);
             if title.is_empty() {
                 return None;
             }
-            let link = extract_tag(blk, "link");
-            let pub_date = extract_tag(blk, "pubDate");
-            let src = extract_tag(blk, "source");
-            let snippet = [src, pub_date]
+            Some(NewsHeadline {
+                title,
+                source: extract(source_re, blk),
+                pub_date: extract(date_re, blk),
+                link: extract(link_re, blk),
+            })
+        })
+        .take(max_items)
+        .collect()
+}
+
+fn fetch_google_news_rss_headlines(
+    client: &reqwest::blocking::Client,
+    query: &str,
+    prefer_lang: &str,
+    max_items: usize,
+) -> Vec<NewsHeadline> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() || max_items == 0 {
+        return Vec::new();
+    }
+    let (hl, gl, ceid) = select_google_news_locale(trimmed, prefer_lang);
+    let Ok(resp) = client
+        .get("https://news.google.com/rss/search")
+        .query(&[("q", trimmed), ("hl", hl), ("gl", gl), ("ceid", ceid)])
+        .send()
+    else {
+        return Vec::new();
+    };
+    if !resp.status().is_success() {
+        return Vec::new();
+    }
+    let Ok(xml) = resp.text() else {
+        return Vec::new();
+    };
+    parse_google_news_rss_xml(&xml, max_items)
+}
+
+fn search_google_news_rss(client: &reqwest::blocking::Client, query: &str) -> Vec<Value> {
+    fetch_google_news_rss_headlines(client, query, "", 6)
+        .into_iter()
+        .map(|h| {
+            let snippet = [h.source, h.pub_date]
                 .into_iter()
                 .filter(|s| !s.is_empty())
                 .collect::<Vec<_>>()
                 .join(" | ");
-            Some(json!({"title": title, "url": link, "snippet": snippet}))
+            json!({"title": h.title, "url": h.link, "snippet": snippet})
         })
         .collect()
 }
@@ -1343,7 +1472,7 @@ fn fetch_wttr_weather(lat: f64, lon: f64, label: &str) -> Result<Value, String> 
     }))
 }
 
-fn query_ram_gb() -> (f64, f64) {
+pub fn query_ram_gb() -> (f64, f64) {
     #[cfg(target_os = "macos")]
     {
         let total = Command::new("sysctl")
@@ -1396,7 +1525,23 @@ fn query_ram_gb() -> (f64, f64) {
         }
         (0.0, 0.0)
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        let out = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory",
+            ])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u64>().ok())
+            .unwrap_or(0);
+        let total_gb = ((out as f64 / 1_073_741_824.0) * 100.0).round() / 100.0;
+        return (total_gb, 0.0);
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         (0.0, 0.0)
     }

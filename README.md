@@ -19,31 +19,31 @@
 AI エージェントによる自律開発・継続保守で構築された、**100% Safe Rust（`#![forbid(unsafe_code)]`）** 製のマルチ OS 対応 AI デスクトップマスコット基盤（ベースウェア）である。
 macOS・Windows・Linux 環境において、外部ランタイムの導入や OS ネイティブハンドルの `unsafe` 呼び出しを一切行わず、単一ネイティブバイナリとして動作する。
 
-### 🎬 デモ映像（Live2D モーション＆音声読み上げ）
+### 🎬 デモ映像（日本語版 / Live2D モーション＆AivisSpeech 実音声）
 
-[![何か藍 NanikaAi Live2D モーション＆音声デモ](docs/media/nanikaai_intro_preview.gif)](docs/media/nanikaai_intro_demo.mp4)
+https://github.com/user-attachments/assets/f998f5e0-aee3-4114-b922-84622a7aadc8
 
-- ▶️ **[音声付き紹介動画 (`nanikaai_intro_demo.mp4`, 1280×720 / AivisSpeech 音声入り)](docs/media/nanikaai_intro_demo.mp4)** · 🌐 **[専用紹介ページ (`docs/index.html`)](docs/index.html)**
-- さくら（24パーツ）とうにゅう（7パーツ + 40%半透明サングラス）の滑らかな揺れ・リップシンク、および右クリックメニュー最上段 **`[🎤 声色選択]`** から声色を即座に切り替える動作（`まお` → `らせつん` → `コハク`）を実音声付きで収録している。
+- 🌐 **[専用紹介ページ (`GitHub Pages · 日本語/EN/KO 切替`)](https://jungwonyong.github.io/nanikaai/?lang=ja)** · 📥 MP4: **[日本語版 (`nanikaai_intro_ja.mp4`)](docs/media/nanikaai_intro_ja.mp4)** / **[English (`nanikaai_intro_en.mp4`)](docs/media/nanikaai_intro_en.mp4)** / **[한국어 (`nanikaai_intro_ko.mp4`)](docs/media/nanikaai_intro_ko.mp4)**
+- さくら（24パーツ）とうにゅう（7パーツ + 40%半透明サングラス）の滑らかな揺れ・リップシンク、および右クリックメニュー **`[🎤 声色選択]`** から声色を即座に切り替える動作（`まお` → `らせつん` → `コハク`）を日本語 UI＋実音声で収録している（プレイヤー右下の音声アイコンでミュート解除）。
 
 ### 主な特徴
 
 | 領域 | 仕様・実装内容 |
 | :--- | :--- |
-| **Zero `unsafe` ネイティブ GUI・外付け Live2D マルチパーツリグ & Siri 風入力** | `winit 0.30` + `wgpu 24` 透過アルファ合成（既存 `.nar` を無改変のまま外付けサイドカー `live2d.json`＋部位別パーツ PNG で `\0` 24層・`\1` 7層の解剖学的 C1 首・頭部視差・多層髪・衣装/リボン・前足・40%半透明サングラスの独立階層ボーン・減衰バネ・`surface_overrides` 無欠損表情/目パチ/口パク/着せ替え合成を GPU マルチパス描画、サイドカー未同梱シェルは足元固定 WGSL 単層リグへ自動切替、同梱オフライン編集ツール `tools/live2d_studio.html` 搭載）と `cosmic-text 0.12` CJK 文字描画を採用している。文字量連動で自動伸縮し上限超え時はマウスホイールで滑らかにスクロールできる吹き出し、サファイアブルー基調・点滅キャレット・IME 下線・送信/閉じるボタン付きの Siri 風 `Communicate` 入力バー（既定 UI 日・英表記）、スクロール可能な右クリックメニュー（最上段にワンクリック既定スキン復帰および `[🎤 声色選択]` 配置）、OS 別ワークエリア自動接地、トレイ統合を備える。 |
-| **厳格なスコープ分離（`\0` / `\1`）＆スキン連動ゴースト・着せ替え** | Sakura Script の `\0`（メイン側）と `\1`（パートナー側）のサーフェス解決・会話履歴・長期記憶をアクティブなシェルごとに完全分離し、スキン切替と同時にゴーストの人格・記憶・あいさつ（`OnGhostChanged`）および `bindgroup` 着せ替え状態も切り替える。既存の伺か `.nar` / `.zip` アーカイブのドラッグ＆ドロップおよびメニュー導入に対応し、`.png` / `.pna` アルファマスク合成、`seriko.use_self_alpha`, SERIKO `overlayf` / `replace` / `alternativestart` / `bind`, Shift-JIS `descript.txt`・`surfaces.txt` との高い互換性を備える。汎用ファイル／画像／URL ショートカットのドロップ反応（機密パス事前遮断＋`<untrusted_data>` 隔離）、毎時00分の時報・リマインダー・`OnClose` 終了あいさつ、クリック可能な `\_a` リンク・`\_q` 即時表示、導入済み AivisSpeech (`:10101`) / VOICEVOX `vv-engine` (`:50021`) の手動起動不要な自動ヘッドレス音声読み上げ＆ゴースト別声色選択（＋OS TTS フォールバック）、GitHub Releases 更新確認を搭載。 |
-| **クリーンな資産分離（`MIT` + `CC0-1.0`）** | 同梱の既定スキン（`neo_default`、`clean_default`）は本プロジェクトで独自制作した **CC0-1.0** パブリックドメイン資産のみを含む。`\0`（正統派萌えテイストの紺白リボン衣装＋レースフリルリボン靴下＆メリージェーン風女性用パンプス、`330x675 pt` `@2x`）、`\1`（鮮明なペリウィンクルブルー `#94A3FF` の丸もち体型と独立 40% 半透明丸サングラス＋無欠損の表情目元 `@2x`）、半透明パール調グラス吹き出し（`@2x`）で構成する。個人所有のクラシックシェル／バルーンは各 OS のユーザー領域から自動読み込みする。 |
-| **マルチ AI 接続 & SSTP/HTTP 二重サーバー** | ローカル・リモート Ollama（`gemma4` 等）、Gemini CLI/API、Claude CLI/API、ChatGPT Codex、OpenAI 互換先に対応し、中国製 LLM 遮断保護を内蔵する。HTTP JSON（`127.0.0.1:9821`）とクラシック `SSTP/1.4` TCP（`127.0.0.1:9801`）を同時提供する。 |
+| **Zero `unsafe` ネイティブ GUI・外付け Live2D マルチパーツ・設定パネル & Siri 風入力** | `winit 0.30` + `wgpu 24` 透過アルファ合成（既存 `.nar` を無改変のまま外付けサイドカー `live2d.json`＋部位別パーツ PNG で `\0` 24層・`\1` 7層の解剖学的 C1 首・頭部視差・多層髪・衣装/リボン・前足・40%半透明サングラスの独立階層ボーン・減衰バネ・`surface_overrides` 無欠損表情/目パチ/口パク/着せ替え合成を GPU マルチパス描画、サイドカー未同梱シェルは足元固定 WGSL 単層リグへ自動切替、同梱オフライン編集ツール `tools/live2d_studio.html` 搭載）と `cosmic-text 0.12` CJK 文字描画を採用している。文字量連動で自動伸縮し上限超え時はマウスホイールで滑らかにスクロールできる吹き出し、サファイアブルー基調・点滅キャレット・IME 下線・送信/閉じるボタン付きの Siri 風 `Communicate` 入力バー、折りたたみアコーディオン式の簡潔な右クリックメニュー（`Skins`・`Voice`・`AI`・`Tools` インライン展開）＆4 サブメニュー構成トレイ、さらに OS 表示言語への自動追従（未対応言語時は英語表示）および `OS 自動 / 日本語 / 한국어 / English` の即時 UI 言語切替、スキン/吹き出し透明度・倍率・ホバー時不透明・クリック透過・位置固定・OS 別便利設定（macOS/Windows/Linux）を調整できる**ネイティブ設定パネル（`⚙️ 設定パネル · Settings...`）**を備える。 |
+| **厳格なスコープ分離（`\0` / `\1`）＆スキン連動ゴースト・着せ替え・関心ニュース雑談** | Sakura Script の `\0`（メイン側）と `\1`（パートナー側）のサーフェス解決・会話履歴・長期記憶をアクティブなシェルごとに完全分離し、スキン切替と同時にゴーストの人格・記憶・あいさつ（`OnGhostChanged`）および `bindgroup` 着せ替え状態も切り替える。さらに会話からユーザーの興味・関心トピックを自動記憶し、設定パネルのスライダー（`OFF` または最短 `30秒`〜`600秒`）と比重調整（`0%`〜`80%`）に応じて一般ニュース（社会・IT・経済・文化・世界）と関心事の最新 Web ニュースをバランスよく自動雑談する。既存の伺か `.nar` / `.zip` アーカイブのドラッグ＆ドロップおよびメニュー導入に対応し、`.png` / `.pna` アルファマスク合成、`seriko.use_self_alpha`, SERIKO `overlayf` / `replace` / `alternativestart` / `bind`, Shift-JIS `descript.txt`・`surfaces.txt` との高い互換性を備える。汎用ファイル／画像／URL ショートカットのドロップ反応（機密パス事前遮断＋`<untrusted_data>` 隔離）、毎時00分の時報・リマインダー・`OnClose` 終了あいさつ、クリック可能な `\_a` リンク・`\_q` 即時表示、導入済み AivisSpeech (`:10101`) / VOICEVOX `vv-engine` (`:50021`) の手動起動不要な自動ヘッドレス音声読み上げ＆ゴースト別声色選択（＋OS TTS フォールバック）、GitHub Releases 更新確認を搭載。 |
+| **クリーンな資産分離（`MIT` + `CC0-1.0`）** | 同梱の既定スキン（`neo_default`、`clean_default`）は本プロジェクトで独自制作した **CC0-1.0** パブリックドメイン資産のみを含む。`\0`（正統派萌えテイストの紺白リボン衣装＋レースフリルリボン靴下＆メリージェーン風女性用パンプス、`330x675 pt` `@2x`）、`\1`（鮮明なペリウィンクルブルー `#94A3FF` の丸もち体型と独立 40% 半透明丸サングラス＋無欠損の表情目元 `@2x`）、半透明パール調グラス吹き出し（`@2x`）で構成する。個人所有のクラシックシェル／バルーンはホーム直下 `~/.nanikaai/` および旧 OS データ領域から自動読み込みする。 |
+| **マルチ AI 接続 & SSTP/HTTP 二重サーバー・実用デスクトップアクセサリ** | ローカル・リモート Ollama（`gemma4` 等）、Gemini CLI/API、Claude CLI/API、ChatGPT Codex、OpenAI 互換先に対応し、中国製 LLM 遮断保護を内蔵する。HTTP JSON（`127.0.0.1:9821`）とクラシック `SSTP/1.4` TCP（`127.0.0.1:9801`）を同時提供する。さらに、**おやすみモード (DND)・フルスクリーン自動退避・トレイ 1 クリック一時非表示**、集中中の雑談を自動抑止して休憩を案内する**ポモドーロタイマー (`25/5`・`50/10`・`15/3分`)**、過去 30 件を読み返せる**発話バックログ (`GET /api/backlog`)＆最新回答ワンクリックコピー**、および **OS ログイン時自動起動・バッテリー省電力モード (15 FPS)・低バッテリー通知・マルチモニタ / 画面端ワンクリック移動**を備える。 |
 
-### ユーザースキン（`.nar`）保存先
+### 設定ファイル（`~/.nanikaai/config.json`）およびユーザースキン保存先
 
-外部配布 `.nar` / `.zip` スキンをアプリ画面へドラッグ＆ドロップすると、下記ディレクトリへ自動配置される。
+全 OS（macOS / Windows / Linux）共通でホームディレクトリ直下の `~/.nanikaai/` 配下に JSON 設定とユーザースキン・サイドカーを保存する。旧 OS ごとの保存先（`~/Library/Application Support/NanikaAi/`、`%APPDATA%\NanikaAi\`、`~/.config/nanikaai/`）にあった既存の `config.json` は初回起動時に無損失で自動移行され、旧配下の `.nar` スキンも引き続き自動認識される。
 
-| OS | ユーザーデータディレクトリ |
-| :--- | :--- |
-| macOS | `~/Library/Application Support/NanikaAi/` |
-| Windows | `%APPDATA%\NanikaAi\` |
-| Linux | `$XDG_CONFIG_HOME/nanikaai/`（既定 `~/.config/nanikaai/`） |
+| 用途 | 保存パス（全 OS 共通） | 備考 |
+| :--- | :--- | :--- |
+| 設定ファイル | `~/.nanikaai/config.json`（Windows: `%USERPROFILE%\.nanikaai\config.json`） | `NANIKAAI_HOME` 環境変数で上書き可能 |
+| ユーザースキン（`.nar` / `.zip`） | `~/.nanikaai/shells/`・`~/.nanikaai/balloons/` | ウィンドウへのドロップ導入先 |
+| 外付け Live2D サイドカー | `~/.nanikaai/live2d/<shell_id>/` | 同梱パーツより優先読み込み |
 
 ### 導入・インストール（初心者向けクイックスタート）
 
@@ -85,7 +85,7 @@ claude "https://github.com/JungWonYong/nanikaai の最新リリース実行フ�
 | ステップ | 作業内容 |
 | :--- | :--- |
 | **1. アプリ本体を取得・展開** | [GitHub Releases (Latest)](https://github.com/JungWonYong/nanikaai/releases/latest) から OS 別の配布ファイル（`NanikaAi-macos-arm64.zip` / `NanikaAi-windows-x64.zip` / `NanikaAi-linux-x64.tar.gz`）をダウンロードして展開する（macOS 初回起動時に警告が出た場合は `xattr -cr NanikaAi.app` を実行）。 |
-| **2. Ollama と無料モデルを導入** | [Ollama 公式サイト](https://ollama.com/download) から Ollama を導入し、ターミナルで 1 つモデルを取得する（例: 16GB 環境 `ollama pull gemma4:e4b` または `ollama pull llama3.1:8b`、8GB 環境 `ollama pull llama3.2:3b`）。 |
+| **2. Ollama と無料モデルを導入** | **初心者おすすめ**: 先に `NanikaAi` を起動し、初回吹き出しの `[⚡ 無料ローカルAIを1クリック自動準備]`（または右クリック・設定パネル `🤖 AI・保存先` タブ）を押すだけで PC メモリ容量に応じた無料軽量モデル（`gemma4:e2b` / `gemma4:e4b` / `llama3.2:3b` 等）を自動取得できる（手動時は [Ollama 公式サイト](https://ollama.com/download) 導入後に `ollama pull gemma4:e4b` や `ollama pull llama3.2:3b` を実行）。 |
 | **3. 起動して会話開始** | `NanikaAi` を起動すると既定設定のままローカル Ollama（`http://127.0.0.1:11434` / `model: "auto"`）へ自動接続する。さくらをダブルクリックすると `Communicate` 入力バーが開き、そのまま会話できる。 |
 
 <details>
@@ -129,6 +129,7 @@ dist\NanikaAi-win64\nanikaai.exe
 | スキン切替 | `POST http://127.0.0.1:9821/api/skin` | `{"shell": "neo_default", "balloon": "clean_default"}` |
 | AI プロバイダー切替 | `POST http://127.0.0.1:9821/api/provider` | `{"provider": "ollama", "model": "auto"}` |
 | 音声一覧取得 / 音声設定 | `GET /api/voices` ・ `POST /api/voice` | `{"tts_engine": "auto", "kero_voice_archetype": "boy"}` |
+| 設定取得 / 変更・発話履歴 | `GET /api/settings` ・ `POST /api/settings` ・ `GET /api/backlog` | `{"ui_language": "auto", "quiet_mode": false, "pomodoro_action": "start"}` |
 | 一覧取得 | `GET http://127.0.0.1:9821/api/skins` / `/api/providers` | `curl -s http://127.0.0.1:9821/api/providers` |
 | クラシック `SSTP/1.4` | TCP `127.0.0.1:9801` | `SEND SSTP/1.4`（`Charset: UTF-8`, `Script: ...`） |
 
@@ -158,31 +159,31 @@ Named **`何か藍 (NanikaAi)`** by combining **`何か (Nanika)`** — the pred
 An **AI-developed and AI-maintained**, **100% Safe Rust (`#![forbid(unsafe_code)]`)** cross-platform AI desktop mascot baseware.
 It compiles into a single native binary for macOS, Windows, and Linux without external runtime dependencies or any `unsafe` OS handle calls.
 
-### 🎬 Live2D Motion & Voice Demo
+### 🎬 Live2D Motion & Voice Demo (English Edition)
 
-[![NanikaAi Live2D Motion and Voice Demo](docs/media/nanikaai_intro_preview.gif)](docs/media/nanikaai_intro_demo.mp4)
+https://github.com/user-attachments/assets/5fd3e051-e73c-493b-9e04-66531dcb9339
 
-- ▶️ **[Full HD Demo Video with Audio (`nanikaai_intro_demo.mp4`, 1280×720 / AivisSpeech TTS)](docs/media/nanikaai_intro_demo.mp4)** · 🌐 **[Interactive Showcase Page (`docs/index.html`)](docs/index.html)**
-- Demonstrates smooth 24+7 multi-part Live2D sway, RMS-synchronized lip-sync, speech balloons, and switching voices (`まお` → `らせつん` → `コハク`) directly from the top of the right-click context menu.
+- 🌐 **[Interactive Showcase Page (`GitHub Pages · EN/JA/KO`)](https://jungwonyong.github.io/nanikaai/?lang=en)** · 📥 MP4: **[English (`nanikaai_intro_en.mp4`)](docs/media/nanikaai_intro_en.mp4)** / **[日本語 (`nanikaai_intro_ja.mp4`)](docs/media/nanikaai_intro_ja.mp4)** / **[한국어 (`nanikaai_intro_ko.mp4`)](docs/media/nanikaai_intro_ko.mp4)**
+- Demonstrates smooth 24+7 multi-part Live2D sway, RMS-synchronized lip-sync, speech balloons, and live right-click voice switching (`Mao` → `Rasetsun` → `Kohaku`, powered by AivisSpeech TTS) with a full English UI (unmute via the player speaker control).
 
 ### Key Features
 
 | Area | Capabilities |
 | :--- | :--- |
-| **Zero `unsafe` Native GUI, External-Sidecar Multi-Part Live2D Rig & Siri-Style Chat** | Built on `winit 0.30` + `wgpu 24` transparent compositing (external sidecar `live2d.json` + individual part PNGs keep classic `.nar` packages untouched while driving 24 Sakura anatomical & 7 Unyu layers with C1 neck-head-face joints, multi-layer hair/coat-flaps/ribbons, independent damped-spring pendulums, `surface_overrides` unbroken expressions, and 40%-translucent layered sunglasses in 100% Safe Rust multi-pass GPU compositing — gracefully falling back to the single-texture WGSL rig for sidecar-free shells; includes bundled offline rig editor `tools/live2d_studio.html`) and `cosmic-text 0.12` CJK shaping. Features dynamically auto-sizing & scrollable speech balloons, a sapphire Siri-style `Communicate` glass bar with blinking caret, IME preedit underline, Send/Close buttons and Japanese/English default chrome, a scrollable context menu with 1-click default skin restore & `[🎤 声色選択]` voice selection right at the top, OS work-area snapping, and `tray-icon`. |
-| **Strict Character Scope & Skin-Linked Ghost Profiles (`\0` / `\1`)** | Strictly isolates Sakura Script `\0` (main character) and `\1` (partner character) surface resolution plus per-shell Ghost persona, long-term memories, dialogue history, `OnGhostChanged` greeting, and `bindgroup` dress-up layers whenever switching skins. Supports drag-and-drop and menu installation of classic `.nar` / `.zip` packages with `.png` / `.pna` alpha mask compositing, `seriko.use_self_alpha`, SERIKO `overlayf` / `replace` / `alternativestart` / `bind`, and Shift-JIS `descript.txt` & `surfaces.txt` compatibility. Also adds generic file/image/URL drag-and-drop inspection (with pre-read secret path guard and `<untrusted_data>` isolation), hourly chime, `set_reminder`/`list_reminders`, `OnClose` farewell dialogue, clickable `\_a` URL links & `\_q` instant display, zero-manual-launch headless AivisSpeech (`:10101`) / VOICEVOX `vv-engine` (`:50021`) character TTS with per-Ghost `\0`/`\1` voice casting (+ OS TTS fallback), and GitHub Releases update checks. |
-| **Clean Open-Source Asset Separation (`MIT` + `CC0-1.0`)** | Bundled default skins (`neo_default`, `clean_default`) contain only original **CC0-1.0** public-domain assets created for this project: Sakura (`\0`) in a classic cute navy-and-white ribbon outfit with frilly lace-bow socks & feminine Mary Jane strap dress shoes (`330x675 pt` `@2x`), Unyu (`\1`) in vivid periwinkle blue (`#94A3FF`) with soft 2.5D shading, animated paws, unbroken expressive eyes, and floating 40%-translucent round sunglasses (`@2x`), plus a translucent pearl glassmorphism balloon (`@2x`). Classic personal shells load automatically from the OS user data directory. |
-| **Multi-AI Backends & Dual SSTP/HTTP Server** | Connects to local/remote Ollama (`gemma4`, etc.), Gemini CLI/API, Claude CLI/API, ChatGPT Codex, and OpenAI-compatible endpoints with a built-in guard blocking restricted models. Exposes both HTTP JSON (`127.0.0.1:9821`) and classic `SSTP/1.4` TCP (`127.0.0.1:9801`). |
+| **Zero `unsafe` Native GUI, External-Sidecar Multi-Part Live2D Rig, Settings Panel & Siri-Style Chat** | Built on `winit 0.30` + `wgpu 24` transparent compositing (external sidecar `live2d.json` + individual part PNGs keep classic `.nar` packages untouched while driving 24 Sakura anatomical & 7 Unyu layers with C1 neck-head-face joints, multi-layer hair/coat-flaps/ribbons, independent damped-spring pendulums, `surface_overrides` unbroken expressions, and 40%-translucent layered sunglasses in 100% Safe Rust multi-pass GPU compositing — gracefully falling back to the single-texture WGSL rig for sidecar-free shells; includes bundled offline rig editor `tools/live2d_studio.html`) and `cosmic-text 0.12` CJK shaping. Features dynamically auto-sizing & scrollable speech balloons, a sapphire Siri-style `Communicate` glass bar with blinking caret, IME preedit underline, and Send/Close buttons, a compact accordion right-click menu (inline `Skins` / `Voice` / `AI` / `Tools` sections) & 4-submenu `tray-icon`, automatic OS display-language detection (falling back to **English** on unsupported OS locales) with instant UI switching (`OS Auto / 日本語 / 한국어 / English`), plus a **native GPU Settings Panel (`⚙️ 設定パネル · Settings...`)** for live skin/balloon opacity, character scale, opaque-on-hover, click-through, position lock, and OS-specific behavior flags (macOS/Windows/Linux). |
+| **Strict Character Scope, Skin-Linked Ghost Profiles & Balanced Interest News (`\0` / `\1`)** | Strictly isolates Sakura Script `\0` (main character) and `\1` (partner character) surface resolution plus per-shell Ghost persona, long-term memories, interest topics, dialogue history, `OnGhostChanged` greeting, and `bindgroup` dress-up layers whenever switching skins. Automatically remembers conversational interests and uses native Settings sliders for Auto-Talk frequency (`OFF` or `30s`-`600s`) and interest news weight (`0%`-`80%`) to mix recent interest headlines smoothly with balanced general news categories. Supports drag-and-drop and menu installation of classic `.nar` / `.zip` packages with `.png` / `.pna` alpha mask compositing, `seriko.use_self_alpha`, SERIKO `overlayf` / `replace` / `alternativestart` / `bind`, and Shift-JIS `descript.txt` & `surfaces.txt` compatibility. Also adds generic file/image/URL drag-and-drop inspection (with pre-read secret path guard and `<untrusted_data>` isolation), hourly chime, `set_reminder`/`list_reminders`, `OnClose` farewell dialogue, clickable `\_a` URL links & `\_q` instant display, zero-manual-launch headless AivisSpeech (`:10101`) / VOICEVOX `vv-engine` (`:50021`) character TTS with per-Ghost `\0`/`\1` voice casting (+ OS TTS fallback), and GitHub Releases update checks. |
+| **Clean Open-Source Asset Separation (`MIT` + `CC0-1.0`)** | Bundled default skins (`neo_default`, `clean_default`) contain only original **CC0-1.0** public-domain assets created for this project: Sakura (`\0`) in a classic cute navy-and-white ribbon outfit with frilly lace-bow socks & feminine Mary Jane strap dress shoes (`330x675 pt` `@2x`), Unyu (`\1`) in vivid periwinkle blue (`#94A3FF`) with soft 2.5D shading, animated paws, unbroken expressive eyes, and floating 40%-translucent round sunglasses (`@2x`), plus a translucent pearl glassmorphism balloon (`@2x`). Classic personal shells load automatically from `~/.nanikaai/` as well as legacy OS user data directories. |
+| **Multi-AI Backends, Dual Server & Everyday Desktop Companion Utilities** | Connects to local/remote Ollama (`gemma4`, etc.), Gemini CLI/API, Claude CLI/API, ChatGPT Codex, and OpenAI-compatible endpoints with a built-in guard blocking restricted models. Exposes both HTTP JSON (`127.0.0.1:9821`) and classic `SSTP/1.4` TCP (`127.0.0.1:9801`). Also includes **Quiet / Do-Not-Disturb Mode**, automatic **Fullscreen App Auto-Hide** & 1-click **Hide/Restore** from the tray, a built-in **Pomodoro Focus Timer** (`25/5`, `50/10`, `15/3m`, suppressing idle chatter during focus blocks), a **30-entry Dialogue Backlog (`GET /api/backlog`) with 1-click Copy Last Reply**, and **OS Login Auto-Start, Battery Power-Save Eco Mode (`auto`/`on`/`off`), Low-Battery Care Alerts, and Multi-Display / Edge Switching**. |
 
-### User Skin (`.nar`) Data Directories
+### Configuration (`~/.nanikaai/config.json`) & User Skin Data Directories
 
-Drag and drop `.nar` or `.zip` skin archives onto the character window to install them into the OS-specific directory below.
+Across macOS, Windows, and Linux, NanikaAi stores settings and user data cleanly inside `~/.nanikaai/` under your home directory. Existing `config.json` files in legacy OS locations (`~/Library/Application Support/NanikaAi/`, `%APPDATA%\NanikaAi\`, `~/.config/nanikaai/`) are automatically migrated on first launch without data loss, while `.nar` skins already installed in legacy folders remain discoverable.
 
-| Operating System | User Data Directory |
-| :--- | :--- |
-| macOS | `~/Library/Application Support/NanikaAi/` |
-| Windows | `%APPDATA%\NanikaAi\` |
-| Linux | `$XDG_CONFIG_HOME/nanikaai/` (default `~/.config/nanikaai/`) |
+| Purpose | Unified Home Path | Notes |
+| :--- | :--- | :--- |
+| Settings JSON | `~/.nanikaai/config.json` (Windows: `%USERPROFILE%\.nanikaai\config.json`) | Override root via `NANIKAAI_HOME` |
+| User Skins (`.nar` / `.zip`) | `~/.nanikaai/shells/`, `~/.nanikaai/balloons/` | Auto-installed when dropped onto window |
+| External Live2D Sidecars | `~/.nanikaai/live2d/<shell_id>/` | Overrides bundled sidecars cleanly |
 
 ### Installation & Beginner Quick Start
 
@@ -227,7 +228,7 @@ Please install and configure the "NanikaAi (何か藍)" desktop mascot and local
 | Step | Instructions |
 | :--- | :--- |
 | **1. Download App Bundle** | Download your OS package (`NanikaAi-macos-arm64.zip`, `NanikaAi-windows-x64.zip`, or `NanikaAi-linux-x64.tar.gz`) from [GitHub Releases (Latest)](https://github.com/JungWonYong/nanikaai/releases/latest) and extract it (on macOS, run `xattr -cr NanikaAi.app` once if Gatekeeper prompts). |
-| **2. Install Ollama & Model** | Install [Ollama](https://ollama.com/download) and pull one model (e.g., 16 GB PCs: `ollama pull gemma4:e4b` or `ollama pull llama3.1:8b`; 8 GB PCs: `ollama pull llama3.2:3b`). |
+| **2. Install Ollama & Model** | **Beginner-friendly**: Launch `NanikaAi` first and click `[⚡ 無料ローカルAIを1クリック自動準備]` in the greeting balloon (or under right-click / Settings Panel `🤖 AI・保存先` tab) to automatically set up Ollama and pull a free lightweight model matched to your PC RAM (`gemma4:e2b` / `gemma4:e4b` / `llama3.2:3b`). Manual option: install [Ollama](https://ollama.com/download) and run `ollama pull gemma4:e4b` or `ollama pull llama3.2:3b`. |
 | **3. Launch & Chat** | Start `NanikaAi` — default settings automatically connect to local Ollama (`http://127.0.0.1:11434`, `model: "auto"`). Double-click Sakura to open the chat bar. |
 
 <details>
@@ -271,6 +272,7 @@ dist\NanikaAi-win64\nanikaai.exe
 | Switch skin | `POST http://127.0.0.1:9821/api/skin` | `{"shell": "neo_default", "balloon": "clean_default"}` |
 | Switch AI provider | `POST http://127.0.0.1:9821/api/provider` | `{"provider": "ollama", "model": "auto"}` |
 | Voices / Configure TTS | `GET /api/voices` & `POST /api/voice` | `{"tts_engine": "auto", "kero_voice_archetype": "boy"}` |
+| Settings / Backlog API | `GET /api/settings` & `POST /api/settings` & `GET /api/backlog` | `{"ui_language": "auto", "quiet_mode": false, "pomodoro_action": "start"}` |
 | List skins / providers | `GET http://127.0.0.1:9821/api/skins` / `/api/providers` | `curl -s http://127.0.0.1:9821/api/providers` |
 | Classic TCP `SSTP/1.4` | `127.0.0.1:9801` | `SEND SSTP/1.4` (`Charset: UTF-8`, `Script: ...`) |
 

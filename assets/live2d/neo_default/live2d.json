@@ -717,16 +717,16 @@
         "texture": "parts/unyu_tuft.png",
         "z": 20,
         "pivot_px": [
-          96.0,
-          102.0
+          108.0,
+          104.0
         ],
         "role": "mochi_tuft",
         "parallax": [
-          0.22,
-          -0.18
+          0.0,
+          0.0
         ],
-        "rot_deg": 6.2,
-        "bend_px": 8.0,
+        "rot_deg": 2.4,
+        "bend_px": 7.5,
         "breath_px": [
           0.0,
           0.0
