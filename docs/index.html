@@ -14,7 +14,6 @@
       --accent: #4f8cff;
       --accent-soft: rgba(79, 140, 255, 0.16);
       --pill: #1e2e4f;
-      --ok: #38bdf8;
     }
     * { box-sizing: border-box; }
     body {
@@ -29,14 +28,14 @@
     }
     a { color: #7dd3fc; text-decoration: none; }
     a:hover { text-decoration: underline; }
-    .wrap { max-width: 1020px; margin: 0 auto; padding: 28px 18px 64px; }
+    .wrap { max-width: 980px; margin: 0 auto; padding: 28px 18px 56px; }
     .topbar {
       display: flex;
       flex-wrap: wrap;
       align-items: center;
       justify-content: space-between;
       gap: 12px;
-      margin-bottom: 24px;
+      margin-bottom: 22px;
     }
     .brand { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 1.25rem; }
     .badge {
@@ -71,23 +70,9 @@
       border-radius: 18px;
       padding: 22px;
       box-shadow: 0 22px 54px rgba(0, 0, 0, 0.45);
-      margin-bottom: 26px;
     }
-    .hero h1 { margin: 0 0 8px; font-size: clamp(1.4rem, 2.8vw, 2.05rem); }
+    .hero h1 { margin: 0 0 8px; font-size: clamp(1.35rem, 2.6vw, 1.95rem); }
     .hero p { margin: 0 0 14px; color: var(--muted); }
-    .sound-hint {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      margin-bottom: 12px;
-      padding: 6px 12px;
-      border-radius: 10px;
-      background: rgba(56, 189, 248, 0.14);
-      border: 1px solid rgba(56, 189, 248, 0.34);
-      color: #bae6fd;
-      font-size: 0.86rem;
-      font-weight: 600;
-    }
     .video-box {
       position: relative;
       border-radius: 14px;
@@ -102,7 +87,7 @@
       align-items: center;
       justify-content: space-between;
       gap: 10px;
-      margin-top: 12px;
+      margin-top: 14px;
       font-size: 0.88rem;
       color: var(--muted);
     }
@@ -120,65 +105,10 @@
       border: 1px solid var(--border);
       color: var(--text);
     }
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(225px, 1fr));
-      gap: 14px;
-      margin-bottom: 24px;
-    }
-    .card {
-      background: var(--bg-card);
-      border: 1px solid var(--border);
-      border-radius: 14px;
-      padding: 16px;
-    }
-    .card h3 { margin: 0 0 6px; font-size: 1rem; color: #bfdbfe; }
-    .card p { margin: 0; font-size: 0.9rem; color: var(--muted); }
-    .panel {
-      background: var(--bg-card);
-      border: 1px solid var(--border);
-      border-radius: 14px;
-      padding: 18px 20px;
-      margin-bottom: 20px;
-    }
-    .panel h2 { margin: 0 0 10px; font-size: 1.15rem; }
-    pre {
-      margin: 10px 0 0;
-      padding: 12px 14px;
-      border-radius: 10px;
-      background: #070d1c;
-      border: 1px solid rgba(148, 163, 184, 0.22);
-      overflow-x: auto;
-      font-size: 0.84rem;
-      color: #dbeafe;
-    }
     .lang-pane { display: none; }
     .lang-pane.active { display: block; }
-    details.accordion {
-      background: var(--bg-card);
-      border: 1px solid var(--border);
-      border-radius: 14px;
-      margin-bottom: 14px;
-      overflow: hidden;
-    }
-    details.accordion summary {
-      list-style: none;
-      cursor: pointer;
-      padding: 14px 18px;
-      font-weight: 700;
-      color: #dbeafe;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-    }
-    details.accordion summary::-webkit-details-marker { display: none; }
-    details.accordion summary::after { content: "▾"; color: #7dd3fc; font-size: 1rem; transition: transform 0.15s ease; }
-    details.accordion[open] summary::after { transform: rotate(180deg); }
-    details.accordion .acc-body { padding: 0 18px 18px; }
-    code { background: rgba(15, 23, 42, 0.72); padding: 1px 6px; border-radius: 5px; font-size: 0.88em; color: #dbeafe; }
-    pre code { background: transparent; padding: 0; }
     footer {
-      margin-top: 28px;
+      margin-top: 24px;
       text-align: center;
       color: var(--muted);
       font-size: 0.84rem;
@@ -194,26 +124,23 @@
       </div>
       <div class="lang-tabs" role="tablist">
         <button class="lang-btn active" data-lang="ja">日本語</button>
-        <button class="lang-btn" data-lang="ko">한국어</button>
         <button class="lang-btn" data-lang="en">English</button>
+        <button class="lang-btn" data-lang="ko">한국어</button>
       </div>
     </div>
 
     <section class="hero">
       <div class="lang-pane active" data-lang="ja">
-        <h1>24+7層 Live2D モーション &amp; ヘッドレス音声会話デモ</h1>
-        <p>さくら（24パーツ）とうにゅう（7パーツ + 40%半透明サングラス）の滑らかな多層揺れ・リップシンクと、右クリックメニュー最上段「声色選択」によるリアルタイム音声切替（AivisSpeech Engine）を紹介する公式デモ動画である。</p>
-        <div class="sound-hint">▶ 再生して音声をオンにすると、まお → らせつん → コハク の実際の掛け合い音声が再生されます</div>
-      </div>
-      <div class="lang-pane" data-lang="ko">
-        <h1>24+7 레이어 Live2D 모션 &amp; 헤드리스 음성 발화 소개 동영상</h1>
-        <p>사쿠라(24파츠)와 우뉴(7파츠 + 40% 반투명 선글라스)의 부드러운 다층 스웨이·립싱크 및 우클릭 메뉴 최상단 「声色選択」 실시간 목소리 전환(AivisSpeech Engine)을 시연하는 공식 소개 영상이다.</p>
-        <div class="sound-hint">▶ 재생 버튼으로 음소거를 해제하면 まお → らせつん → コハク 실제 캐릭터 음성이 재생됩니다</div>
+        <h1>100% Safe Rust 製 AI デスクトップマスコット</h1>
+        <p>macOS / Windows / Linux 対応。24+7 層 Live2D モーションと AivisSpeech 音声会話のデモ動画（再生後に音量オン）。</p>
       </div>
       <div class="lang-pane" data-lang="en">
-        <h1>24+7 Layer Live2D Motion &amp; Headless Voice Demo</h1>
-        <p>Watch Sakura (24 parts) and Unyu (7 parts + 40%-translucent sunglasses) animate with smooth multi-layer Live2D sway, real-time lip-sync, and live right-click voice switching powered headlessly by AivisSpeech Engine.</p>
-        <div class="sound-hint">▶ Click Play &amp; unmute to hear まお → らせつん → コハク character voices synthesized by AivisSpeech</div>
+        <h1>100% Safe Rust AI Desktop Mascot</h1>
+        <p>Cross-platform for macOS, Windows, and Linux. Watch the 24+7 multi-part Live2D &amp; AivisSpeech voice demo (unmute in the player).</p>
+      </div>
+      <div class="lang-pane" data-lang="ko">
+        <h1>100% Safe Rust 기반 AI 데스크톱 마스코트</h1>
+        <p>macOS / Windows / Linux 지원. 24+7 레이어 Live2D 모션과 AivisSpeech 음성 대화 데모(재생 후 음소거 해제).</p>
       </div>
 
       <div class="video-box">
@@ -223,116 +150,18 @@
       </div>
 
       <div class="video-actions">
-        <span>MP4 (1280×720 H.264 + AAC Stereo 44.1kHz)</span>
+        <span>MP4 (1280×720 H.264 + AAC Stereo)</span>
         <div style="display:flex; gap:10px; flex-wrap:wrap;">
           <a class="btn" href="https://github.com/JungWonYong/nanikaai/releases/latest">GitHub Releases</a>
-          <a id="demo-download" class="btn secondary" href="media/nanikaai_intro_ja.mp4" download>MP4 Download (JA)</a>
-          <a class="btn secondary" href="https://github.com/JungWonYong/nanikaai/blob/main/docs/GUIDE.md">Full Guide</a>
-          <a class="btn secondary" href="https://github.com/JungWonYong/nanikaai">GitHub Repository</a>
+          <a id="demo-guide" class="btn secondary" href="https://github.com/JungWonYong/nanikaai/blob/main/docs/guide-ja.md">ガイド (JA)</a>
+          <a id="demo-download" class="btn secondary" href="media/nanikaai_intro_ja.mp4" download>MP4 (JA)</a>
+          <a class="btn secondary" href="https://github.com/JungWonYong/nanikaai">GitHub</a>
         </div>
       </div>
     </section>
 
-    <div class="lang-pane active" data-lang="ja">
-      <details class="accordion">
-        <summary>✨ 主な機能（クリックで展開）</summary>
-        <div class="acc-body">
-          <div class="grid" style="margin-bottom:0;">
-            <div class="card">
-              <h3>24+7 外付け Live2D リグ</h3>
-              <p>既存 <code>.nar</code> を改変せず、部位別 PNG + <code>live2d.json</code> で揺れ・目パチ・口パク・着せ替えを GPU 描画。</p>
-            </div>
-            <div class="card">
-              <h3>声色選択 &amp; 関心ニュース雑談</h3>
-              <p>AivisSpeech / VOICEVOX 自動連携と、会話から記憶した関心事を混ぜた自動雑談を搭載。</p>
-            </div>
-            <div class="card">
-              <h3>100% Safe Rust &amp; 多言語 UI</h3>
-              <p><code>#![forbid(unsafe_code)]</code> 単一バイナリ（macOS / Windows / Linux）。OS 言語自動追従＋設定パネル搭載。</p>
-            </div>
-            <div class="card">
-              <h3>マルチ AI &amp; アクセサリ</h3>
-              <p>Ollama / Gemini / Claude / ChatGPT 接続、DND・ポモドーロ・バックログ・HTTP/SSTP API を内蔵。</p>
-            </div>
-          </div>
-        </div>
-      </details>
-      <details class="accordion">
-        <summary>🚀 クイックスタート（AI エージェント自動導入）</summary>
-        <div class="acc-body">
-          <p style="margin:0;color:var(--muted);"><code>agy</code> または <code>claude</code> CLI で最新リリースの導入から Ollama 接続まで実行可能。</p>
-          <pre><code>agy -i "https://github.com/JungWonYong/nanikaai の最新リリース実行ファイルとローカルOllamaをこのPCに導入・起動し、スペックに合う無料モデル(gemma4/llama3系)を接続して動作確認まで完了して。"</code></pre>
-        </div>
-      </details>
-    </div>
-
-    <div class="lang-pane" data-lang="ko">
-      <details class="accordion">
-        <summary>✨ 주요 기능 (클릭하여 펼치기)</summary>
-        <div class="acc-body">
-          <div class="grid" style="margin-bottom:0;">
-            <div class="card">
-              <h3>24+7 외장 Live2D 멀티파츠</h3>
-              <p>기존 <code>.nar</code> 수정 없이 <code>live2d.json</code> + 부위별 PNG로 스웨이·눈깜빡임·립싱크·갈아입히기를 GPU 합성.</p>
-            </div>
-            <div class="card">
-              <h3>목소리 선택 &amp; 관심 뉴스 잡담</h3>
-              <p>AivisSpeech / VOICEVOX 자동 연동 및 대화 속 관심사를 기억해 일반 뉴스와 섞어 들려주는 자동 잡담 지원.</p>
-            </div>
-            <div class="card">
-              <h3>100% Safe Rust &amp; 다국어 UI</h3>
-              <p><code>#![forbid(unsafe_code)]</code> 단일 바이너리(macOS / Windows / Linux). OS 언어 자동 추적 + 설정 패널 탑재.</p>
-            </div>
-            <div class="card">
-              <h3>멀티 AI &amp; 편의 액세서리</h3>
-              <p>Ollama·Gemini·Claude·ChatGPT 연결, 방해 금지·뽀모도로·백로그 및 HTTP/SSTP 듀얼 서버 제공.</p>
-            </div>
-          </div>
-        </div>
-      </details>
-      <details class="accordion">
-        <summary>🚀 빠른 설치 (AI 에이전트 1줄 자동 세팅)</summary>
-        <div class="acc-body">
-          <p style="margin:0;color:var(--muted);">터미널에서 <code>agy</code> 또는 <code>claude</code> CLI로 최신 릴리스 다운로드와 Ollama 연동을 일괄 실행한다.</p>
-          <pre><code>agy -i "https://github.com/JungWonYong/nanikaai 의 최신 릴리스 실행 파일과 로컬 Ollama를 내 PC에 설치·실행하고, 내 PC 사양에 맞는 무료 모델(gemma4/llama3 계열)을 연결해 동작 확인까지 끝내줘."</code></pre>
-        </div>
-      </details>
-    </div>
-
-    <div class="lang-pane" data-lang="en">
-      <details class="accordion">
-        <summary>✨ Key Features (Click to expand)</summary>
-        <div class="acc-body">
-          <div class="grid" style="margin-bottom:0;">
-            <div class="card">
-              <h3>24+7 External Sidecar Live2D</h3>
-              <p>Drives layered hair/cloth sway, blinking, lip-sync, and dress-up via GPU multipass without modifying <code>.nar</code> archives.</p>
-            </div>
-            <div class="card">
-              <h3>Headless TTS &amp; Interest News</h3>
-              <p>Zero-manual-launch AivisSpeech / VOICEVOX voices plus balanced auto-talk mixing remembered interests with general news.</p>
-            </div>
-            <div class="card">
-              <h3>100% Safe Rust &amp; Multilingual UI</h3>
-              <p><code>#![forbid(unsafe_code)]</code> single native binary (macOS / Windows / Linux) with OS-following UI and native Settings Panel.</p>
-            </div>
-            <div class="card">
-              <h3>Multi-AI &amp; Companion Tools</h3>
-              <p>Connects Ollama, Gemini, Claude, and ChatGPT alongside DND, Pomodoro timer, backlog, and HTTP/SSTP APIs.</p>
-            </div>
-          </div>
-        </div>
-      </details>
-      <details class="accordion">
-        <summary>🚀 Quick Start via AI Agent</summary>
-        <div class="acc-body">
-          <pre><code>agy -i "Install and launch the latest NanikaAi release from https://github.com/JungWonYong/nanikaai with local Ollama, pull a compatible model, and verify it speaks."</code></pre>
-        </div>
-      </details>
-    </div>
-
     <footer>
-      何か藍 (NanikaAi) · MIT License &amp; CC0-1.0 Default Skins · Zero External CDN
+      何か藍 (NanikaAi) · MIT License &amp; CC0-1.0 Default Skins
     </footer>
   </div>
 
@@ -342,6 +171,8 @@
     const video = document.getElementById("demo-video");
     const source = document.getElementById("demo-source");
     const downloadLink = document.getElementById("demo-download");
+    const guideLink = document.getElementById("demo-guide");
+    const GUIDE_LABELS = { ja: "ガイド (JA)", en: "Guide (EN)", ko: "가이드 (KO)" };
     const SUPPORTED = new Set(["ja", "en", "ko"]);
 
     function setLang(rawLang, preservePlayback) {
@@ -363,7 +194,11 @@
       }
       if (downloadLink) {
         downloadLink.setAttribute("href", "media/nanikaai_intro_" + lang + ".mp4");
-        downloadLink.textContent = "MP4 Download (" + lang.toUpperCase() + ")";
+        downloadLink.textContent = "MP4 (" + lang.toUpperCase() + ")";
+      }
+      if (guideLink) {
+        guideLink.setAttribute("href", "https://github.com/JungWonYong/nanikaai/blob/main/docs/guide-" + lang + ".md");
+        guideLink.textContent = GUIDE_LABELS[lang];
       }
     }
 
