@@ -151,6 +151,44 @@ pub fn is_safe_pre_route_tool(name: &str) -> bool {
     SAFE_PRE_ROUTE_TOOLS.contains(&name)
 }
 
+/// Fast lexical pre-filter so tiny 270M router models (`functiongemma`) are NOT called on
+/// casual greetings/small-talk where they tend to hallucinate looping tool calls.
+pub fn prompt_likely_needs_router_tool(prompt: &str) -> bool {
+    let low = prompt.to_ascii_lowercase();
+    let tool_cues = [
+        "날씨", "기온", "비 ", "눈 ", "天気", "気温", "weather", "forecast",
+        "메모", "할일", "할 일", "투두", "メモ", "memo", "todo",
+        "리마인더", "알람", "타이머", "リマインダー", "reminder",
+        "일정", "캘린더", "스케줄", "予定", "カレンダー", "calendar", "schedule", "event",
+        "시스템", "cpu", "메모리", "배터리", "상태", "gpu", "시스템 상태", "システム", "battery", "status",
+        "계산", "더하기", "곱하기", "나누기", "計算", "calculate", "*", "/", "+", "=",
+        "검색", "찾아", "調べ", "検索", "search",
+        "기억", "메모리", "覚え", "記憶", "remember",
+        "올라마", "모델 목록", "ollama",
+        // Explicit coding/reasoning/cloud cues
+        "rust", "python", "코드", "코딩", "디버깅", "리팩토링", "コード", "デバッグ",
+        "아키텍처", "트레이드오프", "근본 원인", "アーキテクチャ",
+        "제미니", "클라우드", "심층 리서치", "gemini", "deep research", "クラウド",
+    ];
+    tool_cues.iter().any(|k| low.contains(k))
+}
+
+/// Reject hallucinated multi-call spam loops or garbled partial syntax emitted by small router models.
+pub fn is_clean_router_tool_response(tcalls: &[Value], content: &str) -> bool {
+    if tcalls.len() != 1 {
+        return false;
+    }
+    let low = content.to_ascii_lowercase();
+    if low.contains("call:")
+        || low.contains("<end_fu")
+        || low.contains("model\nmodel")
+        || low.contains("model\n model")
+    {
+        return false;
+    }
+    true
+}
+
 pub fn match_installed_ollama_tag(candidate: &str, installed: &[String]) -> Option<String> {
     let trimmed = candidate.trim();
     if trimmed.is_empty() {
@@ -177,7 +215,10 @@ pub fn resolve_router_model_from_list(
     installed: &[String],
 ) -> Result<Option<String>, String> {
     let trimmed = configured.trim();
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("off") {
+    if trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("off")
+        || trimmed.eq_ignore_ascii_case("self")
+    {
         return Ok(None);
     }
     if trimmed.eq_ignore_ascii_case("auto") {
@@ -388,6 +429,91 @@ pub fn ensure_sakura_script_reply(raw: &str) -> String {
     } else {
         format!("\\0\\s[0]{trimmed}\\e")
     }
+}
+
+/// Build an immediate in-character mascot reaction shown while escalating to a heavier Tier 2/3 model.
+pub fn build_escalation_reaction_script(
+    role: RouteRole,
+    is_vision: bool,
+    prompt: &str,
+    ui_lang: &str,
+) -> String {
+    let lang = if prompt.chars().any(|c| ('\u{ac00}'..='\u{d7a3}').contains(&c)) {
+        crate::i18n::UiLang::Ko
+    } else if prompt
+        .chars()
+        .any(|c| ('\u{3040}'..='\u{30ff}').contains(&c) || ('\u{4e00}'..='\u{9fff}').contains(&c))
+    {
+        crate::i18n::UiLang::Ja
+    } else {
+        crate::i18n::resolve_ui_lang(ui_lang)
+    };
+
+    if is_vision {
+        return match lang {
+            crate::i18n::UiLang::Ko => "\\0\\s[3]그림을 더 꼼꼼히 살펴볼게요! 고해상도 모델로 확인 중이니 잠시만 기다려 주세요…\\1\\s[10]디테일까지 확실하게 보자고!\\e".to_string(),
+            crate::i18n::UiLang::Ja => "\\0\\s[3]画像をじっくり確認しますね。高精細モデルで見てみますので少し待ってください…\\1\\s[10]細部までしっかりチェックや！\\e".to_string(),
+            crate::i18n::UiLang::En => "\\0\\s[3]Let me take a closer look at this image with my high-precision vision model. One moment please…\\1\\s[10]Checking every detail!\\e".to_string(),
+        };
+    }
+
+    match (lang, role) {
+        (crate::i18n::UiLang::Ko, RouteRole::Coding) => "\\0\\s[3]코딩 관련 질문이네요! 전문 모델로 전환해서 꼼꼼히 작성해 볼게요. 잠시만 기다려 주세요…\\1\\s[10]코드 쪽은 전문가한테 맡기는 게 확실하지!\\e".to_string(),
+        (crate::i18n::UiLang::Ko, RouteRole::Cloud) => "\\0\\s[3]이건 더 깊고 넓게 찾아볼게요. 클라우드 AI와 함께 확인하고 올 테니 잠시만 기다려 주세요…\\1\\s[10]조금만 기다려 줘!\\e".to_string(),
+        (crate::i18n::UiLang::Ko, _) => "\\0\\s[3]이건 조금 더 깊게 생각해 볼 필요가 있겠어요. 잠시만 기다려 주세요…\\1\\s[10]신중하게 정리해 보자고!\\e".to_string(),
+
+        (crate::i18n::UiLang::Ja, RouteRole::Coding) => "\\0\\s[3]コードのご相談ですね。専門モデルに切り替えてしっかり考えます、少し待ってくださいね…\\1\\s[10]コードは専用モデルに任せるのが確実やな！\\e".to_string(),
+        (crate::i18n::UiLang::Ja, RouteRole::Cloud) => "\\0\\s[3]より詳しく調べてきますね。クラウドAIと連携して確認しますので少しお待ちください…\\1\\s[10]ちょっと待っとってな！\\e".to_string(),
+        (crate::i18n::UiLang::Ja, _) => "\\0\\s[3]これはもう少し深く考えたほうがよさそうです。少しだけ待ってくださいね…\\1\\s[10]じっくり整理してみよか！\\e".to_string(),
+
+        (crate::i18n::UiLang::En, RouteRole::Coding) => "\\0\\s[3]That's a coding question! Switching to my specialist coding model—please hold on a moment…\\1\\s[10]Leave the code to the pro!\\e".to_string(),
+        (crate::i18n::UiLang::En, RouteRole::Cloud) => "\\0\\s[3]Let me consult the cloud AI to dig deeper into this. Just a moment please…\\1\\s[10]Hang tight!\\e".to_string(),
+        (crate::i18n::UiLang::En, _) => "\\0\\s[3]Let me think a bit more deeply about this with my larger model. Please wait a moment…\\1\\s[10]Taking a closer look!\\e".to_string(),
+    }
+}
+
+/// Build the `escalate_to_expert` native tool schema exposed to Tier 1 (`gemma4:e4b`)
+/// for true semantic self-escalation to Tier 2 (`coding`/`reasoning`) or Tier 3 (`cloud`).
+pub fn build_self_escalation_tool(
+    enable_coding: bool,
+    enable_reasoning: bool,
+    enable_cloud: bool,
+) -> Option<Value> {
+    let mut tiers: Vec<Value> = Vec::new();
+    if enable_coding {
+        tiers.push(json!("coding"));
+    }
+    if enable_reasoning {
+        tiers.push(json!("reasoning"));
+    }
+    if enable_cloud {
+        tiers.push(json!("cloud"));
+    }
+    if tiers.is_empty() {
+        return None;
+    }
+    Some(json!({
+        "type": "function",
+        "function": {
+            "name": "escalate_to_expert",
+            "description": "Hand off the user's request to a stronger specialist model ONLY when genuinely needed: 'coding' for writing/debugging/refactoring non-trivial code, 'reasoning' for deep math/proofs/complex architecture/trade-off analysis, or 'cloud' for frontier deep research or when the user explicitly asks for Gemini/cloud AI. NEVER call for greetings, everyday chat, weather, memos, reminders, or simple questions you can answer directly.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tier": {
+                        "type": "string",
+                        "enum": tiers,
+                        "description": "Target specialist tier to escalate to."
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Brief reason why specialist escalation is needed."
+                    }
+                },
+                "required": ["tier"]
+            }
+        }
+    }))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1120,6 +1246,7 @@ impl Default for AutoTalkState {
 }
 
 pub type StatusCallback = Arc<dyn Fn(String, bool) + Send + Sync>;
+pub type InterimCallback = Arc<dyn Fn(Vec<DialogueAction>) + Send + Sync>;
 
 #[derive(Clone)]
 pub struct AgentEngine {
@@ -1127,6 +1254,7 @@ pub struct AgentEngine {
     pub tool_runner: BuiltinToolRunner,
     pub manifest: Arc<Mutex<ShellManifest>>,
     status_cb: Arc<Mutex<Option<StatusCallback>>>,
+    interim_cb: Arc<Mutex<Option<InterimCallback>>>,
     history: Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>,
     busy: Arc<Mutex<bool>>,
     last_stroke_ts: Arc<Mutex<Option<Instant>>>,
@@ -1145,10 +1273,28 @@ impl AgentEngine {
             tool_runner,
             manifest,
             status_cb: Arc::new(Mutex::new(status_cb)),
+            interim_cb: Arc::new(Mutex::new(None)),
             history: Arc::new(Mutex::new(HashMap::new())),
             busy: Arc::new(Mutex::new(false)),
             last_stroke_ts: Arc::new(Mutex::new(None)),
             auto_talk_state: Arc::new(Mutex::new(AutoTalkState::default())),
+        }
+    }
+
+    pub fn set_interim_callback(&self, cb: InterimCallback) {
+        if let Ok(mut guard) = self.interim_cb.lock() {
+            *guard = Some(cb);
+        }
+    }
+
+    fn emit_interim_script(&self, script: &str) {
+        if let Ok(guard) = self.interim_cb.lock() {
+            if let Some(ref cb) = *guard {
+                let actions = parse_dialogue(script);
+                if !actions.is_empty() {
+                    cb(actions);
+                }
+            }
         }
     }
 
@@ -1494,12 +1640,34 @@ impl AgentEngine {
         if !enable_tools && !enable_model_routing && !enable_cloud_routing {
             return None;
         }
+
+        // 1. Deterministic zero-hallucination role check (0ms, no false positives on casual chat).
+        //    Cloud escalation (`RouteRole::Cloud`) is NEVER triggered by 270M hallucination alone.
+        let heur_role = classify_route_role_heuristic_with_cloud(prompt, enable_cloud_routing);
+        let mut target_role = match heur_role {
+            RouteRole::Cloud if enable_cloud_routing => RouteRole::Cloud,
+            RouteRole::Coding | RouteRole::Reasoning if enable_model_routing => heur_role,
+            _ => RouteRole::Chat,
+        };
+
+        // Casual small-talk without any tool or specialist cues skips the 270M router completely!
+        if target_role == RouteRole::Chat && !prompt_likely_needs_router_tool(prompt) {
+            return None;
+        }
+
         let tools = build_functiongemma_router_tools_ex(
             enable_tools,
             enable_model_routing,
             enable_cloud_routing,
         );
         if tools.as_array().is_none_or(|a| a.is_empty()) {
+            if target_role != RouteRole::Chat {
+                return Some(RouterDecision {
+                    router_model,
+                    target_role,
+                    pre_routed_tool: None,
+                });
+            }
             return None;
         }
 
@@ -1515,7 +1683,7 @@ impl AgentEngine {
             "messages": [
                 {
                     "role": "developer",
-                    "content": "You are a fast router model that can call the provided functions. Call a tool ONLY when the user's request clearly requires it; otherwise answer with no tool call."
+                    "content": "You are a fast router model that can call the provided functions. Call at most ONE function ONLY when the user's request clearly requires it; otherwise answer with no tool call."
                 },
                 {"role": "user", "content": prompt}
             ],
@@ -1524,69 +1692,60 @@ impl AgentEngine {
             "keep_alive": "15m",
             "options": {
                 "temperature": 0.0,
-                "num_predict": 192
+                "num_predict": 96
             }
         });
 
-        let mut target_role = RouteRole::Chat;
         let mut pre_routed_tool: Option<(String, Value)> = None;
 
         if let Ok(resp) = client.post(&url).json(&payload).send() {
             if resp.status().is_success() {
                 if let Ok(data) = resp.json::<Value>() {
-                    let tcalls = data
-                        .get("message")
-                        .and_then(|m| m.get("tool_calls"))
+                    let msg = data.get("message").unwrap_or(&Value::Null);
+                    let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                    let tcalls = msg
+                        .get("tool_calls")
                         .and_then(|v| v.as_array())
                         .cloned()
                         .unwrap_or_default();
-                    for tc in tcalls {
+                    // Strictly reject multi-call spam loops or garbled partial tool syntax
+                    if is_clean_router_tool_response(&tcalls, content) {
+                        let tc = &tcalls[0];
                         let fn_obj = tc.get("function").unwrap_or(&Value::Null);
-                        let Some(tname) = fn_obj.get("name").and_then(|v| v.as_str()) else {
-                            continue;
-                        };
-                        let targs = match fn_obj.get("arguments") {
-                            Some(Value::String(s)) => {
-                                serde_json::from_str(s).unwrap_or_else(|_| json!({}))
-                            }
-                            Some(v @ Value::Object(_)) => v.clone(),
-                            _ => json!({}),
-                        };
-                        if tname == "route_model" && (enable_model_routing || enable_cloud_routing) {
-                            if let Some(role_str) = targs.get("role").and_then(|v| v.as_str()) {
-                                match role_str.trim().to_ascii_lowercase().as_str() {
-                                    "coding" if enable_model_routing => {
-                                        target_role = RouteRole::Coding
-                                    }
-                                    "reasoning" if enable_model_routing => {
-                                        target_role = RouteRole::Reasoning
-                                    }
-                                    "cloud" if enable_cloud_routing => {
-                                        target_role = RouteRole::Cloud
-                                    }
-                                    _ => {}
+                        if let Some(tname) = fn_obj.get("name").and_then(|v| v.as_str()) {
+                            let targs = match fn_obj.get("arguments") {
+                                Some(Value::String(s)) => {
+                                    serde_json::from_str(s).unwrap_or_else(|_| json!({}))
                                 }
+                                Some(v @ Value::Object(_)) => v.clone(),
+                                _ => json!({}),
+                            };
+                            if tname == "route_model"
+                                && (enable_model_routing || enable_cloud_routing)
+                            {
+                                if let Some(role_str) = targs.get("role").and_then(|v| v.as_str()) {
+                                    match role_str.trim().to_ascii_lowercase().as_str() {
+                                        "coding" if enable_model_routing => {
+                                            target_role = RouteRole::Coding;
+                                        }
+                                        "reasoning" if enable_model_routing => {
+                                            target_role = RouteRole::Reasoning;
+                                        }
+                                        "cloud"
+                                            if enable_cloud_routing
+                                                && heur_role == RouteRole::Cloud =>
+                                        {
+                                            target_role = RouteRole::Cloud;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            } else if enable_tools && is_safe_pre_route_tool(tname) {
+                                pre_routed_tool = Some((tname.to_string(), targs));
                             }
-                        } else if enable_tools
-                            && pre_routed_tool.is_none()
-                            && is_safe_pre_route_tool(tname)
-                        {
-                            pre_routed_tool = Some((tname.to_string(), targs));
                         }
                     }
                 }
-            }
-        }
-
-        // Conservative heuristic fallback for explicit coding/reasoning/cloud switching
-        if (enable_model_routing || enable_cloud_routing) && target_role == RouteRole::Chat {
-            let heur = classify_route_role_heuristic_with_cloud(prompt, enable_cloud_routing);
-            match heur {
-                RouteRole::Cloud if enable_cloud_routing => target_role = RouteRole::Cloud,
-                RouteRole::Coding | RouteRole::Reasoning if enable_model_routing => {
-                    target_role = heur;
-                }
-                _ => {}
             }
         }
 
@@ -1725,25 +1884,43 @@ impl AgentEngine {
 
         // Tier 2 Vision auto-escalation: when an image is attached and primary model is lightweight (e.g. gemma4:e4b),
         // automatically escalate to installed high-precision vision model (gemma4:31b / 26b / 12b).
+        let mut cached_installed: Option<Vec<String>> = None;
         if !images.is_empty() {
             let installed = self.list_ollama_models(base_url, 800);
             if let Some(vision_model) = resolve_vision_escalation_model(&base_model, &installed) {
+                self.emit_interim_script(&build_escalation_reaction_script(
+                    RouteRole::Reasoning,
+                    true,
+                    prompt,
+                    &cfg.ui_language,
+                ));
                 self.emit_status(&format!("Vision Escalation ➔ {vision_model}"), true);
                 model = vision_model;
             }
+            cached_installed = Some(installed);
         }
 
-        // Optional FunctionGemma tiered router:
-        // - Pattern A: safe read-only tool pre-route
-        // - Pattern B: Tier 2 local coding/reasoning switch OR Tier 3 cloud escalation
-        if !cfg.router_model.trim().is_empty() && images.is_empty() {
-            let installed = self.list_ollama_models(base_url, 800);
+        // Optional external FunctionGemma tiered router (skipped when router_model is "" / "off" / "self")
+        let router_cfg_trim = cfg.router_model.trim();
+        let use_external_router = !router_cfg_trim.is_empty()
+            && !router_cfg_trim.eq_ignore_ascii_case("off")
+            && !router_cfg_trim.eq_ignore_ascii_case("self");
+        if use_external_router && images.is_empty() {
+            let installed = cached_installed
+                .take()
+                .unwrap_or_else(|| self.list_ollama_models(base_url, 800));
             if let Some(decision) =
                 self.run_functiongemma_router(base_url, cfg, prompt, &installed, allow_tools)
             {
                 if decision.target_role == RouteRole::Cloud {
                     let cloud_prov = normalize_cloud_fallback_provider(&cfg.cloud_fallback);
                     if !cloud_prov.is_empty() {
+                        self.emit_interim_script(&build_escalation_reaction_script(
+                            RouteRole::Cloud,
+                            false,
+                            prompt,
+                            &cfg.ui_language,
+                        ));
                         self.emit_status(
                             &format!("Router ({}) ➔ Cloud ({cloud_prov}) 昇格中...", decision.router_model),
                             true,
@@ -1789,19 +1966,43 @@ impl AgentEngine {
                         resolve_role_model_from_list(decision.target_role, cfg, &installed)
                     {
                         if assert_allowed_model(&override_model).is_ok() {
+                            self.emit_interim_script(&build_escalation_reaction_script(
+                                decision.target_role,
+                                false,
+                                prompt,
+                                &cfg.ui_language,
+                            ));
                             model = override_model;
                         }
                     }
                 }
             }
+            cached_installed = Some(installed);
         }
-        let switched_specialized = model != base_model;
+        let mut switched_specialized = model != base_model;
+
+        let enable_coding_esc = !cfg.coding_model.trim().is_empty()
+            && !cfg.coding_model.trim().eq_ignore_ascii_case("off");
+        let enable_reasoning_esc = !cfg.reasoning_model.trim().is_empty()
+            && !cfg.reasoning_model.trim().eq_ignore_ascii_case("off");
+        let enable_cloud_esc = !normalize_cloud_fallback_provider(&cfg.cloud_fallback).is_empty();
+        let self_esc_tool = if use_tools && !switched_specialized && images.is_empty() {
+            build_self_escalation_tool(enable_coding_esc, enable_reasoning_esc, enable_cloud_esc)
+        } else {
+            None
+        };
 
         let mut sys_msg = self.build_system_prompt(cfg);
         if switched_specialized {
             sys_msg.push_str(
                 "\n\n[ROUTED SPECIALIST MODEL NOTE]: You were selected for specialized coding/reasoning. \
                  Give a clear, accurate technical answer wrapped in valid Sakura Script (\\0\\s[0]...\\e).",
+            );
+        } else if self_esc_tool.is_some() {
+            sys_msg.push_str(
+                "\n\n[SELF-ESCALATION GUIDANCE]: Answer greetings, casual chat, and normal questions directly. \
+                 ONLY if the user asks for non-trivial programming/debugging ('coding'), deep logical/math/architecture analysis ('reasoning'), \
+                 or frontier deep research / explicit Gemini cloud help ('cloud'), call `escalate_to_expert(tier)` immediately instead of guessing.",
             );
         }
         if prompt.chars().any(|c| ('\u{ac00}'..='\u{d7a3}').contains(&c)) && !prompt.starts_with('[') {
@@ -1824,11 +2025,7 @@ impl AgentEngine {
         messages.push(build_multimodal_user_message("ollama", prompt, images));
 
         let max_turns = if use_tools { 4 } else { 1 };
-        let tag_label = if is_remote {
-            format!("Remote GPU ({model})")
-        } else {
-            format!("AI ({model})")
-        };
+        let mut self_escalated = false;
         let client = reqwest::blocking::Client::builder()
             .connect_timeout(Duration::from_millis(2200))
             .timeout(Duration::from_secs(90))
@@ -1836,6 +2033,11 @@ impl AgentEngine {
             .map_err(|e| e.to_string())?;
 
         for turn in 0..max_turns {
+            let tag_label = if is_remote {
+                format!("Remote GPU ({model})")
+            } else {
+                format!("AI ({model})")
+            };
             self.emit_status(&format!("{tag_label} 思考中..."), true);
             let options = if is_remote {
                 json!({
@@ -1857,7 +2059,15 @@ impl AgentEngine {
                 payload["keep_alive"] = json!("15m");
             }
             if use_tools {
-                payload["tools"] = tools_schema();
+                let mut tools_val = tools_schema();
+                if turn == 0 && !self_escalated && !switched_specialized {
+                    if let (Some(arr), Some(ref esc_tool)) =
+                        (tools_val.as_array_mut(), &self_esc_tool)
+                    {
+                        arr.push(esc_tool.clone());
+                    }
+                }
+                payload["tools"] = tools_val;
             }
 
             let resp = client
@@ -1883,6 +2093,110 @@ impl AgentEngine {
                 }
             }
 
+            // Semantic Self-Escalation handoff from Tier 1 (`gemma4:e4b`) to Tier 2/3 specialist
+            if use_tools && !self_escalated && !switched_specialized && turn + 1 < max_turns {
+                if let Some(esc_tc) = tcalls.iter().find(|tc| {
+                    tc.get("function")
+                        .and_then(|f| f.get("name"))
+                        .and_then(|n| n.as_str())
+                        == Some("escalate_to_expert")
+                }) {
+                    let fn_obj = esc_tc.get("function").unwrap_or(&Value::Null);
+                    let targs = match fn_obj.get("arguments") {
+                        Some(Value::String(s)) => {
+                            serde_json::from_str(s).unwrap_or_else(|_| json!({}))
+                        }
+                        Some(v @ Value::Object(_)) => v.clone(),
+                        _ => json!({}),
+                    };
+                    let tier_str = targs
+                        .get("tier")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("reasoning")
+                        .trim()
+                        .to_ascii_lowercase();
+                    let esc_role = match tier_str.as_str() {
+                        "coding" => RouteRole::Coding,
+                        "cloud" => RouteRole::Cloud,
+                        _ => RouteRole::Reasoning,
+                    };
+                    self_escalated = true;
+
+                    let installed = cached_installed
+                        .take()
+                        .unwrap_or_else(|| self.list_ollama_models(base_url, 800));
+                    let mut handoff_done = false;
+
+                    if esc_role == RouteRole::Cloud {
+                        let cloud_prov = normalize_cloud_fallback_provider(&cfg.cloud_fallback);
+                        if !cloud_prov.is_empty() {
+                            self.emit_interim_script(&build_escalation_reaction_script(
+                                RouteRole::Cloud,
+                                false,
+                                prompt,
+                                &cfg.ui_language,
+                            ));
+                            self.emit_status(
+                                &format!("Self-Escalation ➔ Cloud ({cloud_prov}) 昇格中..."),
+                                true,
+                            );
+                            if let Ok(cloud_rep) = self.dispatch_cloud_provider(
+                                &cloud_prov,
+                                cfg,
+                                prompt,
+                                images,
+                                save_hist,
+                            ) {
+                                return Ok(cloud_rep);
+                            }
+                            // Cloud failed -> try Tier 2 local reasoning model
+                            if let Ok(Some(local_t2)) =
+                                resolve_role_model_from_list(RouteRole::Reasoning, cfg, &installed)
+                            {
+                                if assert_allowed_model(&local_t2).is_ok() && local_t2 != model {
+                                    model = local_t2;
+                                    switched_specialized = true;
+                                    tools_used.push("escalate:reasoning_fallback".to_string());
+                                    handoff_done = true;
+                                }
+                            }
+                        }
+                    } else if let Ok(Some(override_model)) =
+                        resolve_role_model_from_list(esc_role, cfg, &installed)
+                    {
+                        if assert_allowed_model(&override_model).is_ok() && override_model != model {
+                            self.emit_interim_script(&build_escalation_reaction_script(
+                                esc_role,
+                                false,
+                                prompt,
+                                &cfg.ui_language,
+                            ));
+                            self.emit_status(
+                                &format!("Self-Escalation ➔ {override_model} 思考中..."),
+                                true,
+                            );
+                            model = override_model;
+                            switched_specialized = true;
+                            tools_used.push(format!("escalate:{tier_str}"));
+                            handoff_done = true;
+                        }
+                    }
+                    cached_installed = Some(installed);
+
+                    if handoff_done {
+                        if let Some(sys_entry) = messages.first_mut() {
+                            if let Some(prev) = sys_entry.get("content").and_then(|v| v.as_str()) {
+                                let next_sys = format!(
+                                    "{prev}\n\n[ROUTED SPECIALIST MODEL NOTE]: You were selected via self-escalation for specialized coding/reasoning. Give a clear, accurate answer wrapped in valid Sakura Script (\\0\\s[0]...\\e)."
+                                );
+                                sys_entry["content"] = json!(next_sys);
+                            }
+                        }
+                        continue;
+                    }
+                }
+            }
+
             if use_tools && !tcalls.is_empty() && turn + 1 < max_turns {
                 messages.push(json!({
                     "role": "assistant",
@@ -1895,6 +2209,14 @@ impl AgentEngine {
                         continue;
                     };
                     if tname.is_empty() {
+                        continue;
+                    }
+                    if tname == "escalate_to_expert" {
+                        messages.push(json!({
+                            "role": "tool",
+                            "tool_name": tname,
+                            "content": "No separate specialist model is installed for that tier; answer the user directly with your best effort."
+                        }));
                         continue;
                     }
                     tools_used.push(tname.to_string());
@@ -2614,6 +2936,12 @@ impl AgentEngine {
             if primary_res.is_err() && is_local_provider {
                 let cloud_prov = normalize_cloud_fallback_provider(&cfg.cloud_fallback);
                 if !cloud_prov.is_empty() {
+                    self.emit_interim_script(&build_escalation_reaction_script(
+                        RouteRole::Cloud,
+                        false,
+                        prompt,
+                        &cfg.ui_language,
+                    ));
                     self.emit_status(&format!("Local AI 失敗 ➔ Cloud ({cloud_prov}) へフォールバック中..."), true);
                     if let Ok(cloud_rep) =
                         self.dispatch_cloud_provider(&cloud_prov, &cfg, prompt, images, save_hist)

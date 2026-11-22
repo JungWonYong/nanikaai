@@ -4850,7 +4850,11 @@ impl AppRuntime {
                 .collect()
         };
 
-        let mut choices: Vec<String> = vec![String::new(), "auto".to_string()];
+        let mut choices: Vec<String> = if slot == "router" {
+            vec![String::new(), "self".to_string(), "auto".to_string()]
+        } else {
+            vec![String::new(), "auto".to_string()]
+        };
         let push_unique = |list: &mut Vec<String>, item: String| {
             if !list.iter().any(|x| x == &item) {
                 list.push(item);
@@ -7609,6 +7613,7 @@ impl AppRuntime {
     }
 
     fn open_communicate_near_sakura(&mut self) {
+        self.auto_talk_last = Instant::now();
         let (sx, sy, sw, sh) = if let Some(ref mut s) = self.sakura {
             s.sync_pos_from_window();
             (s.logical_pos.0, s.logical_pos.1, s.win_size.0 as f64, s.win_size.1 as f64)
@@ -7726,8 +7731,10 @@ impl AppRuntime {
                 m.ws.window.set_visible(false);
             }
         }
-        if let Some(deferred) = self.pending_auto_talk_actions.take() {
-            let _ = self.proxy.send_event(UserEvent::PlayActions(deferred));
+        if !self.communicate.as_ref().is_some_and(|c| c.visible) {
+            if let Some(deferred) = self.pending_auto_talk_actions.take() {
+                let _ = self.proxy.send_event(UserEvent::PlayActions(deferred));
+            }
         }
     }
 
@@ -8496,6 +8503,7 @@ impl AppRuntime {
     }
 
     fn handle_communicate_key(&mut self, logical_key: &Key, text: Option<&str>) {
+        self.auto_talk_last = Instant::now();
         let mut submit_payload: Option<(String, Vec<crate::agent_engine::ImageAttachment>)> = None;
         let ui_lang = self.effective_ui_lang();
         if let Some(ref mut cw) = self.communicate {
@@ -8512,6 +8520,7 @@ impl AppRuntime {
                     cw.hovered_attach = false;
                     cw.ime_preedit.clear();
                     cw.ws.window.set_visible(false);
+                    self.pending_auto_talk_actions = None;
                 }
                 Key::Named(NamedKey::Enter) => {
                     if cw.ime_preedit.is_empty() {
@@ -8524,6 +8533,7 @@ impl AppRuntime {
                         cw.hovered_send = false;
                         cw.hovered_attach = false;
                         cw.ws.window.set_visible(false);
+                        self.pending_auto_talk_actions = None;
                     }
                 }
                 Key::Named(NamedKey::Backspace) => {
@@ -8783,6 +8793,15 @@ impl AppRuntime {
             if self.playback.sakura_show && need_reposition && !eff_hidden {
                 self.reposition_balloon(Scope::Sakura);
             }
+            if !eff_hidden {
+                if let Some(ref mut cw) = self.communicate {
+                    if cw.visible {
+                        cw.focused = true;
+                        cw.ws.window.set_ime_allowed(true);
+                        cw.ws.window.focus_window();
+                    }
+                }
+            }
         }
         if self.playback.kero_dirty {
             self.playback.kero_dirty = false;
@@ -8817,6 +8836,15 @@ impl AppRuntime {
             }
             if self.playback.kero_show && show_kero && need_reposition && !eff_hidden {
                 self.reposition_balloon(Scope::Kero);
+            }
+            if !eff_hidden {
+                if let Some(ref mut cw) = self.communicate {
+                    if cw.visible {
+                        cw.focused = true;
+                        cw.ws.window.set_ime_allowed(true);
+                        cw.ws.window.focus_window();
+                    }
+                }
             }
         }
     }
@@ -10302,7 +10330,9 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                 self.playback.enqueue(actions);
             }
             UserEvent::AutoTalkActions(actions) => {
-                if self.menu.as_ref().is_some_and(|m| m.visible) {
+                let menu_open = self.menu.as_ref().is_some_and(|m| m.visible);
+                let communicate_open = self.communicate.as_ref().is_some_and(|c| c.visible);
+                if menu_open || communicate_open {
                     self.pending_auto_talk_actions = Some(actions);
                 } else {
                     let _ = self.proxy.send_event(UserEvent::PlayActions(actions));
@@ -10967,11 +10997,13 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
         }
 
         let menu_open = self.menu.as_ref().is_some_and(|m| m.visible);
-        let suppress_interruptions = should_suppress_interruptions(
+        let communicate_open = self.communicate.as_ref().is_some_and(|c| c.visible);
+        let suppress_interruptions = should_suppress_interruptions_with_input(
             cfg_now.quiet_mode,
             eff_hidden,
             self.pomodoro.is_focusing(),
             menu_open,
+            communicate_open,
         );
 
         // Poll due reminders & hourly chime every second when idle/not closing
@@ -11157,6 +11189,10 @@ pub fn run(smoke_test: bool) -> Result<(), String> {
         Arc::clone(&manifest_arc),
         Some(status_cb),
     );
+    let interim_proxy = proxy.clone();
+    engine.set_interim_callback(Arc::new(move |actions| {
+        let _ = interim_proxy.send_event(UserEvent::PlayActionsNoBacklog(actions));
+    }));
 
     let cfg_dir_for_cal = config_store.config_dir.clone();
     let smoke_passed = Arc::new(Mutex::new(false));
@@ -11244,6 +11280,19 @@ pub fn should_suppress_interruptions(
     menu_open: bool,
 ) -> bool {
     quiet_mode || eff_hidden || pomo_focusing || menu_open
+}
+
+/// Extended interruption suppression guard that also suppresses auto-talk / idle chimes
+/// whenever the chat input box (`communicate`) is open so typing & IME focus are never stolen.
+pub fn should_suppress_interruptions_with_input(
+    quiet_mode: bool,
+    eff_hidden: bool,
+    pomo_focusing: bool,
+    menu_open: bool,
+    communicate_open: bool,
+) -> bool {
+    should_suppress_interruptions(quiet_mode, eff_hidden, pomo_focusing, menu_open)
+        || communicate_open
 }
 
 /// Public snapshot helper for `/api/settings` (guarantees `api_key` and secret `calendar_ics_urls` are never exposed).

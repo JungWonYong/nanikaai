@@ -2496,6 +2496,13 @@ fn format_routing_model_label(
             UiLang::Ja => "メインモデル維持".to_string(),
         };
     }
+    if trimmed.eq_ignore_ascii_case("self") {
+        return match lang {
+            UiLang::Ko => "Self (e4b 자가 승격)".to_string(),
+            UiLang::En => "Self (e4b Auto-Escalate)".to_string(),
+            UiLang::Ja => "Self (e4b 自律昇格)".to_string(),
+        };
+    }
     if trimmed.eq_ignore_ascii_case("auto") {
         return auto_label.to_string();
     }

@@ -3396,7 +3396,8 @@ fn spec_ai_05_functiongemma_routing_and_guardrails() {
 fn spec_ai_06_tiered_escalation_vision_and_cloud_fallback() {
     use nanikaai::agent_engine::{
         build_functiongemma_router_tools_ex, classify_route_role_heuristic_with_cloud,
-        is_valid_cloud_fallback_provider, normalize_cloud_fallback_provider,
+        is_clean_router_tool_response, is_valid_cloud_fallback_provider,
+        normalize_cloud_fallback_provider, prompt_likely_needs_router_tool,
         resolve_vision_escalation_model, AgentEngine, ImageAttachment, RouteRole,
     };
     use nanikaai::builtin_tools::BuiltinToolRunner;
@@ -3460,10 +3461,31 @@ fn spec_ai_06_tiered_escalation_vision_and_cloud_fallback() {
         .unwrap();
     assert!(role_enum.iter().any(|v| v == "cloud"));
 
+    // 2b. Guard against 270M FunctionGemma hallucinations on casual chat
+    assert!(!prompt_likely_needs_router_tool("안녕!"));
+    assert!(!prompt_likely_needs_router_tool("오늘 기분 어때?"));
+    assert!(prompt_likely_needs_router_tool("7*8 계산해줘"));
+    assert!(prompt_likely_needs_router_tool("서울 날씨 알려줘"));
+    assert!(!is_clean_router_tool_response(
+        &[
+            json!({"function":{"name":"get_weather"}}),
+            json!({"function":{"name":"route_model"}})
+        ],
+        ""
+    ));
+    assert!(!is_clean_router_tool_response(
+        &[json!({"function":{"name":"get_weather"}})],
+        "call:calculate{expression: 2}"
+    ));
+    assert!(is_clean_router_tool_response(
+        &[json!({"function":{"name":"calculate"}})],
+        ""
+    ));
+
     // 3. Mock server exercising:
     //    (a) Image attachment on gemma4:e4b -> auto-escalates to gemma4:31b (Tier 2 Vision)
     //    (b) Router returns route_model(role="cloud") -> escalates to Tier 3 cloud endpoint (/v1/chat/completions)
-    //    (c) Local Ollama returns HTTP 500 -> automatic Tier 3 cloud fallback
+    //    (c) Casual chat ("안녕") skips 270M router & hits local e4b -> HTTP 500 -> automatic Tier 3 cloud fallback
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock tiered server");
     let addr = listener.local_addr().unwrap();
     let recorded_paths: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3472,8 +3494,8 @@ fn spec_ai_06_tiered_escalation_vision_and_cloud_fallback() {
     let server_handle = thread::spawn(move || {
         // Call (a) Vision: GET /api/tags, POST /api/chat (gemma4:31b) = 2 reqs
         // Call (b) Cloud Escalation: GET /api/tags, POST /api/chat (functiongemma->cloud), POST /v1/chat/completions = 3 reqs
-        // Call (c) Local 500 Fallback: GET /api/tags, POST /api/chat (functiongemma->no tool), POST /api/chat (e4b->500), POST /v1/chat/completions = 4 reqs
-        for _ in 0..9 {
+        // Call (c) Local 500 Fallback: GET /api/tags (router skipped for casual chat!), POST /api/chat (e4b->500), POST /v1/chat/completions = 3 reqs
+        for _ in 0..8 {
             let Ok((mut stream, _)) = listener.accept() else {
                 break;
             };
@@ -3652,6 +3674,205 @@ fn spec_ai_06_tiered_escalation_vision_and_cloud_fallback() {
         2,
         "both Tier 3 escalation and local-error fallback must reach cloud endpoint"
     );
+
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn spec_ai_07_self_escalation_interim_reaction_and_input_focus_guard() {
+    use nanikaai::agent_engine::{
+        build_escalation_reaction_script, build_self_escalation_tool,
+        resolve_router_model_from_list, AgentEngine, RouteRole,
+    };
+    use nanikaai::builtin_tools::BuiltinToolRunner;
+    use nanikaai::config_store::{ConfigPatch, ConfigStore};
+    use nanikaai::gui::should_suppress_interruptions_with_input;
+    use nanikaai::shell_parser::ShellManager;
+    use serde_json::json;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+
+    // 1. Focus-steal protection: auto-talk / idle interruptions MUST be suppressed while communicate box is open
+    assert!(should_suppress_interruptions_with_input(false, false, false, false, true));
+    assert!(!should_suppress_interruptions_with_input(false, false, false, false, false));
+
+    // 2. "self" router mode skips external 270M functiongemma cleanly
+    let installed = vec![
+        "functiongemma:latest".to_string(),
+        "gemma4:e4b".to_string(),
+        "gemma4:31b".to_string(),
+        "devstral-small-2:latest".to_string(),
+    ];
+    assert_eq!(resolve_router_model_from_list("self", &installed).unwrap(), None);
+
+    // 3. Escalation waiting reaction scripts (KO/JA/EN + Vision) must be valid Sakura Script
+    let ko_reason = build_escalation_reaction_script(RouteRole::Reasoning, false, "이 알고리즘 증명해줘", "ko");
+    assert!(ko_reason.contains("\\0\\s[3]") && ko_reason.contains("잠시만 기다려") && ko_reason.ends_with("\\e"));
+    let ja_code = build_escalation_reaction_script(RouteRole::Coding, false, "Rustで実装して", "ja");
+    assert!(ja_code.contains("\\0\\s[3]") && ja_code.contains("少し待って") && ja_code.ends_with("\\e"));
+    let en_cloud = build_escalation_reaction_script(RouteRole::Cloud, false, "Research this deeply", "en");
+    assert!(en_cloud.contains("\\0\\s[3]") && en_cloud.contains("cloud AI") && en_cloud.ends_with("\\e"));
+    let ko_vis = build_escalation_reaction_script(RouteRole::Reasoning, true, "이 그림 봐줘", "ko");
+    assert!(ko_vis.contains("고해상도") && ko_vis.ends_with("\\e"));
+
+    let esc_tool = build_self_escalation_tool(true, true, true).expect("self escalation tool");
+    assert_eq!(esc_tool["function"]["name"], "escalate_to_expert");
+
+    // 4. End-to-end mock Ollama test:
+    //    Turn 0: gemma4:e4b calls `escalate_to_expert(tier="reasoning")`
+    //    -> InterimCallback fires waiting reaction IMMEDIATELY
+    //    -> Turn 1: hands off cleanly to `gemma4:31b` and returns final Sakura Script answer
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock self-escalation server");
+    let addr = listener.local_addr().unwrap();
+    let called_models: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let called_clone = Arc::clone(&called_models);
+
+    let server_handle = thread::spawn(move || {
+        // Expect 3 requests: POST /api/chat (e4b -> escalate_to_expert), GET /api/tags, POST /api/chat (31b -> final)
+        for _ in 0..3 {
+            let Ok((mut stream, _)) = listener.accept() else {
+                break;
+            };
+            let mut buf = Vec::new();
+            let mut tmp_b = [0u8; 4096];
+            let mut header_end = None;
+            let mut content_len = 0usize;
+            while let Ok(n) = stream.read(&mut tmp_b) {
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp_b[..n]);
+                if header_end.is_none() {
+                    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        header_end = Some(pos + 4);
+                        let hdr = String::from_utf8_lossy(&buf[..pos]);
+                        for line in hdr.lines() {
+                            if let Some((k, v)) = line.split_once(':') {
+                                if k.trim().eq_ignore_ascii_case("content-length") {
+                                    content_len = v.trim().parse().unwrap_or(0);
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(he) = header_end {
+                    if buf.len() >= he + content_len {
+                        break;
+                    }
+                }
+            }
+            let req_text = String::from_utf8_lossy(&buf);
+            let first_line = req_text.lines().next().unwrap_or("");
+            let body_json: Value = header_end
+                .and_then(|he| serde_json::from_slice(&buf[he..]).ok())
+                .unwrap_or_else(|| json!({}));
+
+            let resp_body = if first_line.starts_with("GET /api/tags") {
+                json!({
+                    "models": [
+                        {"name": "gemma4:e4b"},
+                        {"name": "gemma4:31b"},
+                        {"name": "devstral-small-2:latest"}
+                    ]
+                })
+                .to_string()
+            } else {
+                let model = body_json["model"].as_str().unwrap_or("").to_string();
+                called_clone.lock().unwrap().push(model.clone());
+                if model == "gemma4:e4b" {
+                    // Verify `escalate_to_expert` was exposed in tools on Turn 0
+                    let has_esc = body_json["tools"]
+                        .as_array()
+                        .is_some_and(|arr| arr.iter().any(|t| t["function"]["name"] == "escalate_to_expert"));
+                    assert!(has_esc, "gemma4:e4b Turn 0 must receive escalate_to_expert tool");
+                    json!({
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [{
+                                "function": {
+                                    "name": "escalate_to_expert",
+                                    "arguments": {"tier": "reasoning", "reason": "deep mathematical proof"}
+                                }
+                            }]
+                        }
+                    })
+                    .to_string()
+                } else {
+                    json!({
+                        "message": {
+                            "role": "assistant",
+                            "content": "\\0\\s[5]31B 모델로 깊게 검토해 본 결과, 시간복잡도는 O(n log n)입니다!\\e"
+                        }
+                    })
+                    .to_string()
+                }
+            };
+
+            let http_resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                resp_body.len(),
+                resp_body
+            );
+            let _ = stream.write_all(http_resp.as_bytes());
+        }
+    });
+
+    let tmp = std::env::temp_dir().join(format!("nanikaai_spec_ai_07_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+
+    let store = ConfigStore::new(Some(tmp.clone()));
+    store.update(ConfigPatch {
+        provider: Some("ollama".to_string()),
+        endpoint_url: Some(format!("http://{addr}")),
+        model: Some("gemma4:e4b".to_string()),
+        router_model: Some("self".to_string()),
+        coding_model: Some("auto".to_string()),
+        reasoning_model: Some("auto".to_string()),
+        cloud_fallback: Some("gemini-paid".to_string()),
+        enable_tools: Some(true),
+        ..Default::default()
+    });
+
+    let runner = BuiltinToolRunner::new(store.clone(), Some(tmp.clone()));
+    let manifest = ShellManager::new(vec![
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/shells"),
+        tmp.join("user_shells"),
+    ])
+    .load_shell("neo_default")
+    .expect("load neo_default");
+    let engine = AgentEngine::new(store.clone(), runner, Arc::new(Mutex::new(manifest)), None);
+
+    let interim_fired: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let interim_clone = Arc::clone(&interim_fired);
+    engine.set_interim_callback(Arc::new(move |actions| {
+        let joined: String = actions
+            .iter()
+            .filter_map(|a| if a.text.is_empty() { None } else { Some(a.text.as_str()) })
+            .collect::<Vec<_>>()
+            .join(" ");
+        interim_clone.lock().unwrap().push(joined);
+    }));
+
+    let rep = engine.handle_user_message("이 정렬 알고리즘의 하한 복잡도를 엄밀하게 증명해줘");
+    assert_eq!(rep.used_model, "gemma4:31b");
+    assert!(rep.raw_reply.contains("O(n log n)"));
+    assert!(rep.tools_used.iter().any(|t| t == "escalate:reasoning"));
+
+    let interims = interim_fired.lock().unwrap().clone();
+    assert_eq!(interims.len(), 1, "expected exactly 1 waiting reaction fired on escalation");
+    assert!(
+        interims[0].contains("잠시만 기다려"),
+        "expected Korean waiting reaction, got: {}",
+        interims[0]
+    );
+
+    let _ = server_handle.join();
+    let seq = called_models.lock().unwrap().clone();
+    assert_eq!(seq, vec!["gemma4:e4b".to_string(), "gemma4:31b".to_string()]);
 
     let _ = fs::remove_dir_all(&tmp);
 }
