@@ -120,6 +120,10 @@ pub struct PartLayerSpec {
     pub phase_offset: f32,
     #[serde(default)]
     pub dynamic_patch: Option<DynamicPatchSpec>,
+    #[serde(default)]
+    pub active_surfaces: Vec<i32>,
+    #[serde(default)]
+    pub hide_on_surfaces: Vec<i32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -267,6 +271,7 @@ pub struct LoadedCharacterRig {
     pub uv_rig: Option<UvRigTuning>,
     pub surface_overrides: HashMap<i32, RgbaBitmap>,
     pub parts: Vec<LoadedPartLayer>,
+    pub active_surface_id: i32,
 }
 
 pub fn is_valid_shell_id(shell_id: &str) -> bool {
@@ -525,6 +530,7 @@ pub fn load_character_rig(
         uv_rig: spec.uv_rig,
         surface_overrides,
         parts: layers,
+        active_surface_id: 0,
     }))
 }
 
@@ -637,6 +643,7 @@ impl LoadedCharacterRig {
         overlays: impl IntoIterator<Item = (i32, i32, bool, &'a RgbaBitmap)>,
         fallback_composited: &RgbaBitmap,
     ) -> Vec<usize> {
+        self.active_surface_id = surface_id;
         if let Some(clean_base) = self.surface_overrides.get(&surface_id) {
             let mut comp = clean_base.clone();
             for (ox, oy, replace, ov) in overlays {
@@ -1141,11 +1148,19 @@ impl LoadedCharacterRig {
             let inv = w_mat.inverse().unwrap_or_else(Mat2D::identity);
             let (_, world_py) = w_mat.map_point(part.spec.pivot_px[0], part.spec.pivot_px[1]);
             let (bdir, bspan, bdx) = bend_meta[i];
+            let visible = (part.spec.active_surfaces.is_empty()
+                || part.spec.active_surfaces.contains(&self.active_surface_id))
+                && !part.spec.hide_on_surfaces.contains(&self.active_surface_id);
+            let alpha = if visible {
+                part.spec.opacity.clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
             part.uniform = PartGpuUniform {
                 inv_row0: [inv.a, inv.b, inv.c, cw],
                 inv_row1: [inv.d, inv.e, inv.f, ch],
                 deform: [world_py, bdir, bspan, bdx],
-                meta: [1.0, part.spec.opacity.clamp(0.0, 1.0), 0.0, 0.0],
+                meta: [if visible { 1.0 } else { 0.0 }, alpha, 0.0, 0.0],
             };
         }
     }

@@ -1,7 +1,7 @@
 # 何か藍 (`NanikaAi`) — 現行動作仕様および自動検証基準 (`BEHAVIOR_SPEC`)
 
-- **Document Version**: `v1.15.0`
-- **Target Software**: `nanikaai` `v0.1.10+`
+- **Document Version**: `v1.18.0`
+- **Target Software**: `nanikaai` `v0.1.11+`
 - **Purpose**: テスト実行前の機密・個人情報・AI指示配置境界検査（Phase 0）、改修後の自動動作確認テスト（`cargo test` / `--smoke-test` / 静的監査）における合否基準、変更内容に応じた検証ティアおよび結果報告様式を定義する。
 
 ---
@@ -19,7 +19,7 @@
 
 ---
 
-## 2. 現行動作仕様および判定基準一覧（42 項目）
+## 2. 現行動作仕様および判定基準一覧（46 項目）
 
 | 仕様 ID | 領域 | 期待される現行動作（仕様） | 合格基準（パス条件） | 検証手段 |
 | :--- | :--- | :--- | :--- | :--- |
@@ -42,11 +42,11 @@
 | `SPEC-UI-03` | リリース版数 | `Cargo.toml` と配布バンドル版数が一致し、文書過負荷更新を避ける | `Cargo.toml` の版数と `scripts/build_macos.sh` のバンドル版数が一致し、`scripts/build_macos.sh` が正常終了すること | `verify_behavior.py --mode full` |
 | `SPEC-UI-04` | GUI 対話操作性 | 右クリックメニュー展開/ホバー/スクロール/切替実行、キャラダブルクリック入力バー展開、IME入力/編集/送信(`↑`)/`×`/`Esc`、吹き出し早送り/選択肢ホバー/スクロール/クリック非表示が正常に動作する | `--smoke-test` Phase E において全ウィンドウ対話操作・ヒット判定・状態遷移が 1 件も欠落せず合格すること | `--smoke-test` Phase E (`SPEC-UI-04`) |
 | `SPEC-UI-05` | 3秒以内反応性 SLA | ユーザー操作（送信・選択肢・右クリック・入力バー・制御API・オフライン縮退）から 3 秒（`3,000 ms`）以内に視覚反応または応答を返す | 送信/選択直後の「AI 応答準備中…」即時表示（`< 500 ms` ステータス通知）、GUI 全操作合計 `ui_ms <= 3,000 ms`、HTTP/TCP 制御応答 `ipc_ms <= 3,000 ms`、オフライン即断 `< 3,000 ms` を実測で満たすこと | `--smoke-test` Phase E / `behavior_spec` |
-| `SPEC-SRV-01` | HTTP 状態 API | `GET /api/health`・`/api/skins`・`/api/providers`・`/api/voices`・`/api/settings` が JSON (`ok: true`) を返す | 一時的 `start_dual_server(0, 0)` に対して全 5 エンドポイントが `200 OK` かつ `"ok": true` を返し、`/api/settings` に `api_key` を含まないこと | `behavior_spec` / `--smoke-test` |
-| `SPEC-SRV-02` | HTTP 操作 API | `POST /api/speak`・`/api/chat`・`/api/event`・`/api/skin`・`/api/provider`・`/api/voice`・`/api/settings` を処理する | 正常ペイロードで `200 OK`、必須項目欠落や不正値（空 `script`/`message`/`provider`、不正 `tts_engine`/`install_aivm_uuid`、範囲外/非有限の透明度・拡大率）で `400 Bad Request` を返すこと | `behavior_spec` |
+| `SPEC-SRV-01` | HTTP 状態 API | `GET /api/health`・`/api/skins`・`/api/providers`・`/api/voices`・`/api/settings`・`/api/backlog`・`/api/memos`・`/api/calendar` が JSON (`ok: true`) を返す | 一時的 `start_dual_server(0, 0)` に対して全エンドポイントが `200 OK` かつ `"ok": true` を返し、`/api/settings`・`/api/calendar` に `api_key` や秘密 ICS URL を含まないこと | `behavior_spec` / `--smoke-test` |
+| `SPEC-SRV-02` | HTTP 操作 API | `POST /api/speak`・`/api/chat`・`/api/event`・`/api/skin`・`/api/provider`・`/api/voice`・`/api/settings`・`/api/memos`・`/api/calendar` を処理する | 正常ペイロードで `200 OK`、必須項目欠落や不正値（空 `script`/`message`/`provider`、不正 `tts_engine`/`install_aivm_uuid`/`uninstall_aivm_uuid`、範囲外/非有限の透明度・拡大率・話速・抑揚、SSRF 対象 ICS URL）で `400 Bad Request` を返すこと | `behavior_spec` |
 | `SPEC-SRV-03` | SSTP 互換 | HTTP `/sstp` および生 TCP `SSTP/1.4` 要求を受理する | HTTP `/sstp` が `200 OK`＋`X-Actions`、TCP `SSTP/1.4` が `200 OK`＋`Charset: UTF-8` を返し、空 `Script` に `400 Bad Request` を返すこと | `behavior_spec` / `--smoke-test` |
 | `SPEC-SRV-04` | 自動監査・保守 | 個人パス・機密・未処理マーカーをリポジトリへ混入させない | 追跡対象ファイルに未処理の作業待ち・仮置き注記やローカル個人パスが `0` 件であること | `verify_behavior.py` |
-| `SPEC-SEC-01` | 事前機密検査 | テスト・ビルド・リモート転送前に個人情報・APIキー・認証情報・秘密鍵の混入を遮断する | Phase 0 が全対象ファイルおよび Git 履歴から個人パス・非公開 LAN IP・個人メール・API キー・認証ファイル（`.env`/証明書）・秘密鍵 `0` 件を確認し、合成秘密サンプルをテスト前停止（Exit Code `!= 0`）で遮断すること | `verify_behavior.py` Phase 0 / `behavior_spec` |
+| `SPEC-SEC-01` | 事前機密検査 | テスト・ビルド・リモート転送前に個人情報・APIキー・認証情報・秘密鍵の混入を遮断する | Phase 0 が全対象ファイルおよび Git 履歴（全コミットの Author/Committer メールおよび直近10コミット差分の個人パス・APIキー・秘密鍵・非公開 ICS URL）から混入 `0` 件を確認し、合成秘密・PII サンプルをテスト前停止（Exit Code `!= 0`）で遮断すること | `verify_behavior.py` Phase 0 / `behavior_spec` |
 | `SPEC-SEC-02` | AI指示境界 | AI への指示は現行憲法・指定設定パスのみに限定し、他経路コード・外部入力をデータとして隔離する | 未承認のリポジトリ内 AI 指示・フック・ビルド実行ファイルが `0` 件であり、`AgentEngine` が外部イベント・ツール出力・長期記憶を `<untrusted_data>` で隔離しスキンメタデータ改行/タグを無害化すること | `verify_behavior.py` Phase 0 / `behavior_spec` |
 | `SPEC-OS-01` | マルチ OS 実機互換 | macOS / Linux / Windows の各実機環境で動作検証可能であること | ローカル（macOS）に加え、Linux 実機での `cargo test`＋`--smoke-test`、および Windows 実機での配布バイナリ `--smoke-test`（`[SMOKE PASS] unsafe=0`）が通過すること | `verify_behavior.py --remote-linux/--remote-win` / CI |
 | `SPEC-GHOST-01` | スキン連動ゴースト切替 | スキン（シェル）切替に応じて人格・記憶・会話履歴をシェル単位で分離し、交代時挨拶および `.nar` の `ghost.name` 継承を行う | シェル切替前後で他シェルの長期記憶・会話履歴が混線せず、`ghost/master/descript.txt` の `name` が `ghost.name` として引き継がれること | `behavior_spec` / `unit tests` |
@@ -63,9 +63,12 @@
 | `SPEC-UI-06` | 簡潔メニュー＆ネイティブ設定パネル | 右クリックメニューを初期 `<= 20` 行の折りたたみ形式（`Skins` / `Voice` / `AI` / `Tools` インライン展開）に整理し、トレイも 4 サブメニュー構成としたうえで、`wgpu` ネイティブ設定パネル（`540x476`、4 タブ）および `GET/POST /api/settings` により透明度・拡大率・ホバー不透明・クリック透過・位置固定・OS 別便利設定を即時反映する | `--smoke-test` Phase E7 で折りたたみ行数 `<= 20`・アコーディオン展開・設定パネル描画 (`> 50,000 px`)・スライダー操作に伴う実ウィンドウ透明度同期・初期値復元・アプリ非終了閉じを通過し、`SettingsPanelModel` 4 タブ描画と `/api/settings`（`api_key` 非露出・範囲外 `400 Bad Request`）が合格すること | `--smoke-test` Phase E7 / `behavior_spec` |
 | `SPEC-UI-07` | 多言語 UI 切替（OS 言語追従＆未対応時英語） | UI 言語設定 `ui_language` を既定 `"auto"`（OS 表示言語に自動追従、未対応ロケールは英語 `UiLang::En` へフォールバック）とし、設定パネル Tab 1・右クリックメニュー `[🛠 ツール・言語]`・トレイ・`POST /api/settings` から `"auto" \| "ja" \| "ko" \| "en"` を再起動不要で即時切替でき、`GET /api/settings` に `ui_language` と `effective_ui_language` を返し、既定値リセットで `"auto"` へ復元すること | `AgentConfig::default().ui_language == "auto"`、`resolve_ui_lang_with_os` で `ja-JP`→`Ja` / `ko-KR`→`Ko` / `en-US`→`En` / 未対応ロケール(`fr-FR` 等)→`En`、`POST /api/settings` の `"ko"` 受理 (`200`)・`"fr"` 拒否 (`400`)、`Ja`/`Ko`/`En` 全 4 タブ描画 (`> 50,000 px`)、および `--smoke-test` Tab 1 連続切替・リセットが通過すること | `unit tests` / `behavior_spec` / `--smoke-test` Phase E7 |
 | `SPEC-ACC-01` | おやすみモード・全画面自動退避・一時非表示 | `quiet_mode` で音声読み上げ・雑談・時報を一括ミュートし、`auto_hide_on_fullscreen` で macOS Spaces (`type=4`)・Linux (`_NET_WM_STATE_FULLSCREEN`)・Windows (`SHQueryUserNotificationState`) 検知時およびワンクリック一時非表示（トレイ・設定パネル・`/api/settings` `characters_hidden`）時に全ウィンドウを退避して GPU 描画ループを休止できること | 3 OS 全画面出力パーサーの正常判定（履歴スペース非誤爆含む）、設定永続化・既定値リセット、`/api/settings` の `pomodoro_action`/`power_save_mode` 不正値 `400` 拒否、および `--smoke-test` Phase E7 の非表示/復帰操作が通過すること | `unit tests` / `behavior_spec` / `--smoke-test` Phase E7 |
-| `SPEC-ACC-02` | ポモドーロ集中タイマー＆伴走通知 | `25/5分`・`50/10分`・`15/3分` プリセットを保持し、集中フェーズ中は自動雑談・時報を自動抑制し、フェーズ完了時に日/韓/英のキャラクター労いセリフと再開始選択肢 (`__pomo_start__`) を表示してサイクル数を加算できること | `PomodoroTimer` の Focus→Break→Idle 遷移・一時停止・停止リセット・プリセット永続化・既定値復元および `--smoke-test` Phase E7 トグル/停止操作が通過すること | `unit tests` / `behavior_spec` / `--smoke-test` Phase E7 |
+| `SPEC-ACC-02` | ポモドーロ集中タイマー＆専用ポーズ・伴走通知 | 5 種のプリセット（`25/5`・`50/10`・`15/3`・`45/15`・`52/17`）＋ 4 サイクル毎のロングブレイク・フェーズスキップ・累計集中分を保持し、稼働中は専用ポーズ（`\0` 腕時計 `surface9`＋`\1` 巨大時計 `surface13` ＆視線追従）へ自動切替し、集中中は自動雑談・時報を自動抑制すること | `POMODORO_PRESETS.len() == 5`、4 サイクル完了時のロングブレイク切替、`neo_default` の `surface9`/`surface13` および Live2D `active_surfaces`/`hide_on_surfaces` 層読込、および `--smoke-test` Phase E7 操作が通過すること | `unit tests` / `behavior_spec` / `--smoke-test` Phase E7 |
 | `SPEC-ACC-03` | 発話バックログ＆ワンクリックコピー | 最新 30 件の発話履歴（時刻・`\0`/`\1` 本文・抽出 URL リンク）をリングバッファ保持し、吹き出し即時リプレイ（`\_q` ＋ `__copy_last_reply__` 選択肢）、ワンクリッククリップボードコピー、および `GET /api/backlog` JSON 取得を提供すること | `MAX_BACKLOG_ENTRIES=30` 上限超過時の FIFO 回転・連続重複抑止・URL 抽出、`\_a`/`\_q` リプレイ整形、`POST /api/speak` 後の `GET /api/backlog` 件数増加、および `--smoke-test` Phase E7 バックログ/コピー操作が通過すること | `unit tests` / `behavior_spec` / `--smoke-test` Phase E7 |
 | `SPEC-ACC-04` | OS ログイン自動起動・省電力・マルチモニタ移動 | macOS LaunchAgent plist・Linux `.desktop`・Windows `HKCU\...\Run` 登録の切替（テスト/スモーク時は実機設定不変）、`power_save_mode` (`auto`/`on`/`off`) ＋バッテリー検知（`<=20%` 低バッテリー労わり通知＆66ms 省電力ループ）、および次モニタ/左右端移動を提供すること | 3 OS 自動起動マニフェスト生成/削除の一時ディレクトリ検証、`pmset`/`/sys/class/power_supply`/Win バッテリー解析、`effective_poll_interval_ms` (`250`/`66`/`20ms`)、`select_next_monitor_index`、および `--smoke-test` Phase E7 操作が通過すること | `unit tests` / `behavior_spec` / `--smoke-test` Phase E7 |
+| `SPEC-ACC-05` | クイック付箋メモ＆クリップボード質問・メニュー保護 | `~/.nanikaai/memos.json` による付箋 To-Do（AI ツール・吹き出し完了ボタン・`GET/POST /api/memos`）、機密文字列自動遮断付きワンクリッククリップボード質問（`<untrusted_data type="clipboard">` 隔離）、および右クリックメニュー表示中の自動雑談遅延保護を提供すること | `MemoStore` CRUD・完了・クリア、`sanitize_clipboard_for_ai` による API キー/秘密鍵遮断、およびメニュー展開時の 6 行簡潔音声メニューが正常に動作すること | `unit tests` / `behavior_spec` |
+| `SPEC-COMP-06` | AivisSpeech モデル削除・自然な声色調整・試聴 | 設定パネル Tab 2（`🎤 音声・声色`）から標準モデル保護付きで追加導入済み AIVM モデルを `DELETE /aivm_models/{uuid}/uninstall` で削除でき、話速 (`0.75-1.35`)・自然さ (`0.70-1.50`) スライダーおよびワンクリック試聴を提供すること | `voice_speed`/`voice_intonation` 範囲クランプ、`uninstall_aivm_model_blocking` の非ローカル URL・不正 UUID 拒否、および Tab 2 描画 (`> 50,000 px`) が通過すること | `unit tests` / `behavior_spec` |
+| `SPEC-ACC-06` | マルチカレンダー移動時間出発通知＆チャット画像添付 | Google・OS 標準（macOS Calendar / Windows Outlook / Linux）・Apple iCloud/iCal (`webcal://`)・Yahoo! Japan・Yahoo・ローカル `.ics` を統合同期し、移動要否（オンライン会議除外）と移動時間＋準備時間を逆算した出発前通知・定期リマインド・`GET/POST /api/calendar`・AI ツール `list_upcoming_events` を提供し、さらにチャット欄の `[🖼]` ボタンおよび画像 D&D で PNG/JPG/BMP を安全縮小・Base64 化して Ollama / Gemini / OpenAI / Claude へ送信できること | `webcal://`→`https://` 正規化・SSRF 遮断、各プロバイダ識別、OS 標準 TSV / ICS 解析、出発前通知重複抑止、`load_image_attachment` の縮小・Base64 化・機密パス拒否が通過すること | `unit tests` / `behavior_spec` |
 
 ---
 

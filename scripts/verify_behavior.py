@@ -192,7 +192,16 @@ def check_phase0_pretest_security(scan_root: Path) -> list[dict[str, Any]]:
     )
     generic_home_re = re.compile(r"(?:" + "/" + "Users/|" + "/" + r"home/|C:\\{1,2}Users\\{1,2})([A-Za-z0-9._-]{2,})(?:[/\\]|$)")
     allowed_home_placeholders = {"user", "username", "yourname", "you", "alice", "bob", "example", "runner", "nanikaai"}
-    lan_ip_re = re.compile("192" + r"\." + "168" + r"\.\d+\.\d+")
+    lan_ip_re = re.compile(
+        r"(?<![\d.])(?:"
+        + "192" + r"\." + "168" + r"\.\d{1,3}\.\d{1,3}"
+        + r"|10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
+        + r"|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}"
+        + r"|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}"
+        + r"|169\.254\.(?!169\.254\b)\d{1,3}\.\d{1,3}"
+        + r")(?![\d.])"
+    )
+    secret_ics_re = re.compile(r"calendar\.google\.com/calendar/ical/[^/\s]+/private-[A-Za-z0-9_-]{10,}", re.I)
     email_re = re.compile(r"(?<![A-Za-z0-9._%+-])([A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.([A-Za-z]{2,}))\b")
     non_email_tlds = {"png", "jpg", "jpeg", "webp", "gif", "svg", "ico", "icns", "pna", "rs", "py", "md", "toml", "txt"}
 
@@ -257,6 +266,8 @@ def check_phase0_pretest_security(scan_root: Path) -> list[dict[str, Any]]:
         text = fp.read_text(encoding="utf-8", errors="replace")
         if priv_key_re.search(text):
             sec01_hits.append(f"{rel_posix} (private key header)")
+        if secret_ics_re.search(text):
+            sec01_hits.append(f"{rel_posix} (private Google Calendar ICS URL)")
         for label, pat in api_secret_res:
             if pat.search(text):
                 sec01_hits.append(f"{rel_posix} ({label})")
@@ -287,20 +298,35 @@ def check_phase0_pretest_security(scan_root: Path) -> list[dict[str, Any]]:
                 break
 
     if (scan_root / ".git").exists():
-        log_rc, log_out = _run(["git", "log", "--format=%H %ae"], cwd=scan_root)
+        log_rc, log_out = _run(["git", "log", "--format=%H %ae %ce"], cwd=scan_root)
         if log_rc == 0:
             for line in log_out.splitlines():
-                parts = line.strip().split(None, 1)
-                if len(parts) != 2:
+                parts = line.strip().split()
+                if len(parts) < 3:
                     continue
-                sha, email = parts[0][:8], parts[1].strip().lower()
-                if not (
-                    email.endswith("@users.noreply.github.com")
-                    or email.endswith("@example.com")
-                    or email.endswith("@example.org")
-                ):
-                    sec01_hits.append(f"commit {sha} ({email})")
-                    break
+                sha = parts[0][:8]
+                for email in (parts[1].lower(), parts[2].lower()):
+                    if not (
+                        email.endswith("@users.noreply.github.com")
+                        or email.endswith("@example.com")
+                        or email.endswith("@example.org")
+                    ):
+                        sec01_hits.append(f"commit {sha} ({email})")
+        # Also audit recent git commit diffs for leaked secrets / private keys / LAN IPs
+        diff_rc, diff_out = _run(["git", "log", "-n", "10", "-p", "--", "src/", "docs/", "scripts/"], cwd=scan_root)
+        if diff_rc == 0 and diff_out:
+            added_lines = "\n".join(
+                ln[1:] for ln in diff_out.splitlines() if ln.startswith("+") and not ln.startswith("+++")
+            )
+            if priv_key_re.search(added_lines):
+                sec01_hits.append("git-history (private key header)")
+            if local_home_re and local_home_re.search(added_lines):
+                sec01_hits.append("git-history (local user path)")
+            for label, cre in api_secret_res:
+                if cre.search(added_lines):
+                    sec01_hits.append(f"git-history ({label})")
+            if secret_ics_re.search(added_lines):
+                sec01_hits.append("git-history (private Google Calendar ICS URL)")
 
     return [
         {
@@ -363,20 +389,36 @@ def check_tier0_static() -> list[dict[str, Any]]:
         "detail": f"検証済み {len(req_docs)}ファイル" if not missing else f"欠落/空: {', '.join(missing)}",
     })
 
-    # SPEC-UI-03 (metadata consistency): Cargo.toml version vs build_macos.sh bundle version
+    # SPEC-UI-02: tray-icon dependency restricted strictly to macOS / Windows
     cargo_txt = (ROOT_DIR / "Cargo.toml").read_text(encoding="utf-8", errors="replace")
+    tray_cfg_ok = bool(
+        re.search(
+            r'\[target\.\'cfg\(any\(target_os\s*=\s*"macos",\s*target_os\s*=\s*"windows"\)\)\'\.dependencies\][\s\S]{0,160}tray-icon',
+            cargo_txt,
+        )
+    )
+    results.append({
+        "spec": "SPEC-UI-02",
+        "name": "クロス OS 構成（tray-icon macOS/Windows 限定）",
+        "status": "PASS" if tray_cfg_ok else "FAIL",
+        "detail": "Cargo.toml target cfg(macos/windows) 確認済み" if tray_cfg_ok else "tray-icon のターゲット限定が Cargo.toml で確認できません",
+    })
+
+    # SPEC-UI-03 (metadata consistency): Cargo.toml version vs build_macos.sh CFBundleShortVersionString & CFBundleVersion
     cargo_m = re.search(r'^version\s*=\s*"([^"]+)"', cargo_txt, re.M)
     cargo_ver = cargo_m.group(1) if cargo_m else "unknown"
     mac_sh = (ROOT_DIR / "scripts/build_macos.sh").read_text(encoding="utf-8", errors="replace")
-    mac_ok = f"<string>{cargo_ver}</string>" in mac_sh
+    short_ver_ok = bool(re.search(rf"<key>CFBundleShortVersionString</key>\s*<string>{re.escape(cargo_ver)}</string>", mac_sh))
+    bundle_ver_ok = bool(re.search(rf"<key>CFBundleVersion</key>\s*<string>{re.escape(cargo_ver)}</string>", mac_sh))
+    mac_ok = short_ver_ok and bundle_ver_ok
     results.append({
         "spec": "SPEC-UI-03",
         "name": "クレート・バンドル版数整合性",
         "status": "PASS" if mac_ok else "FAIL",
-        "detail": f"Cargo.toml={cargo_ver}, build_macos.sh一致={mac_ok}",
+        "detail": f"Cargo.toml={cargo_ver}, ShortVersion={short_ver_ok}, BundleVersion={bundle_ver_ok}",
     })
 
-    # SPEC-SRV-04: residual / personal leak audit across git-tracked files (and unstaged non-ignored files)
+    # SPEC-SRV-04: residual / personal leak audit across tracked AND untracked non-ignored files
     leak_hits: list[str] = []
     marker_re = re.compile("|".join(["FIX" + "ME", "TO" + "DO", "DUM" + "MY"]))
     home_name = Path.home().name
@@ -385,27 +427,26 @@ def check_tier0_static() -> list[dict[str, Any]]:
     personal_re = re.compile(rf"{home_pat}|{lan_prefix}", re.I)
     self_rel = Path("scripts/verify_behavior.py")
 
-    rc, ls_out = _run(["git", "ls-files"])
-    tracked = [Path(p) for p in ls_out.splitlines() if p.strip()] if rc == 0 else []
-    for rel in tracked:
-        fp = ROOT_DIR / rel
+    tracked = _collect_scan_files(ROOT_DIR)
+    for fp in tracked:
         if not fp.is_file() or fp.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".icns", ".ico", ".zip", ".nar", ".mp4", ".webm", ".wav", ".m4a"}:
             continue
+        rel = fp.relative_to(ROOT_DIR)
         if rel == Path("tests/behavior_spec.rs") or rel == self_rel:
             # Exclude test pattern strings themselves from self-scan; audit only personal IP/path there.
             txt = fp.read_text(encoding="utf-8", errors="replace")
             if personal_re.search(txt):
-                leak_hits.append(str(rel))
+                leak_hits.append(rel.as_posix())
             continue
         txt = fp.read_text(encoding="utf-8", errors="replace")
         if marker_re.search(txt) or personal_re.search(txt):
-            leak_hits.append(str(rel))
+            leak_hits.append(rel.as_posix())
 
     results.append({
         "spec": "SPEC-SRV-04",
         "name": "未処理マーカー・個人情報混入ゼロ監査",
         "status": "PASS" if not leak_hits else "FAIL",
-        "detail": f"追跡テキスト {len(tracked)}件 残留=0" if not leak_hits else f"検出: {', '.join(leak_hits[:5])}",
+        "detail": f"走査テキスト {len(tracked)}件（未追跡含む）残留=0" if not leak_hits else f"検出: {', '.join(leak_hits[:5])}",
     })
 
     return results
@@ -440,19 +481,31 @@ def check_tier1_cargo_tests() -> tuple[list[dict[str, Any]], str]:
     })
 
     expected_groups = [
+        ("SPEC-SAFE-01/02-TEST", "spec_safe_01_02_zero_unsafe_and_cc0_license_separation", "Zero unsafe・MIT/CC0-1.0 分離統合検査"),
         ("SPEC-SAFE-03", "spec_safe_03_builtin_tool_security_boundaries", "ツール機密・SSRF 遮断境界"),
         ("SPEC-SKIN-01/02/03", "spec_skin_01_02_03_default_order_scope_isolation_and_hidpi", "既定順位・\\0/\\1 分離・@2x/SERIKO"),
         ("SPEC-SKIN-04", "spec_skin_04_pna_mask_and_nar_traversal_guard", ".pna 透過マスク・.nar パス防御"),
         ("SPEC-DLG-01/02/03", "spec_dlg_01_02_03_sakura_script_and_tag_sanitization", "Sakura Script・タグ浄化・履歴保護"),
         ("SPEC-AI-01/02/03", "spec_ai_01_02_03_model_guard_ollama_prefs_and_config_persistence", "制限LLM拒否・Ollama候補・設定保存"),
-        ("SPEC-SRV-01/02/03", "spec_srv_01_02_03_dual_http_and_sstp_tcp_contract", "HTTP API 全9系統・TCP SSTP/1.4"),
-        ("SPEC-UI-04/05", "spec_ui_04_05_control_and_fallback_responsiveness_under_3s", "制御応答・即時ステータス・3秒以内SLA"),
-        ("SPEC-SEC-01", "spec_sec_01_pretest_scanner_blocks_secrets_pii_and_private_keys", "テスト前機密・個人情報遮断"),
-        ("SPEC-SEC-02", "spec_sec_02_instruction_data_trust_boundary_and_rogue_config_block", "AI指示境界・データ隔離防御"),
+        ("SPEC-AI-04", "spec_ai_04_one_click_local_ollama_setup_and_general_user_defaults", "無料ローカルAI 1クリック自動準備＆既定順序"),
+        ("SPEC-SRV-01/02/03", "spec_srv_01_02_03_dual_http_and_sstp_tcp_contract", "HTTP API 全系統・TCP SSTP/1.4"),
+        ("SPEC-UI-04/05-TEST", "spec_ui_04_05_control_and_fallback_responsiveness_under_3s", "制御応答・即時ステータス・3秒以内SLA"),
+        ("SPEC-SEC-01-TEST", "spec_sec_01_pretest_scanner_blocks_secrets_pii_and_private_keys", "テスト前機密・個人情報遮断"),
+        ("SPEC-SEC-02-TEST", "spec_sec_02_instruction_data_trust_boundary_and_rogue_config_block", "AI指示境界・データ隔離防御"),
         ("SPEC-GHOST-01/SKIN-05", "spec_ghost_01_and_skin_05_profile_isolation_and_bind_dressup", "ゴーストプロファイル分離・着せ替え(bind)"),
         ("SPEC-COMP-01/02/03/DLG-04", "spec_comp_01_02_03_dlg_04_reminders_drop_links_and_updates", "時報/リマインダー・D&D・リンク/\\ _q・音声/更新確認"),
         ("SPEC-COMP-04", "spec_comp_04_headless_tts_speaker_discovery_and_profile_voice", "ヘッドレス音声エンジン話者解決・シェル別声色永続化"),
+        ("SPEC-COMP-05", "spec_comp_05_autotalk_30s_interval_interest_memory_and_balanced_news", "雑談頻度(30秒〜)・会話関心記憶・ニュース雑談"),
+        ("SPEC-COMP-06", "spec_comp_06_aivm_uninstall_prosody_and_pomodoro_live2d", "AivisSpeechモデル削除・話速/自然さ・ポモドーロLive2D"),
         ("SPEC-L2D-01/02", "spec_l2d_01_02_external_sidecar_parts_and_path_safety", "外付けサイドカー Live2D マルチパーツ・信頼境界保護"),
+        ("SPEC-CFG-01/UI-06", "spec_cfg_01_and_ui_06_home_dotdir_settings_panel_and_api", "ホーム直下設定・自動移行・簡潔メニュー・設定パネル"),
+        ("SPEC-UI-07", "spec_ui_07_ui_language_os_auto_fallback_and_switching", "多言語 UI 切替（OS追従・未対応時英語）"),
+        ("SPEC-ACC-01", "spec_acc_01_quiet_mode_fullscreen_parsers_and_api", "おやすみモード・全画面自動退避・一時非表示"),
+        ("SPEC-ACC-02", "spec_acc_02_pomodoro_state_machine_and_scripts", "ポモドーロ集中タイマー＆専用ポーズ・伴走通知"),
+        ("SPEC-ACC-03", "spec_acc_03_dialogue_backlog_ring_and_http_endpoint", "発話バックログ＆ワンクリックコピー"),
+        ("SPEC-ACC-04", "spec_acc_04_autostart_manifests_power_save_and_monitor_cycling", "OSログイン自動起動・省電力・マルチモニタ移動"),
+        ("SPEC-ACC-05", "spec_acc_05_quick_memos_clipboard_guard_and_pomodoro_v2", "クイック付箋メモ・クリップボード保護・メニュー保護"),
+        ("SPEC-ACC-06", "spec_acc_06_multi_calendar_travel_alerts_and_image_attachment", "マルチカレンダー移動時間出発通知＆チャット画像添付"),
     ]
     for spec_id, test_fn, label in expected_groups:
         ok = spec_cases.get(test_fn, False)
@@ -540,11 +593,21 @@ def check_tier2_full(custom_binary: str | None = None) -> list[dict[str, Any]]:
         sla_ok = False
         sla_detail = "smoke出力に ui_ms / ipc_ms 計測値がありません"
     results.append({
-        "spec": "SPEC-UI-04/05",
+        "spec": "SPEC-UI-04/05-SMOKE",
         "name": "GUI 対話操作性＆3秒以内反応性実測 (`--smoke-test`)",
         "status": "PASS" if sla_ok else "FAIL",
         "detail": sla_detail,
     })
+
+    # SPEC-UI-03 (full macOS bundle build execution check)
+    if sys.platform == "darwin" and not custom_binary:
+        b_rc, b_out = _run(["bash", "scripts/build_macos.sh"])
+        results.append({
+            "spec": "SPEC-UI-03-BUILD",
+            "name": "macOS 配布バンドル生成 (`scripts/build_macos.sh`)",
+            "status": "PASS" if b_rc == 0 else "FAIL",
+            "detail": "dist/NanikaAi.app 正常生成 (exit=0)" if b_rc == 0 else f"exit={b_rc}: {b_out[-240:]}",
+        })
 
     # Optional non-destructive probe against live background instance
     try:
@@ -662,12 +725,12 @@ exit $RC
     checks_map = {c.get("spec"): c for c in rep.get("checks", [])}
     cargo_det = checks_map.get("CARGO-TEST", {}).get("detail", "")
     smoke_det = checks_map.get("SPEC-UI-01", {}).get("detail", "")
-    sla_det = checks_map.get("SPEC-UI-04/05", {}).get("detail", "")
+    sla_det = checks_map.get("SPEC-UI-04/05-SMOKE", {}).get("detail", "")
     smoke_short = smoke_det.split(" scale=")[0] if " scale=" in smoke_det else smoke_det
     ok = (
         (run_proc.returncode == 0)
         and (rep.get("overall") == "PASS")
-        and (checks_map.get("SPEC-UI-04/05", {}).get("status") == "PASS")
+        and (checks_map.get("SPEC-UI-04/05-SMOKE", {}).get("status") == "PASS")
     )
     return {
         "spec": "MULTI-OS-LINUX",
@@ -914,6 +977,13 @@ def main() -> int:
             checks.append(check_remote_linux(args.remote_linux))
         if args.remote_win:
             checks.append(check_remote_win(args.remote_win))
+        if not args.remote_linux and not args.remote_win:
+            checks.append({
+                "spec": "SPEC-OS-01",
+                "name": "マルチ OS 実機横断互換（Linux / Windows リモート）",
+                "status": "SKIP",
+                "detail": "--remote-linux / --remote-win 未指定のためローカル OS のみ検証（CI マトリクスまたは引数指定で実行可）",
+            })
 
     counts = {
         "PASS": sum(1 for c in checks if c["status"] == "PASS"),

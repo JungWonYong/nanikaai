@@ -56,6 +56,18 @@ pub trait ServerBackend: Send + Sync + 'static {
     fn on_update_settings(&self, _req: SettingsPatchReq) -> Result<Value, String> {
         Err("settings configuration not supported".to_string())
     }
+    fn get_memos(&self) -> Value {
+        json!({ "count": 0, "memos": [] })
+    }
+    fn on_memo_action(&self, _req: MemoActionReq) -> Result<Value, String> {
+        Err("memos not supported".to_string())
+    }
+    fn get_calendar(&self) -> Value {
+        json!({ "enabled": false, "connected": false, "count": 0, "events": [] })
+    }
+    fn on_calendar_action(&self, _req: CalendarConfigReq) -> Result<Value, String> {
+        Err("calendar not supported".to_string())
+    }
 }
 
 #[derive(Clone)]
@@ -106,6 +118,33 @@ pub struct VoiceConfigReq {
     pub clear_kero_speaker: bool,
     pub kero_voice_archetype: Option<String>,
     pub install_aivm_uuid: Option<String>,
+    pub uninstall_aivm_uuid: Option<String>,
+    pub voice_speed: Option<f32>,
+    pub voice_intonation: Option<f32>,
+}
+
+/// JSON payload for quick sticky memo actions (`add` / `toggle` / `delete` / `clear_done`).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MemoActionReq {
+    pub action: Option<String>,
+    pub text: Option<String>,
+    pub id: Option<u64>,
+}
+
+/// JSON payload for calendar sync configuration & actions (Google / OS / Apple iCloud / Yahoo! Japan / Yahoo / iCal).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct CalendarConfigReq {
+    pub action: Option<String>,
+    pub enabled: Option<bool>,
+    pub use_os_native: Option<bool>,
+    pub add_ics_url: Option<String>,
+    #[serde(default)]
+    pub clear_ics_urls: bool,
+    pub home_location: Option<String>,
+    pub default_travel_mins: Option<u32>,
+    pub prep_mins: Option<u32>,
+    pub remind_mins: Option<u32>,
+    pub briefing_interval_mins: Option<u32>,
 }
 
 /// JSON payload for reading/updating skin opacity, scale, and OS convenience settings.
@@ -137,6 +176,8 @@ pub struct SettingsPatchReq {
     pub low_battery_alert: Option<bool>,
     pub pomodoro_preset_idx: Option<usize>,
     pub pomodoro_action: Option<String>,
+    pub voice_speed: Option<f32>,
+    pub voice_intonation: Option<f32>,
     pub macos_accept_first_mouse: Option<bool>,
     pub macos_window_shadow: Option<bool>,
     pub macos_show_in_dock: Option<bool>,
@@ -202,6 +243,18 @@ pub fn validate_settings_patch(req: &SettingsPatchReq) -> Result<(), String> {
             return Err(
                 "Invalid pomodoro_action: must be one of start, pause, toggle, stop, skip"
                     .to_string(),
+            );
+        }
+    }
+    if let Some(v) = req.voice_speed {
+        if !v.is_finite() || !(0.75..=1.35).contains(&v) {
+            return Err("Invalid voice_speed: must be finite and within 0.75..=1.35".to_string());
+        }
+    }
+    if let Some(v) = req.voice_intonation {
+        if !v.is_finite() || !(0.70..=1.50).contains(&v) {
+            return Err(
+                "Invalid voice_intonation: must be finite and within 0.70..=1.50".to_string(),
             );
         }
     }
@@ -368,10 +421,64 @@ async fn handle_get_voices(State(st): State<AppState>) -> Json<Value> {
     Json(obj)
 }
 
+/// Validate `/api/voice` request fields before invoking TTS engine discovery or model install/uninstall.
+pub fn validate_voice_config_req(req: &VoiceConfigReq) -> Result<(), String> {
+    if let Some(ref eng) = req.tts_engine {
+        let low = eng.trim().to_ascii_lowercase();
+        if !matches!(
+            low.as_str(),
+            "auto" | "aivisspeech" | "aivis" | "voicevox" | "vv" | "coeiroink" | "os" | "native"
+        ) {
+            return Err(format!(
+                "Invalid tts_engine: '{eng}' (allowed: auto, aivisspeech, voicevox, coeiroink, os)"
+            ));
+        }
+    }
+    if let Some(ref arch) = req.kero_voice_archetype {
+        let low = arch.trim().to_ascii_lowercase();
+        if !low.is_empty()
+            && !matches!(
+                low.as_str(),
+                "auto" | "default" | "boy" | "boyish" | "girl" | "female" | "female_partner" | "male" | "youth_male" | "man"
+            )
+        {
+            return Err(format!("Invalid kero_voice_archetype: '{arch}'"));
+        }
+    }
+    if let Some(ref uuid) = req.install_aivm_uuid {
+        let trimmed = uuid.trim();
+        if !trimmed.is_empty() && !crate::companion_extras::is_valid_aivm_uuid(trimmed) {
+            return Err(format!("Invalid install_aivm_uuid: '{uuid}'"));
+        }
+    }
+    if let Some(ref uuid) = req.uninstall_aivm_uuid {
+        let trimmed = uuid.trim();
+        if !trimmed.is_empty() && !crate::companion_extras::is_valid_aivm_uuid(trimmed) {
+            return Err(format!("Invalid uninstall_aivm_uuid: '{uuid}'"));
+        }
+    }
+    if let Some(v) = req.voice_speed {
+        if !v.is_finite() || !(0.75..=1.35).contains(&v) {
+            return Err("Invalid voice_speed: must be finite and within 0.75..=1.35".to_string());
+        }
+    }
+    if let Some(v) = req.voice_intonation {
+        if !v.is_finite() || !(0.70..=1.50).contains(&v) {
+            return Err(
+                "Invalid voice_intonation: must be finite and within 0.70..=1.50".to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
 async fn handle_post_voice(
     State(st): State<AppState>,
     Json(req): Json<VoiceConfigReq>,
 ) -> Response {
+    if let Err(err) = validate_voice_config_req(&req) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"ok": false, "error": err}))).into_response();
+    }
     let b = st.backend.clone();
     let res = tokio::task::spawn_blocking(move || b.on_configure_voice(req)).await;
     match res {
@@ -417,6 +524,74 @@ async fn handle_get_backlog(State(st): State<AppState>) -> Json<Value> {
         map.insert("ok".to_string(), json!(true));
     }
     Json(obj)
+}
+
+async fn handle_get_memos(State(st): State<AppState>) -> Json<Value> {
+    let b = st.backend.clone();
+    let mut obj = tokio::task::spawn_blocking(move || b.get_memos())
+        .await
+        .unwrap_or_else(|_| json!({ "count": 0, "memos": [] }));
+    if let Some(map) = obj.as_object_mut() {
+        map.insert("ok".to_string(), json!(true));
+    }
+    Json(obj)
+}
+
+async fn handle_post_memos(
+    State(st): State<AppState>,
+    Json(req): Json<MemoActionReq>,
+) -> Response {
+    let b = st.backend.clone();
+    let res = tokio::task::spawn_blocking(move || b.on_memo_action(req))
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+    match res {
+        Ok(mut obj) => {
+            if let Some(map) = obj.as_object_mut() {
+                map.insert("ok".to_string(), json!(true));
+            }
+            (StatusCode::OK, Json(obj)).into_response()
+        }
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"ok": false, "error": err})),
+        )
+            .into_response(),
+    }
+}
+
+async fn handle_get_calendar(State(st): State<AppState>) -> Json<Value> {
+    let b = st.backend.clone();
+    let mut obj = tokio::task::spawn_blocking(move || b.get_calendar())
+        .await
+        .unwrap_or_else(|_| json!({ "enabled": false, "count": 0, "events": [] }));
+    if let Some(map) = obj.as_object_mut() {
+        map.insert("ok".to_string(), json!(true));
+    }
+    Json(obj)
+}
+
+async fn handle_post_calendar(
+    State(st): State<AppState>,
+    Json(req): Json<CalendarConfigReq>,
+) -> Response {
+    let b = st.backend.clone();
+    let res = tokio::task::spawn_blocking(move || b.on_calendar_action(req))
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+    match res {
+        Ok(mut obj) => {
+            if let Some(map) = obj.as_object_mut() {
+                map.insert("ok".to_string(), json!(true));
+            }
+            (StatusCode::OK, Json(obj)).into_response()
+        }
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"ok": false, "error": err})),
+        )
+            .into_response(),
+    }
 }
 
 async fn handle_post_settings(
@@ -555,6 +730,8 @@ pub fn start_dual_server(
                     .route("/api/providers", get(handle_providers))
                     .route("/api/voices", get(handle_get_voices))
                     .route("/api/backlog", get(handle_get_backlog))
+                    .route("/api/memos", get(handle_get_memos).post(handle_post_memos))
+                    .route("/api/calendar", get(handle_get_calendar).post(handle_post_calendar))
                     .route("/api/settings", get(handle_get_settings).post(handle_post_settings))
                     .route("/api/speak", post(handle_speak))
                     .route("/api/chat", post(handle_chat))

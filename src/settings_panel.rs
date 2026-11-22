@@ -13,6 +13,8 @@ pub enum SliderKind {
     CharacterScale,
     AutoTalkInterval,
     InterestWeight,
+    VoiceSpeed,
+    VoiceIntonation,
 }
 
 impl SliderKind {
@@ -23,6 +25,8 @@ impl SliderKind {
             SliderKind::CharacterScale => (0.50, 1.50),
             SliderKind::AutoTalkInterval => (0.0, 600.0),
             SliderKind::InterestWeight => (0.0, 0.80),
+            SliderKind::VoiceSpeed => (0.75, 1.35),
+            SliderKind::VoiceIntonation => (0.70, 1.50),
         }
     }
 
@@ -79,6 +83,8 @@ impl SliderKind {
                 })
             }
             SliderKind::InterestWeight => SettingsAction::SetInterestWeight(value),
+            SliderKind::VoiceSpeed => SettingsAction::SetVoiceSpeed(value),
+            SliderKind::VoiceIntonation => SettingsAction::SetVoiceIntonation(value),
         }
     }
 }
@@ -109,8 +115,16 @@ pub enum SettingsAction {
     CyclePomodoroPreset(i32),
     TogglePomodoro,
     StopPomodoro,
+    SkipPomodoro,
     ShowBacklog,
     CopyLastReply,
+    ToggleCalendarEnabled,
+    ToggleCalendarOsNative,
+    CycleCalendarBriefing(i32),
+    CycleCalendarTravelMins(i32),
+    PasteCalendarIcsUrl,
+    SyncCalendarNow,
+    ShowCalendarAgenda,
     ToggleAutoStart,
     CyclePowerSaveMode(i32),
     ToggleLowBatteryAlert,
@@ -126,6 +140,11 @@ pub enum SettingsAction {
     CycleSakuraVoice(i32),
     CycleKeroVoice(i32),
     CycleKeroArchetype(i32),
+    SetVoiceSpeed(f32),
+    SetVoiceIntonation(f32),
+    PreviewVoice(u8),
+    InstallAivmModel(String, String),
+    UninstallAivmModel(String, String),
     CycleProvider(i32),
     SetupLocalAi,
     ToggleEnableTools,
@@ -160,6 +179,11 @@ pub struct SettingsPanelData {
     pub pomodoro_preset_label: String,
     pub pomodoro_button_label: String,
     pub power_save_label: String,
+    pub installed_aivm_models: Vec<crate::companion_extras::InstalledAivmModel>,
+    pub aivm_busy_label: Option<String>,
+    pub calendar_status_summary: String,
+    pub calendar_briefing_label: String,
+    pub calendar_travel_label: String,
 }
 
 #[derive(Clone, Debug)]
@@ -174,7 +198,7 @@ pub enum SettingsHitKind {
 
 #[derive(Clone, Debug)]
 pub struct SettingsHitTarget {
-    pub key: &'static str,
+    pub key: String,
     pub rect: (f64, f64, f64, f64),
     pub kind: SettingsHitKind,
 }
@@ -184,7 +208,7 @@ pub struct SettingsPanelModel {
     pub active_tab: usize,
     pub scroll_px: f32,
     pub max_scroll_px: f32,
-    pub hovered_key: Option<&'static str>,
+    pub hovered_key: Option<String>,
     pub dragging_slider: Option<(SliderKind, f64, f64)>,
     pub hit_targets: Vec<SettingsHitTarget>,
     pub header_drag_rect: (f64, f64, f64, f64),
@@ -272,7 +296,7 @@ impl SettingsPanelModel {
                     && local.1 >= t.rect.1
                     && local.1 <= t.rect.3
             })
-            .map(|t| t.key);
+            .map(|t| t.key.clone());
         let changed = self.hovered_key != new_hover;
         self.hovered_key = new_hover;
         (changed, None)
@@ -360,7 +384,7 @@ impl SettingsPanelModel {
 
         // Close button (top right)
         let cl_rect = (498.0, 14.0, 526.0, 42.0);
-        let cl_hov = self.hovered_key == Some("close");
+        let cl_hov = self.hovered_key.as_deref() == Some("close");
         let cl_cx = 512.0 * scale;
         let cl_cy = 28.0 * scale;
         let (cl_in, cl_out) = if cl_hov {
@@ -387,7 +411,7 @@ impl SettingsPanelModel {
             [244, 248, 255, 250],
         );
         self.hit_targets.push(SettingsHitTarget {
-            key: "close",
+            key: "close".to_string(),
             rect: cl_rect,
             kind: SettingsHitKind::Action(SettingsAction::Close),
         });
@@ -417,7 +441,7 @@ impl SettingsPanelModel {
             let y0 = 54.0;
             let y1 = 83.0;
             let is_active = self.active_tab == *idx;
-            let is_hov = self.hovered_key == Some(*key);
+            let is_hov = self.hovered_key.as_deref() == Some(*key);
             let (fill_a, fill_b, brd, txt_rgb) = if is_active {
                 (
                     [56, 118, 232, 240],
@@ -472,7 +496,7 @@ impl SettingsPanelModel {
                 txt_rgb,
             );
             self.hit_targets.push(SettingsHitTarget {
-                key,
+                key: (*key).to_string(),
                 rect: (x0, y0, x1, y1),
                 kind: SettingsHitKind::Action(SettingsAction::SelectTab(*idx)),
             });
@@ -486,7 +510,7 @@ impl SettingsPanelModel {
         let vp_ph = (vp_h_log * scale).round().max(1.0) as u32;
         let mut vp_bmp = RgbaBitmap::new_transparent(vp_pw, vp_ph);
 
-        let content_h = self.measure_content_height();
+        let content_h = self.measure_content_height(data);
         self.max_scroll_px = (content_h - vp_h_log).max(0.0);
         self.scroll_px = self.scroll_px.clamp(0.0, self.max_scroll_px);
 
@@ -857,6 +881,91 @@ impl SettingsPanelModel {
                 );
 
                 cur_y += 6.0;
+                cur_y = self.draw_section_header(
+                    &mut vp_bmp,
+                    text_renderer,
+                    scale,
+                    cur_y,
+                    right_edge,
+                    s.sec_calendar_hdr,
+                );
+                cur_y = self.draw_toggle_row(
+                    &mut vp_bmp,
+                    text_renderer,
+                    scale,
+                    cur_y,
+                    right_edge,
+                    "tog_cal_enabled",
+                    s.tgl_cal_enabled,
+                    data.cfg.calendar_enabled,
+                    SettingsAction::ToggleCalendarEnabled,
+                    &mut viewport_hits,
+                );
+                cur_y = self.draw_toggle_row(
+                    &mut vp_bmp,
+                    text_renderer,
+                    scale,
+                    cur_y,
+                    right_edge,
+                    "tog_cal_os_native",
+                    s.tgl_cal_os_native,
+                    data.cfg.calendar_use_os_native,
+                    SettingsAction::ToggleCalendarOsNative,
+                    &mut viewport_hits,
+                );
+                cur_y = self.draw_cycle_row(
+                    &mut vp_bmp,
+                    text_renderer,
+                    scale,
+                    cur_y,
+                    right_edge,
+                    "cyc_cal_briefing",
+                    s.cyc_cal_briefing,
+                    &data.calendar_briefing_label,
+                    SettingsAction::CycleCalendarBriefing(-1),
+                    SettingsAction::CycleCalendarBriefing(1),
+                    &mut viewport_hits,
+                );
+                cur_y = self.draw_cycle_row(
+                    &mut vp_bmp,
+                    text_renderer,
+                    scale,
+                    cur_y,
+                    right_edge,
+                    "cyc_cal_travel",
+                    s.cyc_cal_travel,
+                    &data.calendar_travel_label,
+                    SettingsAction::CycleCalendarTravelMins(-1),
+                    SettingsAction::CycleCalendarTravelMins(1),
+                    &mut viewport_hits,
+                );
+                cur_y = self.draw_dual_action_row(
+                    &mut vp_bmp,
+                    text_renderer,
+                    scale,
+                    cur_y,
+                    right_edge,
+                    "btn_cal_paste",
+                    s.btn_cal_paste_ics,
+                    SettingsAction::PasteCalendarIcsUrl,
+                    "btn_cal_sync",
+                    s.btn_cal_sync_now,
+                    SettingsAction::SyncCalendarNow,
+                    &mut viewport_hits,
+                );
+                cur_y = self.draw_action_button_row(
+                    &mut vp_bmp,
+                    text_renderer,
+                    scale,
+                    cur_y,
+                    right_edge,
+                    "btn_cal_agenda",
+                    &format!("{} ({})", s.btn_cal_show_agenda, data.calendar_status_summary),
+                    SettingsAction::ShowCalendarAgenda,
+                    &mut viewport_hits,
+                );
+
+                cur_y += 6.0;
                 #[cfg(target_os = "macos")]
                 let os_order = ["macos", "windows", "linux"];
                 #[cfg(target_os = "windows")]
@@ -1059,6 +1168,20 @@ impl SettingsPanelModel {
                     SettingsAction::CycleKeroVoice(1),
                     &mut viewport_hits,
                 );
+                cur_y = self.draw_dual_action_row(
+                    &mut vp_bmp,
+                    text_renderer,
+                    scale,
+                    cur_y,
+                    right_edge,
+                    "btn_preview_sakura",
+                    s.btn_preview_sakura,
+                    SettingsAction::PreviewVoice(0),
+                    "btn_preview_kero",
+                    s.btn_preview_kero,
+                    SettingsAction::PreviewVoice(1),
+                    &mut viewport_hits,
+                );
                 cur_y = self.draw_cycle_row(
                     &mut vp_bmp,
                     text_renderer,
@@ -1072,15 +1195,140 @@ impl SettingsPanelModel {
                     SettingsAction::CycleKeroArchetype(1),
                     &mut viewport_hits,
                 );
-                let _ = self.draw_info_row(
+                let spd_txt = format!("{:.2}x", data.cfg.voice_speed);
+                cur_y = self.draw_slider_row(
+                    &mut vp_bmp,
+                    text_renderer,
+                    scale,
+                    cur_y,
+                    right_edge,
+                    "slider_voice_speed",
+                    SliderKind::VoiceSpeed,
+                    data.cfg.voice_speed,
+                    s.sld_voice_speed_title,
+                    s.sld_voice_speed_sub,
+                    &spd_txt,
+                    &mut viewport_hits,
+                );
+                let inton_txt = format!("{:.2}", data.cfg.voice_intonation);
+                cur_y = self.draw_slider_row(
+                    &mut vp_bmp,
+                    text_renderer,
+                    scale,
+                    cur_y,
+                    right_edge,
+                    "slider_voice_inton",
+                    SliderKind::VoiceIntonation,
+                    data.cfg.voice_intonation,
+                    s.sld_voice_inton_title,
+                    s.sld_voice_inton_sub,
+                    &inton_txt,
+                    &mut viewport_hits,
+                );
+
+                // Installed AIVM voice models with Delete button for user-installed models
+                cur_y = self.draw_section_header(
                     &mut vp_bmp,
                     text_renderer,
                     scale,
                     cur_y + 4.0,
                     right_edge,
-                    s.lbl_note,
-                    s.voice_note_value,
+                    s.hdr_installed_models,
                 );
+                if let Some(ref busy) = data.aivm_busy_label {
+                    cur_y = self.draw_info_row(
+                        &mut vp_bmp,
+                        text_renderer,
+                        scale,
+                        cur_y,
+                        right_edge,
+                        "⏳",
+                        busy,
+                    );
+                }
+                if data.installed_aivm_models.is_empty() {
+                    cur_y = self.draw_info_row(
+                        &mut vp_bmp,
+                        text_renderer,
+                        scale,
+                        cur_y,
+                        right_edge,
+                        s.lbl_note,
+                        s.lbl_no_aivm_models,
+                    );
+                } else {
+                    for m in &data.installed_aivm_models {
+                        let key = format!("del_aivm_{}", m.uuid);
+                        let act = if m.is_default_model {
+                            None
+                        } else {
+                            Some(SettingsAction::UninstallAivmModel(
+                                m.uuid.clone(),
+                                m.name.clone(),
+                            ))
+                        };
+                        let btn_lbl = if m.is_default_model {
+                            s.badge_builtin
+                        } else {
+                            s.btn_delete_model
+                        };
+                        cur_y = self.draw_model_action_row(
+                            &mut vp_bmp,
+                            text_renderer,
+                            scale,
+                            cur_y,
+                            right_edge,
+                            key,
+                            &m.name,
+                            btn_lbl,
+                            !m.is_default_model,
+                            act,
+                            &mut viewport_hits,
+                        );
+                    }
+                }
+
+                // Recommended natural voices not yet installed
+                let uninst: Vec<&crate::companion_extras::AivmCatalogModel> =
+                    crate::companion_extras::CURATED_AIVISHUB_MODELS
+                        .iter()
+                        .filter(|c| {
+                            !data
+                                .installed_aivm_models
+                                .iter()
+                                .any(|inst| inst.uuid.eq_ignore_ascii_case(c.uuid))
+                        })
+                        .collect();
+                if !uninst.is_empty() {
+                    cur_y = self.draw_section_header(
+                        &mut vp_bmp,
+                        text_renderer,
+                        scale,
+                        cur_y + 4.0,
+                        right_edge,
+                        s.hdr_recommended_voices,
+                    );
+                    for c in uninst {
+                        let key = format!("add_aivm_{}", c.uuid);
+                        cur_y = self.draw_model_action_row(
+                            &mut vp_bmp,
+                            text_renderer,
+                            scale,
+                            cur_y,
+                            right_edge,
+                            key,
+                            c.menu_label,
+                            s.btn_install_model,
+                            false,
+                            Some(SettingsAction::InstallAivmModel(
+                                c.uuid.to_string(),
+                                c.name.to_string(),
+                            )),
+                            &mut viewport_hits,
+                        );
+                    }
+                }
+                let _ = cur_y;
             }
             _ => {
                 cur_y = self.draw_section_header(
@@ -1351,7 +1599,7 @@ impl SettingsPanelModel {
         );
 
         let rst_rect = (342.0, 433.0, 522.0, 461.0);
-        let rst_hov = self.hovered_key == Some("btn_reset_defaults");
+        let rst_hov = self.hovered_key.as_deref() == Some("btn_reset_defaults");
         let (r_a, r_b, r_brd) = if rst_hov {
             ([62, 92, 165, 235], [44, 68, 128, 235], [147, 197, 253, 210])
         } else {
@@ -1390,7 +1638,7 @@ impl SettingsPanelModel {
             (236, 244, 255),
         );
         self.hit_targets.push(SettingsHitTarget {
-            key: "btn_reset_defaults",
+            key: "btn_reset_defaults".to_string(),
             rect: rst_rect,
             kind: SettingsHitKind::Action(SettingsAction::ResetDefaults),
         });
@@ -1398,7 +1646,7 @@ impl SettingsPanelModel {
         canvas
     }
 
-    fn measure_content_height(&self) -> f32 {
+    fn measure_content_height(&self, data: &SettingsPanelData) -> f32 {
         match self.active_tab {
             0 => 24.0 + 3.0 * 52.0 + 10.0 + 24.0 + 4.0 * 40.0 + 2.0 * 42.0 + 12.0,
             1 => {
@@ -1407,7 +1655,25 @@ impl SettingsPanelModel {
                     + (6.0 + 3.0 * 24.0 + 7.0 * 40.0)
                     + 14.0
             }
-            2 => 24.0 + 40.0 + 4.0 * 42.0 + 42.0 + 12.0,
+            2 => {
+                let installed_rows = data.installed_aivm_models.len().max(1) as f32;
+                let uninst_count = crate::companion_extras::CURATED_AIVISHUB_MODELS
+                    .iter()
+                    .filter(|c| {
+                        !data
+                            .installed_aivm_models
+                            .iter()
+                            .any(|inst| inst.uuid.eq_ignore_ascii_case(c.uuid))
+                    })
+                    .count() as f32;
+                let busy_h = if data.aivm_busy_label.is_some() { 42.0 } else { 0.0 };
+                let uninst_h = if uninst_count > 0.0 {
+                    28.0 + uninst_count * 40.0
+                } else {
+                    0.0
+                };
+                24.0 + 40.0 + 5.0 * 42.0 + 2.0 * 52.0 + 28.0 + busy_h + installed_rows * 40.0 + uninst_h + 16.0
+            }
             _ => 600.0,
         }
     }
@@ -1460,7 +1726,7 @@ impl SettingsPanelModel {
         let track_x0 = 224.0_f32;
         let track_x1 = right_edge - 66.0;
         if vy + card_h > 0.0 && vy < vp_h {
-            let hov = self.hovered_key == Some(key)
+            let hov = self.hovered_key.as_deref() == Some(key)
                 || self.dragging_slider.is_some_and(|(k, _, _)| k == kind);
             let brd = if hov {
                 [110, 175, 250, 195]
@@ -1593,7 +1859,7 @@ impl SettingsPanelModel {
                 (186, 224, 255),
             );
             hits.push(SettingsHitTarget {
-                key,
+                key: key.to_string(),
                 rect: (
                     (track_x0 - 8.0) as f64,
                     (vy + 4.0) as f64,
@@ -1628,7 +1894,7 @@ impl SettingsPanelModel {
         let vy = y - self.scroll_px;
         let vp_h = (bmp.height as f32) / scale;
         if vy + card_h > 0.0 && vy < vp_h {
-            let hov = self.hovered_key == Some(key);
+            let hov = self.hovered_key.as_deref() == Some(key);
             let (fill_a, fill_b, brd) = if hov {
                 ([34, 52, 92, 232], [26, 40, 74, 232], [116, 178, 250, 200])
             } else {
@@ -1694,7 +1960,7 @@ impl SettingsPanelModel {
                 [215, 232, 255, 255],
             );
             hits.push(SettingsHitTarget {
-                key,
+                key: key.to_string(),
                 rect: (2.0, vy as f64, right_edge as f64, (vy + card_h) as f64),
                 kind: SettingsHitKind::Action(action),
             });
@@ -1787,7 +2053,7 @@ impl SettingsPanelModel {
                 (prev_key, prev_rect, "◀", prev_act),
                 (next_key, next_rect, "▶", next_act),
             ] {
-                let hov = self.hovered_key == Some(btn_key);
+                let hov = self.hovered_key.as_deref() == Some(btn_key);
                 let (ba, bb, bbrd) = if hov {
                     ([62, 108, 212, 235], [40, 80, 180, 235], [147, 197, 253, 210])
                 } else {
@@ -1820,7 +2086,7 @@ impl SettingsPanelModel {
                     (236, 245, 255),
                 );
                 hits.push(SettingsHitTarget {
-                    key: btn_key,
+                    key: btn_key.to_string(),
                     rect: (br.0 as f64, br.1 as f64, br.2 as f64, br.3 as f64),
                     kind: SettingsHitKind::Action(act),
                 });
@@ -1876,7 +2142,7 @@ impl SettingsPanelModel {
         let vy = y - self.scroll_px;
         let vp_h = (bmp.height as f32) / scale;
         if vy + card_h > 0.0 && vy < vp_h {
-            let hov = self.hovered_key == Some(key);
+            let hov = self.hovered_key.as_deref() == Some(key);
             let (ba, bb, brd) = if hov {
                 ([56, 102, 204, 238], [38, 76, 168, 238], [147, 197, 253, 210])
             } else {
@@ -1909,7 +2175,7 @@ impl SettingsPanelModel {
                 (236, 246, 255),
             );
             hits.push(SettingsHitTarget {
-                key,
+                key: key.to_string(),
                 rect: (2.0, vy as f64, right_edge as f64, (vy + card_h) as f64),
                 kind: SettingsHitKind::Action(action),
             });
@@ -1943,7 +2209,7 @@ impl SettingsPanelModel {
                 (key_l, label_l, act_l, 2.0, 2.0 + half),
                 (key_r, label_r, act_r, 2.0 + half + gap, right_edge),
             ] {
-                let hov = self.hovered_key == Some(k);
+                let hov = self.hovered_key.as_deref() == Some(k);
                 let (ba, bb, brd) = if hov {
                     ([56, 102, 204, 238], [38, 76, 168, 238], [147, 197, 253, 210])
                 } else {
@@ -1976,8 +2242,106 @@ impl SettingsPanelModel {
                     (236, 246, 255),
                 );
                 hits.push(SettingsHitTarget {
-                    key: k,
+                    key: k.to_string(),
                     rect: (x0 as f64, vy as f64, x1 as f64, (vy + card_h) as f64),
+                    kind: SettingsHitKind::Action(act),
+                });
+            }
+        }
+        y + card_h + 6.0
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_model_action_row(
+        &self,
+        bmp: &mut RgbaBitmap,
+        tr: &mut TextRenderer,
+        scale: f32,
+        y: f32,
+        right_edge: f32,
+        key: String,
+        label: &str,
+        btn_label: &str,
+        danger: bool,
+        action: Option<SettingsAction>,
+        hits: &mut Vec<SettingsHitTarget>,
+    ) -> f32 {
+        let card_h = 34.0_f32;
+        let vy = y - self.scroll_px;
+        let vp_h = (bmp.height as f32) / scale;
+        if vy + card_h > 0.0 && vy < vp_h {
+            bmp.draw_aa_rounded_box(
+                (2.0 * scale, vy * scale, right_edge * scale, (vy + card_h) * scale),
+                8.0 * scale,
+                [24, 35, 64, 220],
+                [18, 28, 52, 228],
+                1.0 * scale,
+                [70, 110, 185, 105],
+                [70, 110, 185, 105],
+                0.0,
+                0.0,
+                [0, 0, 0, 0],
+                0,
+            );
+            let bx1 = right_edge - 8.0;
+            let bx0 = bx1 - 74.0;
+            let by0 = vy + 5.0;
+            let by1 = vy + card_h - 5.0;
+            tr.draw_inline_text(
+                bmp,
+                label,
+                (12.0 * scale).round() as i32,
+                ((vy + 9.5) * scale).round() as i32,
+                (10.0 * scale).round() as i32,
+                ((bx0 - 8.0) * scale).round() as i32,
+                11.4 * scale,
+                15.0 * scale,
+                (234, 244, 255),
+            );
+            let hov = action.is_some() && self.hovered_key.as_deref() == Some(key.as_str());
+            let (ba, bb, bbrd, txt_rgb) = if action.is_none() {
+                ([36, 48, 76, 180], [28, 38, 62, 180], [90, 118, 165, 110], (164, 188, 224))
+            } else if danger {
+                if hov {
+                    ([220, 56, 68, 240], [180, 38, 50, 240], [252, 165, 165, 220], (255, 255, 255))
+                } else {
+                    ([138, 38, 52, 225], [108, 28, 42, 225], [220, 96, 108, 165], (254, 215, 215))
+                }
+            } else if hov {
+                ([56, 118, 232, 240], [37, 86, 198, 240], [147, 197, 253, 220], (255, 255, 255))
+            } else {
+                ([36, 74, 152, 225], [26, 56, 122, 225], [106, 162, 242, 165], (224, 240, 255))
+            };
+            bmp.draw_aa_rounded_box(
+                (bx0 * scale, by0 * scale, bx1 * scale, by1 * scale),
+                6.0 * scale,
+                ba,
+                bb,
+                0.9 * scale,
+                bbrd,
+                bbrd,
+                0.0,
+                0.0,
+                [0, 0, 0, 0],
+                0,
+            );
+            let tw = tr.measure_inline_width(btn_label, 10.8 * scale) / scale;
+            let tx = bx0 + (((bx1 - bx0) - tw) * 0.5).max(4.0);
+            tr.draw_inline_text(
+                bmp,
+                btn_label,
+                (tx * scale).round() as i32,
+                ((by0 + 5.5) * scale).round() as i32,
+                ((bx0 + 2.0) * scale).round() as i32,
+                ((bx1 - 2.0) * scale).round() as i32,
+                10.8 * scale,
+                14.0 * scale,
+                txt_rgb,
+            );
+            if let Some(act) = action {
+                hits.push(SettingsHitTarget {
+                    key,
+                    rect: (bx0 as f64, by0 as f64, bx1 as f64, by1 as f64),
                     kind: SettingsHitKind::Action(act),
                 });
             }

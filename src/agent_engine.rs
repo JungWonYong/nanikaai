@@ -39,6 +39,149 @@ pub const FORBIDDEN_MODEL_PREFIXES: &[&str] = &[
     "stepfun", "doubao", "hunyuan",
 ];
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageAttachment {
+    pub file_name: String,
+    pub mime_type: String,
+    pub base64_data: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Pure Safe Rust RFC 4648 base64 encoder (zero dependencies, zero unsafe).
+pub fn encode_base64(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(((input.len() + 2) / 3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
+        out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[((n >> 6) & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(n & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+pub fn is_supported_image_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .is_some_and(|ext| matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "bmp"))
+}
+
+/// Load, security-check, optionally downscale (`<= 1280px`), and base64-encode a local image file for multimodal LLM chat.
+pub fn load_image_attachment(path: &Path) -> Result<ImageAttachment, String> {
+    if crate::builtin_tools::is_sensitive_path(path) {
+        return Err("セキュリティのため機密ディレクトリ内の画像は添付できません。".to_string());
+    }
+    if !is_supported_image_path(path) {
+        return Err("対応している画像形式は PNG / JPG / JPEG / BMP です。".to_string());
+    }
+    let meta = std::fs::metadata(path).map_err(|e| format!("画像ファイル確認失敗: {e}"))?;
+    if meta.len() > 25 * 1024 * 1024 {
+        return Err("画像ファイルが大きすぎます（上限 25MB）。".to_string());
+    }
+    let img = image::open(path).map_err(|e| format!("画像デコード失敗: {e}"))?;
+    let max_dim = 1280u32;
+    let resized = if img.width() > max_dim || img.height() > max_dim {
+        img.resize(max_dim, max_dim, image::imageops::FilterType::Lanczos3)
+    } else {
+        img
+    };
+    let (w, h) = (resized.width(), resized.height());
+    let rgb = resized.to_rgb8();
+    let mut buf = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(rgb)
+        .write_to(&mut buf, image::ImageFormat::Jpeg)
+        .map_err(|e| format!("画像エンコード失敗: {e}"))?;
+    let file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("image.jpg")
+        .to_string();
+    Ok(ImageAttachment {
+        file_name,
+        mime_type: "image/jpeg".to_string(),
+        base64_data: encode_base64(&buf.into_inner()),
+        width: w,
+        height: h,
+    })
+}
+
+/// Build provider-specific multimodal user message JSON payload for Ollama, OpenAI-compatible, Gemini API, or Claude Anthropic API.
+pub fn build_multimodal_user_message(
+    provider: &str,
+    prompt: &str,
+    images: &[ImageAttachment],
+) -> Value {
+    match provider {
+        "gemini-api" => {
+            let mut user_parts: Vec<Value> = vec![json!({"text": prompt})];
+            for img in images {
+                user_parts.push(json!({
+                    "inlineData": {
+                        "mimeType": img.mime_type,
+                        "data": img.base64_data
+                    }
+                }));
+            }
+            json!({"role": "user", "parts": user_parts})
+        }
+        "openai-compatible" => {
+            if images.is_empty() {
+                json!({"role": "user", "content": prompt})
+            } else {
+                let mut parts: Vec<Value> = vec![json!({"type": "text", "text": prompt})];
+                for img in images {
+                    parts.push(json!({
+                        "type": "image_url",
+                        "image_url": {"url": format!("data:{};base64,{}", img.mime_type, img.base64_data)}
+                    }));
+                }
+                json!({"role": "user", "content": parts})
+            }
+        }
+        "claude" => {
+            if images.is_empty() {
+                json!({"role": "user", "content": prompt})
+            } else {
+                let mut blocks: Vec<Value> = Vec::new();
+                for img in images {
+                    blocks.push(json!({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": img.mime_type,
+                            "data": img.base64_data,
+                        }
+                    }));
+                }
+                blocks.push(json!({"type": "text", "text": prompt}));
+                json!({"role": "user", "content": blocks})
+            }
+        }
+        _ => {
+            if images.is_empty() {
+                json!({"role": "user", "content": prompt})
+            } else {
+                let b64_list: Vec<&str> = images.iter().map(|i| i.base64_data.as_str()).collect();
+                json!({"role": "user", "content": prompt, "images": b64_list})
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ProviderInfo {
     pub id: String,
@@ -1019,7 +1162,7 @@ impl AgentEngine {
         }
     }
 
-    fn extract_cli_tool_call(raw_text: &str) -> Option<(String, Value)> {
+    pub fn extract_cli_tool_call(raw_text: &str) -> Option<(String, Value)> {
         let valid_names: HashSet<&'static str> = [
             "get_weather",
             "get_system_status",
@@ -1031,9 +1174,15 @@ impl AgentEngine {
             "calculate",
             "memory_save",
             "memory_search",
+            "interest_save",
             "check_ollama_models",
             "set_reminder",
             "list_reminders",
+            "add_memo",
+            "list_memos",
+            "complete_memo",
+            "delete_memo",
+            "list_upcoming_events",
         ]
         .into_iter()
         .collect();
@@ -1078,6 +1227,7 @@ impl AgentEngine {
         &self,
         cfg: &AgentConfig,
         prompt: &str,
+        images: &[ImageAttachment],
         save_hist: bool,
         is_remote: bool,
         allow_tools: bool,
@@ -1106,7 +1256,7 @@ impl AgentEngine {
         for item in self.active_history_tail(hist_limit) {
             messages.push(json!({"role": item.role, "content": item.content}));
         }
-        messages.push(json!({"role": "user", "content": prompt}));
+        messages.push(build_multimodal_user_message("ollama", prompt, images));
 
         let use_tools = cfg.enable_tools && allow_tools;
         let mut tools_used = Vec::new();
@@ -1231,6 +1381,7 @@ impl AgentEngine {
         &self,
         cfg: &AgentConfig,
         prompt: &str,
+        images: &[ImageAttachment],
         save_hist: bool,
     ) -> Result<AgentReply, String> {
         let model = if cfg.model.trim().is_empty() || cfg.model == "auto" {
@@ -1250,7 +1401,7 @@ impl AgentEngine {
         for item in self.active_history_tail(10) {
             messages.push(json!({"role": item.role, "content": item.content}));
         }
-        messages.push(json!({"role": "user", "content": prompt}));
+        messages.push(build_multimodal_user_message("openai-compatible", prompt, images));
 
         let client = reqwest::blocking::Client::builder()
             .connect_timeout(Duration::from_millis(2200))
@@ -1342,6 +1493,7 @@ impl AgentEngine {
         &self,
         cfg: &AgentConfig,
         prompt: &str,
+        images: &[ImageAttachment],
         save_hist: bool,
     ) -> Result<AgentReply, String> {
         let (key, _) = resolve_gemini_api_key(cfg)
@@ -1371,7 +1523,7 @@ impl AgentEngine {
             let role = if item.role == "user" { "user" } else { "model" };
             contents.push(json!({"role": role, "parts": [{"text": item.content}]}));
         }
-        contents.push(json!({"role": "user", "parts": [{"text": prompt}]}));
+        contents.push(build_multimodal_user_message("gemini-api", prompt, images));
 
         let client = reqwest::blocking::Client::builder()
             .connect_timeout(Duration::from_millis(2200))
@@ -1473,10 +1625,11 @@ impl AgentEngine {
         &self,
         cfg: &AgentConfig,
         prompt: &str,
+        images: &[ImageAttachment],
         save_hist: bool,
     ) -> Result<AgentReply, String> {
         if let Some(api_key) = resolve_anthropic_api_key(cfg) {
-            return self.run_claude_anthropic_api(cfg, prompt, save_hist, &api_key);
+            return self.run_claude_anthropic_api(cfg, prompt, images, save_hist, &api_key);
         }
         if let Some(claude_bin) = find_claude_bin() {
             let model = if cfg.model.starts_with("claude-") {
@@ -1513,6 +1666,7 @@ impl AgentEngine {
         &self,
         cfg: &AgentConfig,
         prompt: &str,
+        images: &[ImageAttachment],
         save_hist: bool,
         api_key: &str,
     ) -> Result<AgentReply, String> {
@@ -1533,7 +1687,7 @@ impl AgentEngine {
         for item in self.active_history_tail(8) {
             messages.push(json!({"role": item.role, "content": item.content}));
         }
-        messages.push(json!({"role": "user", "content": prompt}));
+        messages.push(build_multimodal_user_message("claude", prompt, images));
 
         let ant_tools: Vec<Value> = tools_schema()
             .as_array()
@@ -1737,18 +1891,35 @@ impl AgentEngine {
     }
 
     fn dispatch(&self, prompt: &str, save_hist: bool, allow_tools: bool) -> AgentReply {
+        self.dispatch_with_images(prompt, &[], save_hist, allow_tools)
+    }
+
+    fn dispatch_with_images(
+        &self,
+        prompt: &str,
+        images: &[ImageAttachment],
+        save_hist: bool,
+        allow_tools: bool,
+    ) -> AgentReply {
         let cfg = self.config_store.get();
         if let Ok(mut b) = self.busy.lock() {
             *b = true;
         }
-        self.emit_status("AI 応答準備中...", true);
+        self.emit_status(
+            if images.is_empty() {
+                "AI 応答準備中..."
+            } else {
+                "🖼 画像を解析中..."
+            },
+            true,
+        );
         let result = (|| -> Result<AgentReply, String> {
             if !cfg.model.trim().is_empty() && cfg.model != "auto" {
                 assert_allowed_model(&cfg.model)?;
             }
             match cfg.provider.as_str() {
                 "linux-ollama" | "remote-ollama" => {
-                    self.run_ollama(&cfg, prompt, save_hist, true, allow_tools)
+                    self.run_ollama(&cfg, prompt, images, save_hist, true, allow_tools)
                 }
                 "gemini-paid" => {
                     let agy_bin = find_agy_bin()
@@ -1769,7 +1940,7 @@ impl AgentEngine {
                         move |fp| invoke_agy_cli(&agy_bin, fp, &m_clone),
                     )
                 }
-                "gemini-api" => self.run_gemini_api(&cfg, prompt, save_hist),
+                "gemini-api" => self.run_gemini_api(&cfg, prompt, images, save_hist),
                 "chatgpt-free" => {
                     if let Some(codex_bin) = find_codex_bin() {
                         let model = if !cfg.model.trim().is_empty() && cfg.model != "auto" {
@@ -1792,9 +1963,9 @@ impl AgentEngine {
                         Err("Codex CLI も Antigravity CLI も見つかりません。".to_string())
                     }
                 }
-                "claude" => self.run_claude(&cfg, prompt, save_hist),
-                "openai-compatible" => self.run_openai_compat(&cfg, prompt, save_hist),
-                _ => self.run_ollama(&cfg, prompt, save_hist, false, allow_tools),
+                "claude" => self.run_claude(&cfg, prompt, images, save_hist),
+                "openai-compatible" => self.run_openai_compat(&cfg, prompt, images, save_hist),
+                _ => self.run_ollama(&cfg, prompt, images, save_hist, false, allow_tools),
             }
         })();
 
@@ -1888,13 +2059,26 @@ impl AgentEngine {
     }
 
     pub fn handle_user_message(&self, text: &str) -> AgentReply {
+        self.handle_user_message_with_images(text, &[])
+    }
+
+    pub fn handle_user_message_with_images(
+        &self,
+        text: &str,
+        images: &[ImageAttachment],
+    ) -> AgentReply {
         if !text.trim_start().starts_with('[') {
             let topics = extract_interests_from_utterance(text);
             if !topics.is_empty() {
                 let _ = self.config_store.add_interests(&topics);
             }
         }
-        self.dispatch(text, true, true)
+        let eff_text = if text.trim().is_empty() && !images.is_empty() {
+            "添付した画像の内容を見てわかりやすく説明して。"
+        } else {
+            text
+        };
+        self.dispatch_with_images(eff_text, images, true, true)
     }
 
     pub fn handle_touch(&self, scope: Scope, kind: &str, region: &str) -> Option<AgentReply> {

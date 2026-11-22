@@ -672,6 +672,35 @@
         ],
         "spring_omega": 15.2,
         "spring_zeta": 0.24
+      },
+      {
+        "id": "sakura_pomodoro_watch",
+        "parent": "forearm_front",
+        "texture": "parts/sakura_pomodoro_watch.png",
+        "z": 44,
+        "pivot_px": [
+          216.0,
+          496.0
+        ],
+        "role": "accessory",
+        "opacity": 1.0,
+        "parallax": [
+          0.0,
+          0.0
+        ],
+        "rot_deg": 0.0,
+        "bend_px": 0.0,
+        "breath_px": [
+          0.0,
+          0.0
+        ],
+        "scale_breath": [
+          0.0,
+          0.0
+        ],
+        "active_surfaces": [
+          9
+        ]
       }
     ]
   },
@@ -683,7 +712,8 @@
     "surface_overrides": {
       "10": "parts/unyu_clean_s10.png",
       "11": "parts/unyu_clean_s11.png",
-      "12": "parts/unyu_clean_s12.png"
+      "12": "parts/unyu_clean_s12.png",
+      "13": "parts/unyu_clean_s10.png"
     },
     "parts": [
       {
@@ -836,7 +866,10 @@
         ],
         "spring_omega": 11.2,
         "spring_zeta": 0.32,
-        "phase_offset": 0.0
+        "phase_offset": 0.0,
+        "hide_on_surfaces": [
+          13
+        ]
       },
       {
         "id": "mochi_paw_r",
@@ -864,7 +897,10 @@
         ],
         "spring_omega": 11.5,
         "spring_zeta": 0.32,
-        "phase_offset": 0.85
+        "phase_offset": 0.85,
+        "hide_on_surfaces": [
+          13
+        ]
       },
       {
         "id": "mochi_glasses",
@@ -893,6 +929,38 @@
         ],
         "spring_omega": 14.0,
         "spring_zeta": 0.4
+      },
+      {
+        "id": "pomodoro_clock",
+        "parent": "mochi_body",
+        "texture": "parts/unyu_pomodoro_clock.png",
+        "z": 48,
+        "pivot_px": [
+          228.0,
+          316.0
+        ],
+        "role": "mochi_paws",
+        "opacity": 1.0,
+        "parallax": [
+          0.35,
+          0.25
+        ],
+        "rot_deg": 3.5,
+        "bend_px": 0.0,
+        "breath_px": [
+          0.0,
+          -2.5
+        ],
+        "scale_breath": [
+          0.0,
+          0.0
+        ],
+        "spring_omega": 10.5,
+        "spring_zeta": 0.38,
+        "phase_offset": 0.0,
+        "active_surfaces": [
+          13
+        ]
       }
     ]
   }

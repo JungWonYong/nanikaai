@@ -3,6 +3,7 @@
 pub mod accessory_utils;
 pub mod agent_engine;
 pub mod builtin_tools;
+pub mod calendar_sync;
 pub mod companion_extras;
 pub mod config_store;
 pub mod dialogue_parser;

@@ -209,6 +209,22 @@ fn default_power_save_mode() -> String {
     "auto".to_string()
 }
 
+fn default_calendar_travel_mins() -> u32 {
+    30
+}
+
+fn default_calendar_prep_mins() -> u32 {
+    10
+}
+
+fn default_calendar_remind_mins() -> u32 {
+    15
+}
+
+fn default_calendar_briefing_mins() -> u32 {
+    120
+}
+
 pub fn clamp_pomodoro_preset_idx(v: usize) -> usize {
     v.min(crate::accessory_utils::POMODORO_PRESETS.len().saturating_sub(1))
 }
@@ -325,6 +341,30 @@ pub fn clamp_character_scale(v: f32) -> f32 {
     }
 }
 
+pub fn default_voice_speed() -> f32 {
+    1.02
+}
+
+pub fn default_voice_intonation() -> f32 {
+    1.08
+}
+
+pub fn clamp_voice_speed(v: f32) -> f32 {
+    if v.is_finite() {
+        round_pct(v.clamp(0.75, 1.35))
+    } else {
+        default_voice_speed()
+    }
+}
+
+pub fn clamp_voice_intonation(v: f32) -> f32 {
+    if v.is_finite() {
+        round_pct(v.clamp(0.70, 1.50))
+    } else {
+        default_voice_intonation()
+    }
+}
+
 pub fn normalize_tts_engine(raw: &str) -> String {
     match raw.trim().to_ascii_lowercase().as_str() {
         "aivisspeech" | "aivis" => "aivisspeech".to_string(),
@@ -424,6 +464,10 @@ pub struct AgentConfig {
     pub tts_engine: String,
     #[serde(default = "default_voicevox")]
     pub voicevox_url: String,
+    #[serde(default = "default_voice_speed")]
+    pub voice_speed: f32,
+    #[serde(default = "default_voice_intonation")]
+    pub voice_intonation: f32,
     #[serde(default = "default_one_f32")]
     pub skin_opacity: f32,
     #[serde(default = "default_one_f32")]
@@ -454,6 +498,22 @@ pub struct AgentConfig {
     pub low_battery_alert: bool,
     #[serde(default)]
     pub pomodoro_preset_idx: usize,
+    #[serde(default)]
+    pub calendar_enabled: bool,
+    #[serde(default = "default_true")]
+    pub calendar_use_os_native: bool,
+    #[serde(default)]
+    pub calendar_ics_urls: Vec<String>,
+    #[serde(default)]
+    pub calendar_home_location: String,
+    #[serde(default = "default_calendar_travel_mins")]
+    pub calendar_default_travel_mins: u32,
+    #[serde(default = "default_calendar_prep_mins")]
+    pub calendar_prep_mins: u32,
+    #[serde(default = "default_calendar_remind_mins")]
+    pub calendar_remind_mins: u32,
+    #[serde(default = "default_calendar_briefing_mins")]
+    pub calendar_briefing_interval_mins: u32,
     #[serde(default = "default_true")]
     pub macos_accept_first_mouse: bool,
     #[serde(default)]
@@ -504,6 +564,8 @@ impl Default for AgentConfig {
             voice_tts: false,
             tts_engine: default_tts_engine(),
             voicevox_url: default_voicevox(),
+            voice_speed: default_voice_speed(),
+            voice_intonation: default_voice_intonation(),
             skin_opacity: 1.0,
             balloon_opacity: 1.0,
             character_scale: 1.0,
@@ -519,6 +581,14 @@ impl Default for AgentConfig {
             power_save_mode: default_power_save_mode(),
             low_battery_alert: true,
             pomodoro_preset_idx: 0,
+            calendar_enabled: false,
+            calendar_use_os_native: true,
+            calendar_ics_urls: Vec::new(),
+            calendar_home_location: String::new(),
+            calendar_default_travel_mins: default_calendar_travel_mins(),
+            calendar_prep_mins: default_calendar_prep_mins(),
+            calendar_remind_mins: default_calendar_remind_mins(),
+            calendar_briefing_interval_mins: default_calendar_briefing_mins(),
             macos_accept_first_mouse: true,
             macos_window_shadow: false,
             macos_show_in_dock: false,
@@ -555,6 +625,8 @@ pub struct ConfigPatch {
     pub voice_tts: Option<bool>,
     pub tts_engine: Option<String>,
     pub voicevox_url: Option<String>,
+    pub voice_speed: Option<f32>,
+    pub voice_intonation: Option<f32>,
     pub skin_opacity: Option<f32>,
     pub balloon_opacity: Option<f32>,
     pub character_scale: Option<f32>,
@@ -570,6 +642,14 @@ pub struct ConfigPatch {
     pub power_save_mode: Option<String>,
     pub low_battery_alert: Option<bool>,
     pub pomodoro_preset_idx: Option<usize>,
+    pub calendar_enabled: Option<bool>,
+    pub calendar_use_os_native: Option<bool>,
+    pub calendar_ics_urls: Option<Vec<String>>,
+    pub calendar_home_location: Option<String>,
+    pub calendar_default_travel_mins: Option<u32>,
+    pub calendar_prep_mins: Option<u32>,
+    pub calendar_remind_mins: Option<u32>,
+    pub calendar_briefing_interval_mins: Option<u32>,
     pub macos_accept_first_mouse: Option<bool>,
     pub macos_window_shadow: Option<bool>,
     pub macos_show_in_dock: Option<bool>,
@@ -665,6 +745,16 @@ impl ConfigStore {
         let clamped_pomo = clamp_pomodoro_preset_idx(cfg.pomodoro_preset_idx);
         if clamped_pomo != cfg.pomodoro_preset_idx {
             cfg.pomodoro_preset_idx = clamped_pomo;
+            changed = true;
+        }
+        let clamped_vs = clamp_voice_speed(cfg.voice_speed);
+        if (clamped_vs - cfg.voice_speed).abs() > f32::EPSILON {
+            cfg.voice_speed = clamped_vs;
+            changed = true;
+        }
+        let clamped_vi = clamp_voice_intonation(cfg.voice_intonation);
+        if (clamped_vi - cfg.voice_intonation).abs() > f32::EPSILON {
+            cfg.voice_intonation = clamped_vi;
             changed = true;
         }
         for profile in cfg.ghost_profiles.values_mut() {
@@ -775,6 +865,12 @@ impl ConfigStore {
         if let Some(v) = patch.voicevox_url {
             guard.voicevox_url = v;
         }
+        if let Some(v) = patch.voice_speed {
+            guard.voice_speed = clamp_voice_speed(v);
+        }
+        if let Some(v) = patch.voice_intonation {
+            guard.voice_intonation = clamp_voice_intonation(v);
+        }
         if let Some(v) = patch.skin_opacity {
             guard.skin_opacity = clamp_skin_opacity(v);
         }
@@ -810,6 +906,35 @@ impl ConfigStore {
         }
         if let Some(v) = patch.auto_start_at_login {
             guard.auto_start_at_login = v;
+        }
+        if let Some(v) = patch.calendar_enabled {
+            guard.calendar_enabled = v;
+        }
+        if let Some(v) = patch.calendar_use_os_native {
+            guard.calendar_use_os_native = v;
+        }
+        if let Some(v) = patch.calendar_ics_urls {
+            guard.calendar_ics_urls = v
+                .into_iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .take(8)
+                .collect();
+        }
+        if let Some(v) = patch.calendar_home_location {
+            guard.calendar_home_location = v.trim().chars().take(120).collect();
+        }
+        if let Some(v) = patch.calendar_default_travel_mins {
+            guard.calendar_default_travel_mins = v.clamp(5, 180);
+        }
+        if let Some(v) = patch.calendar_prep_mins {
+            guard.calendar_prep_mins = v.clamp(0, 60);
+        }
+        if let Some(v) = patch.calendar_remind_mins {
+            guard.calendar_remind_mins = v.clamp(5, 120);
+        }
+        if let Some(v) = patch.calendar_briefing_interval_mins {
+            guard.calendar_briefing_interval_mins = v.clamp(0, 720);
         }
         if let Some(v) = patch.power_save_mode {
             guard.power_save_mode = crate::accessory_utils::normalize_power_save_mode(&v);
@@ -852,6 +977,8 @@ impl ConfigStore {
         guard.always_on_top = defs.always_on_top;
         guard.live2d_motion = defs.live2d_motion;
         guard.hourly_chime = defs.hourly_chime;
+        guard.voice_speed = defs.voice_speed;
+        guard.voice_intonation = defs.voice_intonation;
         guard.skin_opacity = defs.skin_opacity;
         guard.balloon_opacity = defs.balloon_opacity;
         guard.character_scale = defs.character_scale;

@@ -63,13 +63,13 @@ animation1.pattern0,overlay,113,115,0,0
 animation1.pattern1,overlay,-1,115,0,0
 }
 
-surface0,1,2,3,4,5,6,7,8
+surface0,1,2,3,4,5,6,7,8,9
 {
 animation50.interval,bind
 animation50.pattern0,overlay,200,0,0,0
 }
 
-surface10,11,12
+surface10,11,12,13
 {
 animation51.interval,bind
 animation51.pattern0,overlay,210,0,0,0

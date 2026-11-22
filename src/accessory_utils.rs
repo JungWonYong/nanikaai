@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 pub const POWER_SAVE_CHOICES: &[&str] = &["auto", "on", "off"];
-pub const POMODORO_PRESETS: &[(u32, u32)] = &[(25, 5), (50, 10), (15, 3)];
+pub const POMODORO_PRESETS: &[(u32, u32)] = &[(25, 5), (50, 10), (15, 3), (45, 15), (52, 17)];
+pub const POMODORO_LONG_BREAK_MINS: &[u32] = &[15, 20, 10, 30, 25];
+pub const POMODORO_LONG_BREAK_EVERY: u32 = 4;
 pub const MAX_BACKLOG_ENTRIES: usize = 30;
 
 pub fn normalize_power_save_mode(raw: &str) -> String {
@@ -369,6 +371,8 @@ pub struct PomodoroTimer {
     pub break_mins: u32,
     pub remaining_secs: u64,
     pub completed_cycles: u32,
+    pub total_focus_mins: u32,
+    pub long_break_mins: u32,
     pub last_tick_at: Option<Instant>,
 }
 
@@ -382,6 +386,7 @@ impl PomodoroTimer {
     pub fn new(preset_idx: usize) -> Self {
         let idx = preset_idx.min(POMODORO_PRESETS.len().saturating_sub(1));
         let (work_mins, break_mins) = POMODORO_PRESETS[idx];
+        let long_break_mins = POMODORO_LONG_BREAK_MINS.get(idx).copied().unwrap_or(15);
         Self {
             phase: PomodoroPhase::Idle,
             paused: false,
@@ -390,6 +395,8 @@ impl PomodoroTimer {
             break_mins,
             remaining_secs: (work_mins as u64) * 60,
             completed_cycles: 0,
+            total_focus_mins: 0,
+            long_break_mins,
             last_tick_at: None,
         }
     }
@@ -400,6 +407,7 @@ impl PomodoroTimer {
         self.preset_idx = clamped;
         self.work_mins = w;
         self.break_mins = b;
+        self.long_break_mins = POMODORO_LONG_BREAK_MINS.get(clamped).copied().unwrap_or(15);
         if self.phase == PomodoroPhase::Idle {
             self.remaining_secs = (w as u64) * 60;
         }
@@ -467,12 +475,18 @@ impl PomodoroTimer {
             PomodoroPhase::Idle => None,
             PomodoroPhase::Focus => {
                 self.completed_cycles = self.completed_cycles.saturating_add(1);
+                self.total_focus_mins = self.total_focus_mins.saturating_add(self.work_mins);
+                let next_break = if self.completed_cycles % POMODORO_LONG_BREAK_EVERY == 0 {
+                    self.long_break_mins
+                } else {
+                    self.break_mins
+                };
                 self.phase = PomodoroPhase::Break;
                 self.paused = false;
-                self.remaining_secs = (self.break_mins as u64) * 60;
+                self.remaining_secs = (next_break as u64) * 60;
                 Some(PomodoroTransition::FocusCompleted {
                     cycles: self.completed_cycles,
-                    next_break_mins: self.break_mins,
+                    next_break_mins: next_break,
                 })
             }
             PomodoroPhase::Break => {
@@ -516,11 +530,11 @@ impl PomodoroTimer {
     }
 
     pub fn format_preset_label(&self, lang: UiLang) -> String {
-        let (w, b) = (self.work_mins, self.break_mins);
+        let (w, b, lb) = (self.work_mins, self.break_mins, self.long_break_mins);
         match lang {
-            UiLang::Ja => format!("{w}分集中 / {b}分休憩"),
-            UiLang::Ko => format!("{w}분 집중 / {b}분 휴식"),
-            UiLang::En => format!("{w}m Focus / {b}m Break"),
+            UiLang::Ja => format!("{w}分集中 / {b}分休憩 (長{lb}分)"),
+            UiLang::Ko => format!("{w}분 집중 / {b}분 휴식 (긴 {lb}분)"),
+            UiLang::En => format!("{w}m Focus / {b}m Break (Long {lb}m)"),
         }
     }
 
@@ -611,9 +625,11 @@ impl PomodoroTimer {
             "preset_idx": self.preset_idx,
             "work_mins": self.work_mins,
             "break_mins": self.break_mins,
+            "long_break_mins": self.long_break_mins,
             "remaining_secs": self.remaining_secs,
             "remaining_mm_ss": self.format_mm_ss(),
             "completed_cycles": self.completed_cycles,
+            "total_focus_mins": self.total_focus_mins,
         })
     }
 }
@@ -896,6 +912,196 @@ Exec=\"{exe_str}\"\n\
 Terminal=false\n\
 X-GNOME-Autostart-enabled=true\n"
     )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoItem {
+    pub id: u64,
+    pub text: String,
+    pub done: bool,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct MemoStore {
+    file_path: PathBuf,
+}
+
+impl MemoStore {
+    pub fn new(config_dir: &Path) -> Self {
+        Self {
+            file_path: config_dir.join("memos.json"),
+        }
+    }
+
+    pub fn list(&self) -> Vec<MemoItem> {
+        let Ok(raw) = std::fs::read_to_string(&self.file_path) else {
+            return Vec::new();
+        };
+        serde_json::from_str::<Vec<MemoItem>>(&raw).unwrap_or_default()
+    }
+
+    fn save(&self, items: &[MemoItem]) -> Result<(), String> {
+        if let Some(parent) = self.file_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("memo dir error: {e}"))?;
+        }
+        let body = serde_json::to_string_pretty(items)
+            .map_err(|e| format!("memo serialize error: {e}"))?;
+        let tmp = self.file_path.with_extension("json.tmp");
+        std::fs::write(&tmp, body).map_err(|e| format!("memo write error: {e}"))?;
+        std::fs::rename(&tmp, &self.file_path).map_err(|e| format!("memo rename error: {e}"))
+    }
+
+    pub fn add(&self, raw_text: &str) -> Result<MemoItem, String> {
+        let clean: String = raw_text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(240)
+            .collect();
+        if clean.is_empty() {
+            return Err("empty memo".to_string());
+        }
+        let mut items = self.list();
+        let next_id = items.iter().map(|m| m.id).max().unwrap_or(0) + 1;
+        let item = MemoItem {
+            id: next_id,
+            text: clean,
+            done: false,
+            created_at: chrono::Local::now().format("%m/%d %H:%M").to_string(),
+        };
+        items.push(item.clone());
+        if items.len() > 60 {
+            let excess = items.len() - 60;
+            items.drain(0..excess);
+        }
+        self.save(&items)?;
+        Ok(item)
+    }
+
+    pub fn toggle_done(&self, id: u64) -> Option<MemoItem> {
+        let mut items = self.list();
+        let found = items.iter_mut().find(|m| m.id == id)?;
+        found.done = !found.done;
+        let out = found.clone();
+        let _ = self.save(&items);
+        Some(out)
+    }
+
+    pub fn set_done(&self, id: u64, done: bool) -> Option<MemoItem> {
+        let mut items = self.list();
+        let found = items.iter_mut().find(|m| m.id == id)?;
+        found.done = done;
+        let out = found.clone();
+        let _ = self.save(&items);
+        Some(out)
+    }
+
+    pub fn delete(&self, id: u64) -> bool {
+        let mut items = self.list();
+        let before = items.len();
+        items.retain(|m| m.id != id);
+        if items.len() < before {
+            let _ = self.save(&items);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn clear_done(&self) -> usize {
+        let mut items = self.list();
+        let before = items.len();
+        items.retain(|m| !m.done);
+        let removed = before.saturating_sub(items.len());
+        if removed > 0 {
+            let _ = self.save(&items);
+        }
+        removed
+    }
+
+    pub fn format_balloon_script(&self, lang: UiLang) -> String {
+        let items = self.list();
+        let pending: Vec<&MemoItem> = items.iter().filter(|m| !m.done).collect();
+        let done_count = items.len().saturating_sub(pending.len());
+        if items.is_empty() {
+            return match lang {
+                UiLang::Ja => "\\_q\\0\\s[0]📝 クイックメモはまだ空だよ。\\nチャットで「牛乳を買うってメモして」のように話しかけると記録できるよ！\\_q\\e".to_string(),
+                UiLang::Ko => "\\_q\\0\\s[0]📝 퀵 메모가 아직 비어 있어요.\\n채팅으로 \"우유 사기 메모해 줘\"처럼 말하면 바로 저장할 수 있어요!\\_q\\e".to_string(),
+                UiLang::En => "\\_q\\0\\s[0]📝 No quick memos yet.\\nTell me in chat (e.g. \"Add a memo to buy milk\") and I'll keep track of it!\\_q\\e".to_string(),
+            };
+        }
+        let header = match lang {
+            UiLang::Ja => format!("📝 クイックメモ (未完了 {} / 完了 {})", pending.len(), done_count),
+            UiLang::Ko => format!("📝 퀵 메모 (미완료 {} / 완료 {})", pending.len(), done_count),
+            UiLang::En => format!("📝 Quick Memos ({} open / {} done)", pending.len(), done_count),
+        };
+        let mut body = format!("\\_q\\0\\s[0]{header}\\n");
+        for m in pending.iter().rev().take(6) {
+            let safe_txt = sanitize_script_fragment(&m.text);
+            let short_lbl: String = safe_txt.chars().take(28).collect();
+            body.push_str(&format!(
+                "\\n• [#{id}] {safe_txt}\\n  \\q[✓ 完了 #{id}: {short_lbl},__memo_done_{id}__]",
+                id = m.id
+            ));
+        }
+        if done_count > 0 {
+            let clr_lbl = match lang {
+                UiLang::Ja => "🧹 完了済みメモを整理",
+                UiLang::Ko => "🧹 완료된 메모 정리",
+                UiLang::En => "🧹 Clear Completed Memos",
+            };
+            body.push_str(&format!("\\n\\q[{clr_lbl},__memo_clear_done__]"));
+        }
+        body.push_str("\\_q\\e");
+        body
+    }
+}
+
+/// Guard and wrap clipboard text for explicit user-triggered AI help (blocks secrets/keys).
+pub fn sanitize_clipboard_for_ai(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("empty".to_string());
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let secret_markers = [
+        "-----begin ",
+        "private key-----",
+        "ghp_",
+        "gho_",
+        "github_pat_",
+        "aiza",
+        "akia",
+        "xoxb-",
+        "xoxp-",
+        "sk-proj-",
+        "sk-ant-",
+        "sk-live-",
+        "ya29.",
+        "hf_",
+        "glpat-",
+        "discord.com/api/webhooks/",
+        "hooks.slack.com/",
+        "eyjhbgcioi",
+    ];
+    let has_generic_sk = lower
+        .split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '=' | ':' | ',' | ';'))
+        .any(|tok| tok.starts_with("sk-") && tok.len() >= 20);
+    if secret_markers.iter().any(|m| lower.contains(m))
+        || has_generic_sk
+        || (lower.contains("api_key") && (lower.contains('=') || lower.contains(':')))
+        || (lower.contains("password") && (lower.contains('=') || lower.contains(':')))
+    {
+        return Err("secret_detected".to_string());
+    }
+    let clipped: String = trimmed.chars().take(1600).collect();
+    let safe_re = regex::Regex::new(r"(?i)</?\s*untrusted_data[^>]*>").expect("valid regex");
+    let safe = safe_re.replace_all(&clipped, "[untrusted_data_tag]");
+    Ok(format!(
+        "<untrusted_data type=\"clipboard\">\n{safe}\n</untrusted_data>"
+    ))
 }
 
 pub fn format_windows_run_command(exe_path: &Path) -> String {
@@ -1200,5 +1406,43 @@ mod tests {
         let mons = [(0, 0, 1920, 1080), (1920, 0, 2560, 1440)];
         assert_eq!(select_next_monitor_index(&mons, (500, 500)), Some(1));
         assert_eq!(select_next_monitor_index(&mons, (2100, 200)), Some(0));
+    }
+
+    #[test]
+    fn memo_store_crud_and_clipboard_secret_guard() {
+        let tmp = std::env::temp_dir().join(format!(
+            "nanikaai_memo_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let store = MemoStore::new(&tmp);
+        assert!(store.list().is_empty());
+
+        let m1 = store.add("Buy milk and coffee").expect("add m1");
+        let m2 = store.add("Review PR #42").expect("add m2");
+        assert_eq!(store.list().len(), 2);
+        assert!(store.toggle_done(m1.id).unwrap().done);
+        let script = store.format_balloon_script(UiLang::Ja);
+        assert!(script.contains("Review PR #42"));
+        assert!(script.contains("__memo_clear_done__"));
+        assert_eq!(store.clear_done(), 1);
+        assert_eq!(store.list().len(), 1);
+        assert!(store.delete(m2.id));
+        assert!(store.list().is_empty());
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let wrapped = sanitize_clipboard_for_ai("Rust ownership prevents data races.")
+            .expect("safe clipboard text");
+        assert!(wrapped.contains("<untrusted_data type=\"clipboard\">"));
+        let fake_pem = format!("{}{}\nabc", "-----BEGIN ", "PRIVATE KEY-----");
+        assert_eq!(
+            sanitize_clipboard_for_ai(&fake_pem).unwrap_err(),
+            "secret_detected"
+        );
+        let fake_pat = format!("{}{}", "ghp_", "1234567890abcdef");
+        assert_eq!(
+            sanitize_clipboard_for_ai(&fake_pat).unwrap_err(),
+            "secret_detected"
+        );
     }
 }

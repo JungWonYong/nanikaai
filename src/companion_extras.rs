@@ -61,7 +61,45 @@ pub struct AivmCatalogModel {
     pub menu_label: &'static str,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstalledAivmModel {
+    pub uuid: String,
+    pub name: String,
+    pub is_default_model: bool,
+    pub speaker_names: Vec<String>,
+}
+
 pub const CURATED_AIVISHUB_MODELS: &[AivmCatalogModel] = &[
+    AivmCatalogModel {
+        uuid: "a670e6b8-0852-45b2-8704-1bc9862f2fe6",
+        name: "花音",
+        role_tag: "girl",
+        menu_label: "👩 花音 · 自然な会話女性 (高評価 168★)",
+    },
+    AivmCatalogModel {
+        uuid: "3328da9a-8124-4619-a853-f7fc2f37889f",
+        name: "桜音",
+        role_tag: "girl",
+        menu_label: "👧 桜音 · 明るく自然な少女 (93★)",
+    },
+    AivmCatalogModel {
+        uuid: "4f281e78-eba6-495a-8e50-5c322d02b5b1",
+        name: "るな",
+        role_tag: "girl",
+        menu_label: "👧 るな · やわらか自然少女 (98★)",
+    },
+    AivmCatalogModel {
+        uuid: "59f96896-64d2-4378-830a-4d5feb3d81aa",
+        name: "ほのか",
+        role_tag: "girl",
+        menu_label: "👩 ほのか · リアル20代会話女性 (4感情)",
+    },
+    AivmCatalogModel {
+        uuid: "470a41e2-863f-4bf2-8a20-bf7cde0d8f7b",
+        name: "TANAKA",
+        role_tag: "male",
+        menu_label: "👦 TANAKA · 関西弁おとん/相棒 (4感情)",
+    },
     AivmCatalogModel {
         uuid: "9f36ec0d-8dac-42dc-aff4-149c5f99faad",
         name: "らせつん",
@@ -175,6 +213,8 @@ struct SpeechBatch {
     kero_archetype: KeroVoiceArchetype,
     sakura_speaker_override: Option<i64>,
     kero_speaker_override: Option<i64>,
+    voice_speed: f32,
+    voice_intonation: f32,
 }
 
 struct ManagedTtsProcess {
@@ -188,6 +228,7 @@ struct CachedTtsState {
     base_url: Option<String>,
     voices: Vec<TtsVoiceOption>,
     installed_aivm_uuids: Vec<String>,
+    installed_aivm_models: Vec<InstalledAivmModel>,
 }
 
 fn tts_sender() -> &'static Mutex<Option<mpsc::Sender<SpeechBatch>>> {
@@ -213,6 +254,7 @@ fn cached_tts_state() -> &'static Mutex<CachedTtsState> {
             base_url: None,
             voices: Vec::new(),
             installed_aivm_uuids: Vec::new(),
+            installed_aivm_models: Vec::new(),
         })
     })
 }
@@ -238,6 +280,14 @@ pub fn cached_installed_aivm_uuids() -> Vec<String> {
     cached_tts_state()
         .lock()
         .map(|g| g.installed_aivm_uuids.clone())
+        .unwrap_or_default()
+}
+
+/// Synchronously read cached installed AIVM model metadata (name, default flag, speakers).
+pub fn cached_installed_aivm_models() -> Vec<InstalledAivmModel> {
+    cached_tts_state()
+        .lock()
+        .map(|g| g.installed_aivm_models.clone())
         .unwrap_or_default()
 }
 
@@ -843,8 +893,8 @@ pub fn resolve_effective_voice_selection(
     }
 }
 
-/// Query installed AIVM model UUIDs from `GET {base}/aivm_models`.
-pub fn fetch_installed_aivm_uuids(base: &str) -> Vec<String> {
+/// Query installed AIVM models (with name, default flag, speakers) from `GET {base}/aivm_models`.
+pub fn fetch_installed_aivm_models(base: &str) -> Vec<InstalledAivmModel> {
     let Ok(client) = Client::builder()
         .connect_timeout(Duration::from_millis(500))
         .timeout(Duration::from_secs(3))
@@ -862,20 +912,119 @@ pub fn fetch_installed_aivm_uuids(base: &str) -> Vec<String> {
     let Ok(val) = resp.json::<serde_json::Value>() else {
         return Vec::new();
     };
-    let mut ids: Vec<String> = val
+    let mut models: Vec<InstalledAivmModel> = val
         .as_object()
         .map(|obj| {
-            obj.keys()
-                .filter(|k| is_valid_aivm_uuid(k))
-                .cloned()
+            obj.iter()
+                .filter(|(k, _)| is_valid_aivm_uuid(k))
+                .map(|(k, v)| {
+                    let man = v.get("manifest");
+                    let name = man
+                        .and_then(|m| m.get("name"))
+                        .and_then(|x| x.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or(k)
+                        .to_string();
+                    let is_default_model = v
+                        .get("is_default_model")
+                        .and_then(|x| x.as_bool())
+                        .unwrap_or(false);
+                    let speaker_names = man
+                        .and_then(|m| m.get("speakers"))
+                        .and_then(|x| x.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|sp| sp.get("name").and_then(|n| n.as_str()))
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    InstalledAivmModel {
+                        uuid: k.clone(),
+                        name,
+                        is_default_model,
+                        speaker_names,
+                    }
+                })
                 .collect()
         })
         .unwrap_or_default();
-    ids.sort();
+    models.sort_by(|a, b| {
+        b.is_default_model
+            .cmp(&a.is_default_model)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    let ids: Vec<String> = models.iter().map(|m| m.uuid.clone()).collect();
     if let Ok(mut cache) = cached_tts_state().lock() {
-        cache.installed_aivm_uuids = ids.clone();
+        cache.installed_aivm_uuids = ids;
+        cache.installed_aivm_models = models.clone();
     }
-    ids
+    models
+}
+
+/// Query installed AIVM model UUIDs from `GET {base}/aivm_models`.
+pub fn fetch_installed_aivm_uuids(base: &str) -> Vec<String> {
+    fetch_installed_aivm_models(base)
+        .into_iter()
+        .map(|m| m.uuid)
+        .collect()
+}
+
+/// Uninstall a user-installed AIVM voice model from local AivisSpeech Engine (`DELETE /aivm_models/{uuid}/uninstall`).
+pub fn uninstall_aivm_model_blocking(
+    base: &str,
+    aivm_uuid: &str,
+) -> Result<(String, Vec<TtsVoiceOption>), String> {
+    let clean_uuid = aivm_uuid.trim();
+    if !is_valid_aivm_uuid(clean_uuid) {
+        return Err(format!("不正な AIVM UUID です: {aivm_uuid}"));
+    }
+    let clean_base = validate_local_tts_url(base)
+        .ok_or_else(|| "ローカル AivisSpeech URL のみ許可されます".to_string())?;
+
+    let installed = fetch_installed_aivm_models(&clean_base);
+    let target = installed
+        .iter()
+        .find(|m| m.uuid.eq_ignore_ascii_case(clean_uuid))
+        .ok_or_else(|| "対象の音声モデルが見つかりません".to_string())?;
+    if target.is_default_model {
+        return Err(format!("標準モデル「{}」は削除できません", target.name));
+    }
+    let removed_name = target.name.clone();
+
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let _ = client
+        .post(format!("{clean_base}/aivm_models/{clean_uuid}/unload"))
+        .send();
+
+    let del_resp = client
+        .delete(format!("{clean_base}/aivm_models/{clean_uuid}/uninstall"))
+        .send()
+        .map_err(|e| format!("音声モデル削除通信エラー: {e}"))?;
+    if !del_resp.status().is_success() {
+        let st = del_resp.status();
+        let err_txt = del_resp.text().unwrap_or_default();
+        return Err(format!("AIVM 削除失敗 (HTTP {st}): {err_txt}"));
+    }
+
+    let voices = fetch_voices_from_engine(&clean_base).unwrap_or_default();
+    let models = fetch_installed_aivm_models(&clean_base);
+    let uuids: Vec<String> = models.iter().map(|m| m.uuid.clone()).collect();
+    if let Ok(mut cache) = cached_tts_state().lock() {
+        cache.engine_label = label_for_engine_url(&clean_base, &voices);
+        cache.base_url = Some(clean_base);
+        cache.voices = voices.clone();
+        cache.installed_aivm_uuids = uuids;
+        cache.installed_aivm_models = models;
+    }
+    Ok((removed_name, voices))
 }
 
 /// Download & load a curated AivisHub `.aivmx` voice model into local AivisSpeech Engine cleanly via multipart URL upload.
@@ -1016,6 +1165,7 @@ pub fn ensure_tts_engine_ready_with_mode_blocking(
             cache.base_url = None;
             cache.voices.clear();
             cache.installed_aivm_uuids.clear();
+            cache.installed_aivm_models.clear();
         }
         return TtsEngineStatus {
             engine_label: "OS Native TTS".to_string(),
@@ -1169,14 +1319,16 @@ pub fn ensure_tts_engine_ready_blocking(
     ensure_tts_engine_ready_with_mode_blocking(preferred_url, "auto", allow_autostart)
 }
 
-/// Speak an ordered batch of `(scope_id, text)` utterances asynchronously with explicit engine & partner archetype.
-pub fn speak_dialogue_batch_with_options_async(
+/// Speak an ordered batch of `(scope_id, text)` utterances asynchronously with explicit prosody controls.
+pub fn speak_dialogue_batch_with_prosody_async(
     segments: Vec<(u8, String)>,
     preferred_url: &str,
     tts_engine: &str,
     kero_archetype: KeroVoiceArchetype,
     sakura_speaker_override: Option<i64>,
     kero_speaker_override: Option<i64>,
+    voice_speed: f32,
+    voice_intonation: f32,
 ) {
     let cleaned_segments: Vec<(u8, String)> = segments
         .into_iter()
@@ -1194,6 +1346,8 @@ pub fn speak_dialogue_batch_with_options_async(
     }
     let pref = preferred_url.trim().trim_end_matches('/').to_string();
     let eng = tts_engine.trim().to_ascii_lowercase();
+    let spd = crate::config_store::clamp_voice_speed(voice_speed);
+    let inton = crate::config_store::clamp_voice_intonation(voice_intonation);
 
     let Ok(mut guard) = tts_sender().lock() else {
         return;
@@ -1224,8 +1378,31 @@ pub fn speak_dialogue_batch_with_options_async(
             kero_archetype,
             sakura_speaker_override,
             kero_speaker_override,
+            voice_speed: spd,
+            voice_intonation: inton,
         });
     }
+}
+
+/// Speak an ordered batch of `(scope_id, text)` utterances asynchronously with explicit engine & partner archetype.
+pub fn speak_dialogue_batch_with_options_async(
+    segments: Vec<(u8, String)>,
+    preferred_url: &str,
+    tts_engine: &str,
+    kero_archetype: KeroVoiceArchetype,
+    sakura_speaker_override: Option<i64>,
+    kero_speaker_override: Option<i64>,
+) {
+    speak_dialogue_batch_with_prosody_async(
+        segments,
+        preferred_url,
+        tts_engine,
+        kero_archetype,
+        sakura_speaker_override,
+        kero_speaker_override,
+        crate::config_store::default_voice_speed(),
+        crate::config_store::default_voice_intonation(),
+    );
 }
 
 /// Speak an ordered batch of `(scope_id, text)` utterances asynchronously via AivisSpeech / VOICEVOX or OS TTS.
@@ -1292,7 +1469,14 @@ fn speak_batch_blocking(batch: &SpeechBatch) {
                 };
                 (resolved.kero_id.unwrap_or(3), h)
             };
-            spoken_by_engine = try_tts_api_synthesis(base, chosen_id, text, hint);
+            spoken_by_engine = try_tts_api_synthesis(
+                base,
+                chosen_id,
+                text,
+                hint,
+                batch.voice_speed,
+                batch.voice_intonation,
+            );
         }
         if !spoken_by_engine {
             try_os_tts_blocking(*scope_id, batch.kero_archetype, text);
@@ -1306,7 +1490,14 @@ pub fn synthesize_tts_wav_bytes(
     speaker: i64,
     text: &str,
 ) -> Result<Vec<u8>, String> {
-    synthesize_tts_wav_bytes_with_hint(base, speaker, text, TtsProsodyHint::Default)
+    synthesize_tts_wav_bytes_with_hint(
+        base,
+        speaker,
+        text,
+        TtsProsodyHint::Default,
+        crate::config_store::default_voice_speed(),
+        crate::config_store::default_voice_intonation(),
+    )
 }
 
 fn synthesize_tts_wav_bytes_with_hint(
@@ -1314,6 +1505,8 @@ fn synthesize_tts_wav_bytes_with_hint(
     speaker: i64,
     text: &str,
     hint: TtsProsodyHint,
+    voice_speed: f32,
+    voice_intonation: f32,
 ) -> Result<Vec<u8>, String> {
     let client = Client::builder()
         .connect_timeout(Duration::from_millis(400))
@@ -1336,18 +1529,35 @@ fn synthesize_tts_wav_bytes_with_hint(
         .map_err(|e| e.to_string())?;
 
     if let Some(obj) = query_json.as_object_mut() {
+        let base_speed = crate::config_store::clamp_voice_speed(voice_speed) as f64;
+        let base_inton = crate::config_store::clamp_voice_intonation(voice_intonation) as f64;
+        obj.insert("speedScale".to_string(), serde_json::json!(base_speed));
+        obj.insert("intonationScale".to_string(), serde_json::json!(base_inton));
+        if obj.contains_key("tempoDynamicsScale") {
+            let td = (0.95 + (base_inton - 1.0) * 0.65).clamp(0.75, 1.40);
+            obj.insert("tempoDynamicsScale".to_string(), serde_json::json!(td));
+        }
         match hint {
             TtsProsodyHint::Default => {}
             TtsProsodyHint::BoyishNative => {
-                obj.insert("speedScale".to_string(), serde_json::json!(1.03));
+                obj.insert(
+                    "speedScale".to_string(),
+                    serde_json::json!((base_speed * 1.02).clamp(0.75, 1.40)),
+                );
             }
             TtsProsodyHint::BoyishFallbackOnFemale => {
-                obj.insert("speedScale".to_string(), serde_json::json!(1.07));
+                obj.insert(
+                    "speedScale".to_string(),
+                    serde_json::json!((base_speed * 1.05).clamp(0.75, 1.40)),
+                );
                 obj.insert("tempoDynamicsScale".to_string(), serde_json::json!(1.18));
                 obj.insert("pitchScale".to_string(), serde_json::json!(-0.04));
             }
             TtsProsodyHint::YouthMaleFallbackOnFemale => {
-                obj.insert("speedScale".to_string(), serde_json::json!(0.98));
+                obj.insert(
+                    "speedScale".to_string(),
+                    serde_json::json!((base_speed * 0.96).clamp(0.75, 1.40)),
+                );
                 obj.insert("pitchScale".to_string(), serde_json::json!(-0.07));
             }
         }
@@ -1369,8 +1579,17 @@ fn synthesize_tts_wav_bytes_with_hint(
     Ok(wav_bytes)
 }
 
-fn try_tts_api_synthesis(base: &str, speaker: i64, text: &str, hint: TtsProsodyHint) -> bool {
-    let Ok(wav_bytes) = synthesize_tts_wav_bytes_with_hint(base, speaker, text, hint) else {
+fn try_tts_api_synthesis(
+    base: &str,
+    speaker: i64,
+    text: &str,
+    hint: TtsProsodyHint,
+    voice_speed: f32,
+    voice_intonation: f32,
+) -> bool {
+    let Ok(wav_bytes) =
+        synthesize_tts_wav_bytes_with_hint(base, speaker, text, hint, voice_speed, voice_intonation)
+    else {
         return false;
     };
     let tmp_wav = std::env::temp_dir().join(format!("nanikaai_tts_{}.wav", std::process::id()));

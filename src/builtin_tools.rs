@@ -203,6 +203,75 @@ pub fn tools_schema() -> Value {
                     "required": []
                 }
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "add_memo",
+                "description": "Save a short quick desktop memo or to-do item for the user.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string", "description": "Memo or to-do content"}
+                    },
+                    "required": ["text"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_memos",
+                "description": "List saved desktop quick memos and to-do items.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "include_done": {"type": "boolean", "description": "Include completed memos"}
+                    },
+                    "required": []
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "complete_memo",
+                "description": "Mark a desktop memo item as completed by its numeric id.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer", "description": "Numeric memo ID"}
+                    },
+                    "required": ["id"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "delete_memo",
+                "description": "Delete a desktop memo item by its numeric id.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "integer", "description": "Numeric memo ID"}
+                    },
+                    "required": ["id"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_upcoming_events",
+                "description": "List upcoming synced calendar events (Google, Apple iCloud/iCal, Yahoo! Japan, Yahoo, OS built-in calendar) with estimated travel time and recommended departure times.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "hours": {"type": "integer", "description": "Lookahead window in hours (default 48, max 72)"}
+                    }
+                }
+            }
         }
     ])
 }
@@ -226,13 +295,18 @@ pub fn is_sensitive_path(target: &Path) -> bool {
     static BLOCKED: OnceLock<Vec<Regex>> = OnceLock::new();
     let patterns = BLOCKED.get_or_init(|| {
         vec![
-            Regex::new(r"(?i)[/\\]\.ssh(?:[/\\]|$)").unwrap(),
-            Regex::new(r"(?i)[/\\]\.gnupg(?:[/\\]|$)").unwrap(),
-            Regex::new(r"(?i)[/\\]\.aws(?:[/\\]|$)").unwrap(),
-            Regex::new(r"(?i)[/\\]\.nanikaai[/\\]config\.json$").unwrap(),
-            Regex::new(r"(?i)[/\\]nanikaai[/\\]config\.json$").unwrap(),
-            Regex::new(r"(?i)credentials[^/\\]*\.json$").unwrap(),
-            Regex::new(r"(?i)\.env(?:\.[^/\\]+)?$").unwrap(),
+            Regex::new(r"(?i)(?:^|[/\\])\.ssh(?:[/\\]|$)").unwrap(),
+            Regex::new(r"(?i)(?:^|[/\\])\.gnupg(?:[/\\]|$)").unwrap(),
+            Regex::new(r"(?i)(?:^|[/\\])\.aws(?:[/\\]|$)").unwrap(),
+            Regex::new(r"(?i)(?:^|[/\\])\.nanikaai[/\\]config\.json$").unwrap(),
+            Regex::new(r"(?i)(?:^|[/\\])nanikaai[/\\]config\.json$").unwrap(),
+            Regex::new(r"(?i)(?:^|[/\\])credentials[^/\\]*\.json$").unwrap(),
+            Regex::new(r"(?i)(?:^|[/\\])client_secret[^/\\]*\.json$").unwrap(),
+            Regex::new(r"(?i)(?:^|[/\\])token[^/\\]*\.json$").unwrap(),
+            Regex::new(r"(?i)(?:^|[/\\])\.env(?:\.[^/\\]+)?$").unwrap(),
+            Regex::new(r"(?i)(?:^|[/\\])\.netrc$").unwrap(),
+            Regex::new(r"(?i)(?:^|[/\\])id_(?:rsa|ed25519|ecdsa|dsa)(?:\.[^/\\]+)?$").unwrap(),
+            Regex::new(r"(?i)\.(?:pem|key|p12|pfx|kdbx)$").unwrap(),
             Regex::new(r"(?i)^/etc/shadow$").unwrap(),
         ]
     });
@@ -249,7 +323,7 @@ fn is_non_public_v4(ip: Ipv4Addr) -> bool {
         || ip.is_unspecified()
         || ip.is_multicast()
         || o[0] == 0
-        || (o[0] == 100 && (64..=127).contains(&o[1])) // CGNAT 100.64.0.0/10
+        || (o[0] == 100 && (64..=127).contains(&o[1])) // RFC 6598 CGNAT range
         || (o[0] == 192 && o[1] == 0 && o[2] == 0)
         || (o[0] == 198 && (18..=19).contains(&o[1]))
         || o[0] >= 240
@@ -755,8 +829,96 @@ impl BuiltinToolRunner {
             "check_ollama_models" => self.check_ollama_models(),
             "set_reminder" => self.set_reminder(args),
             "list_reminders" => self.list_reminders(args),
+            "add_memo" => self.add_memo(&str_arg("text")),
+            "list_memos" => self.list_memos(args),
+            "complete_memo" => self.complete_memo(args),
+            "delete_memo" => self.delete_memo(args),
+            "list_upcoming_events" => self.list_upcoming_events(args),
             _ => json!({"ok": false, "error": format!("Unknown tool: {name}")}).to_string(),
         }
+    }
+
+    fn add_memo(&self, text: &str) -> String {
+        let store = crate::accessory_utils::MemoStore::new(&self.config_store.config_dir);
+        match store.add(text) {
+            Ok(item) => json!({"ok": true, "memo": item}).to_string(),
+            Err(e) => json!({"ok": false, "error": e}).to_string(),
+        }
+    }
+
+    fn list_memos(&self, args: &Value) -> String {
+        let include_done = args
+            .get("include_done")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let store = crate::accessory_utils::MemoStore::new(&self.config_store.config_dir);
+        let memos: Vec<_> = store
+            .list()
+            .into_iter()
+            .filter(|m| include_done || !m.done)
+            .collect();
+        json!({"ok": true, "count": memos.len(), "memos": memos}).to_string()
+    }
+
+    fn complete_memo(&self, args: &Value) -> String {
+        let Some(id) = args.get("id").and_then(|v| v.as_u64()) else {
+            return json!({"ok": false, "error": "id is required"}).to_string();
+        };
+        let store = crate::accessory_utils::MemoStore::new(&self.config_store.config_dir);
+        match store.set_done(id, true) {
+            Some(item) => json!({"ok": true, "memo": item}).to_string(),
+            None => json!({"ok": false, "error": format!("memo #{id} not found")}).to_string(),
+        }
+    }
+
+    fn delete_memo(&self, args: &Value) -> String {
+        let Some(id) = args.get("id").and_then(|v| v.as_u64()) else {
+            return json!({"ok": false, "error": "id is required"}).to_string();
+        };
+        let store = crate::accessory_utils::MemoStore::new(&self.config_store.config_dir);
+        if store.delete(id) {
+            json!({"ok": true, "deleted_id": id}).to_string()
+        } else {
+            json!({"ok": false, "error": format!("memo #{id} not found")}).to_string()
+        }
+    }
+
+    fn list_upcoming_events(&self, args: &Value) -> String {
+        let hours = args
+            .get("hours")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(48)
+            .clamp(1, 72);
+        let cfg = self.config_store.get();
+        let mut st = crate::calendar_sync::CalendarSyncState::default();
+        st.load_from_disk(&self.config_store.config_dir);
+        let now_ts = chrono::Utc::now().timestamp();
+        let evs = st.upcoming_events(now_ts, hours);
+        let items: Vec<Value> = evs
+            .into_iter()
+            .take(12)
+            .map(|e| {
+                let dep_ts = e.recommended_departure_ts(cfg.calendar_prep_mins);
+                json!({
+                    "summary": e.summary,
+                    "location": e.location,
+                    "source": e.calendar_source,
+                    "start_ts": e.start_ts,
+                    "end_ts": e.end_ts,
+                    "all_day": e.all_day,
+                    "requires_travel": e.requires_travel,
+                    "estimated_travel_mins": e.estimated_travel_mins,
+                    "recommended_departure_ts": dep_ts,
+                })
+            })
+            .collect();
+        json!({
+            "ok": true,
+            "calendar_enabled": cfg.calendar_enabled,
+            "count": items.len(),
+            "events": items,
+        })
+        .to_string()
     }
 
     fn get_system_status(&self) -> String {
@@ -796,8 +958,17 @@ impl BuiltinToolRunner {
         match Clipboard::new().and_then(|mut c| c.get_text()) {
             Ok(txt) => {
                 let len = txt.chars().count();
-                let preview: String = txt.chars().take(4000).collect();
-                json!({"ok": true, "length": len, "text": preview}).to_string()
+                match crate::accessory_utils::sanitize_clipboard_for_ai(&txt) {
+                    Ok(safe) => json!({"ok": true, "length": len, "text": safe}).to_string(),
+                    Err(code) if code == "empty" => {
+                        json!({"ok": true, "length": 0, "text": ""}).to_string()
+                    }
+                    Err(_) => json!({
+                        "ok": false,
+                        "error": "Clipboard contains a potential secret or API key and was blocked for safety."
+                    })
+                    .to_string(),
+                }
             }
             Err(e) => json!({"ok": false, "error": format!("Clipboard unavailable: {e}")}).to_string(),
         }

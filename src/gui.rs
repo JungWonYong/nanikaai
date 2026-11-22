@@ -2680,9 +2680,12 @@ struct CommunicateWindowState {
     anim_start: Instant,
     hovered_close: bool,
     hovered_send: bool,
+    hovered_attach: bool,
     last_local_cursor: Option<(f64, f64)>,
     close_rect: (f64, f64, f64, f64),
     send_rect: (f64, f64, f64, f64),
+    attach_rect: (f64, f64, f64, f64),
+    attached_image: Option<crate::agent_engine::ImageAttachment>,
     last_render_bmp: RgbaBitmap,
 }
 
@@ -2739,19 +2742,25 @@ impl CommunicateWindowState {
             105,
         );
 
-        // Generously padded header inside pill localized by UI language
+        // Generously padded header inside pill localized by UI language (shows attached image chip when present)
         let ui_str = crate::i18n::ui_strings(ui_lang);
         let hdr_font = 10.5 * scale;
+        let (hdr_text, hdr_col) = if let Some(ref img) = self.attached_image {
+            let short_name: String = img.file_name.chars().take(24).collect();
+            (format!("🖼 {short_name} ({}x{})", img.width, img.height), (110, 231, 183))
+        } else {
+            (ui_str.comm_header.to_string(), (147, 197, 253))
+        };
         text_renderer.draw_inline_text(
             &mut canvas,
-            ui_str.comm_header,
+            &hdr_text,
             (28.0 * scale).round() as i32,
             (17.5 * scale).round() as i32,
             (24.0 * scale).round() as i32,
             (315.0 * scale).round() as i32,
             hdr_font,
             hdr_font * 1.25,
-            (147, 197, 253),
+            hdr_col,
         );
         let hint_font = 9.5 * scale;
         text_renderer.draw_inline_text(
@@ -2786,10 +2795,10 @@ impl CommunicateWindowState {
         canvas.draw_aa_segment(cl_cx - d_x, cl_cy - d_x, cl_cx + d_x, cl_cy + d_x, 1.7 * scale, [241, 245, 255, 245]);
         canvas.draw_aa_segment(cl_cx - d_x, cl_cy + d_x, cl_cx + d_x, cl_cy - d_x, 1.7 * scale, [241, 245, 255, 245]);
 
-        // Inner dark sapphire editable input well + active glowing AI orb + Send (↑) button
+        // Inner dark sapphire editable input well + active glowing AI orb + Attach Image (🖼) + Send (↑)
         let well_x0 = 22.0 * scale;
         let well_y0 = 38.0 * scale;
-        let well_x1 = (logical_w as f32 - 60.0) * scale;
+        let well_x1 = (logical_w as f32 - 86.0) * scale;
         let well_y1 = 72.0 * scale;
         canvas.draw_aa_rounded_box(
             (well_x0, well_y0, well_x1, well_y1),
@@ -2812,6 +2821,43 @@ impl CommunicateWindowState {
         canvas.draw_aa_circle(orb_cx, orb_cy, orb_halo, [56, 189, 248, 85], [37, 99, 235, 0]);
         canvas.draw_aa_circle(orb_cx, orb_cy, 4.8 * scale, [186, 230, 253, 255], [37, 99, 235, 255]);
 
+        // Attach Image (🖼) button right next to Send button
+        let at_cx = (logical_w as f32 - 64.0) * scale;
+        let at_cy = 55.0 * scale;
+        let at_r = 12.2 * scale;
+        self.attach_rect = (
+            (at_cx / scale - 13.5) as f64,
+            (at_cy / scale - 13.5) as f64,
+            (at_cx / scale + 13.5) as f64,
+            (at_cy / scale + 13.5) as f64,
+        );
+        let (at_in, at_out) = if self.attached_image.is_some() {
+            if self.hovered_attach {
+                ([52, 211, 153, 255], [16, 185, 129, 255])
+            } else {
+                ([16, 185, 129, 235], [5, 150, 105, 235])
+            }
+        } else if self.hovered_attach {
+            ([59, 130, 246, 235], [37, 99, 235, 235])
+        } else {
+            ([34, 54, 102, 195], [24, 38, 76, 195])
+        };
+        canvas.draw_aa_circle(at_cx, at_cy, at_r, at_in, at_out);
+        let icon_lbl = if self.attached_image.is_some() { "✓" } else { "🖼" };
+        let icon_f = 11.0 * scale;
+        let icon_w = text_renderer.measure_inline_width(icon_lbl, icon_f);
+        text_renderer.draw_inline_text(
+            &mut canvas,
+            icon_lbl,
+            (at_cx - icon_w * 0.5).round() as i32,
+            (at_cy - icon_f * 0.62).round() as i32,
+            (at_cx - at_r).round() as i32,
+            (at_cx + at_r).round() as i32,
+            icon_f,
+            icon_f * 1.2,
+            (248, 250, 252),
+        );
+
         // Right Send (↑) button
         let sd_cx = (logical_w as f32 - 33.0) * scale;
         let sd_cy = 55.0 * scale;
@@ -2822,7 +2868,8 @@ impl CommunicateWindowState {
             (sd_cx / scale + 15.0) as f64,
             (sd_cy / scale + 15.0) as f64,
         );
-        let has_input = !self.text.trim().is_empty() || !self.ime_preedit.is_empty();
+        let has_input =
+            !self.text.trim().is_empty() || !self.ime_preedit.is_empty() || self.attached_image.is_some();
         let (sd_in, sd_out) = if has_input {
             if self.hovered_send {
                 ([96, 165, 250, 255], [37, 99, 235, 255])
@@ -2962,6 +3009,10 @@ enum MenuSection {
 enum MenuCommand {
     OpenCommunicate,
     OpenSettings,
+    OpenSettingsTab(usize),
+    AskClipboard,
+    ShowQuickMemos,
+    ShowCalendarAgenda,
     ResetDefaultSkin,
     ToggleMenuSection(MenuSection),
     OpenConfigFolder,
@@ -2983,10 +3034,14 @@ enum MenuCommand {
     ToggleHideCharacters,
     TogglePomodoro,
     StopPomodoro,
+    SkipPomodoro,
     ShowBacklog,
     CopyLastReply,
     MoveNextMonitor,
     ToggleVoiceTts,
+    TestVoice(u8),
+    CycleSakuraVoice,
+    CycleKeroVoice,
     SelectTtsEngine(String),
     SelectKeroVoiceArchetype(Option<String>),
     SelectVoiceSpeaker { scope: u8, style_id: Option<i64> },
@@ -3022,8 +3077,8 @@ impl MenuWindowState {
     fn render_bitmap(&self, text_renderer: &mut TextRenderer, scale: f32) -> ((u32, u32), RgbaBitmap) {
         let total = self.rows.len();
         let vis_count = total.min(self.max_visible_rows).max(1);
-        let logical_w = 304u32;
-        let logical_h = ((vis_count as f64) * self.row_h + 14.0).ceil() as u32;
+        let logical_w = 320u32;
+        let logical_h = ((vis_count as f64) * self.row_h + 16.0).ceil() as u32;
         let pw = ((logical_w as f32) * scale).round().max(1.0) as u32;
         let ph = ((logical_h as f32) * scale).round().max(1.0) as u32;
 
@@ -3032,8 +3087,8 @@ impl MenuWindowState {
         canvas.draw_aa_rounded_box(
             (pad, pad, pw as f32 - pad, ph as f32 - pad),
             12.0 * scale,
-            [24, 30, 44, 246],
-            [16, 20, 32, 248],
+            [20, 27, 44, 248],
+            [13, 18, 32, 250],
             1.4 * scale,
             [96, 146, 235, 195],
             [59, 130, 246, 195],
@@ -3045,14 +3100,14 @@ impl MenuWindowState {
 
         let has_scroll = total > vis_count;
         let right_reserve = if has_scroll { 16.0 * scale } else { 8.0 * scale };
-        let font_px = 12.2 * scale;
+        let font_px = 12.4 * scale;
         let row_px = (self.row_h as f32) * scale;
         let max_scroll = total.saturating_sub(vis_count);
         let start = self.scroll_row.min(max_scroll);
         let end = (start + vis_count).min(total);
 
         for (v_idx, r_idx) in (start..end).enumerate() {
-            let y = (7.0 * scale) + (v_idx as f32) * row_px;
+            let y = (8.0 * scale) + (v_idx as f32) * row_px;
             let row = &self.rows[r_idx];
             if matches!(row.cmd, MenuCommand::Separator) {
                 if row.label.is_empty() {
@@ -3062,50 +3117,72 @@ impl MenuWindowState {
                         (pw as f32 - 12.0 * scale - right_reserve).max(20.0) as i32,
                         (1.0 * scale).round().max(1.0) as i32,
                         100,
+                        125,
+                        175,
                         120,
-                        160,
-                        140,
                     );
                 } else {
                     text_renderer.draw_inline_text(
                         &mut canvas,
                         &row.label,
                         (12.0 * scale) as i32,
-                        (y + 4.5 * scale) as i32,
+                        (y + 5.0 * scale) as i32,
                         (10.0 * scale) as i32,
                         (pw as f32 - right_reserve) as i32,
-                        font_px * 0.90,
+                        font_px * 0.88,
                         font_px * 1.15,
-                        (125, 178, 255),
+                        (125, 185, 255),
                     );
                 }
                 continue;
             }
             if self.hovered_idx == Some(r_idx) {
                 canvas.draw_aa_rounded_box(
-                    (7.0 * scale, y + 1.0 * scale, pw as f32 - right_reserve - 1.0 * scale, y + row_px - 1.0 * scale),
-                    6.0 * scale,
-                    [62, 110, 218, 225],
-                    [37, 86, 200, 225],
+                    (7.0 * scale, y + 1.5 * scale, pw as f32 - right_reserve - 1.0 * scale, y + row_px - 1.5 * scale),
+                    6.5 * scale,
+                    [62, 110, 218, 232],
+                    [37, 86, 200, 232],
                     0.8 * scale,
-                    [147, 197, 253, 180],
-                    [96, 165, 250, 180],
+                    [147, 197, 253, 190],
+                    [96, 165, 250, 190],
                     0.0,
                     0.0,
                     [0, 0, 0, 0],
                     45,
                 );
+            } else if matches!(row.cmd, MenuCommand::ToggleMenuSection(_)) {
+                let is_open = row.label.starts_with('▾');
+                let (fa, fb, brd) = if is_open {
+                    ([36, 62, 114, 210], [28, 48, 92, 210], [116, 174, 248, 150])
+                } else {
+                    ([28, 40, 68, 180], [22, 32, 56, 180], [78, 116, 186, 100])
+                };
+                canvas.draw_aa_rounded_box(
+                    (7.0 * scale, y + 1.5 * scale, pw as f32 - right_reserve - 1.0 * scale, y + row_px - 1.5 * scale),
+                    6.5 * scale,
+                    fa,
+                    fb,
+                    0.8 * scale,
+                    brd,
+                    brd,
+                    0.0,
+                    0.0,
+                    [0, 0, 0, 0],
+                    0,
+                );
             }
             let rgb = match row.cmd {
-                MenuCommand::ResetDefaultSkin | MenuCommand::OpenSettings => (147, 215, 255),
-                MenuCommand::ToggleMenuSection(_) => (186, 224, 255),
+                MenuCommand::ResetDefaultSkin
+                | MenuCommand::OpenSettings
+                | MenuCommand::OpenSettingsTab(_) => (147, 215, 255),
+                MenuCommand::ToggleMenuSection(_) => (206, 232, 255),
                 _ => (240, 244, 252),
             };
             text_renderer.draw_inline_text(
                 &mut canvas,
                 &row.label,
                 (13.0 * scale) as i32,
-                (y + 4.0 * scale) as i32,
+                (y + 4.5 * scale) as i32,
                 (11.0 * scale) as i32,
                 (pw as f32 - right_reserve - 4.0 * scale) as i32,
                 font_px,
@@ -3345,8 +3422,15 @@ impl PlaybackQueue {
 #[derive(Debug)]
 enum UserEvent {
     PlayActions(Vec<DialogueAction>),
+    AutoTalkActions(Vec<DialogueAction>),
     PlayActionsNoBacklog(Vec<DialogueAction>),
     StatusUpdate(String, bool),
+    AivmActionDone {
+        status: String,
+    },
+    CalendarSyncDone {
+        status: String,
+    },
     ServerGetHealth(mpsc::Sender<Value>),
     ServerGetSkins(mpsc::Sender<Value>),
     ServerGetVoices(mpsc::Sender<Value>),
@@ -3525,18 +3609,33 @@ impl ServerBackend for GuiServerBackend {
                 return Err(format!("Invalid kero_voice_archetype: {arch}"));
             }
         }
-        if let Some(ref uuid) = req.install_aivm_uuid {
+        let install_uuid = req
+            .install_aivm_uuid
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        if let Some(ref uuid) = install_uuid {
             if !crate::companion_extras::is_valid_aivm_uuid(uuid) {
                 return Err(format!("Invalid AIVM UUID format: {uuid}"));
             }
         }
-
-        let install_uuid = req.install_aivm_uuid.clone();
         let toggled_off = req.voice_tts == Some(false);
         let switched_to_os = req
             .tts_engine
             .as_deref()
             .is_some_and(|e| crate::config_store::normalize_tts_engine(e) == "os");
+        let uninstall_uuid = req
+            .uninstall_aivm_uuid
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        if let Some(ref uuid) = uninstall_uuid {
+            if !crate::companion_extras::is_valid_aivm_uuid(uuid) {
+                return Err(format!("Invalid AIVM UUID format: {uuid}"));
+            }
+        }
         let need_engine_refresh =
             req.tts_engine.is_some() || req.voice_tts == Some(true) || install_uuid.is_some();
 
@@ -3590,6 +3689,36 @@ impl ServerBackend for GuiServerBackend {
             }
         }
 
+        if let Some(ref uuid) = uninstall_uuid {
+            let mut aivis_base = crate::companion_extras::cached_tts_base_url()
+                .filter(|u| u.contains(":10101"));
+            if aivis_base.is_none() {
+                let st = crate::companion_extras::ensure_tts_engine_ready_with_mode_blocking(
+                    "http://127.0.0.1:10101",
+                    "aivisspeech",
+                    false,
+                );
+                aivis_base = st.base_url.filter(|u| u.contains(":10101"));
+            }
+            let base = aivis_base.ok_or_else(|| {
+                "AivisSpeech (port 10101) が起動していないためモデルを削除できません。".to_string()
+            })?;
+            let (_, updated_voices) =
+                crate::companion_extras::uninstall_aivm_model_blocking(&base, uuid.trim())?;
+            let active_shell = self.config_store.get().active_shell_id;
+            let (sak_sp, ker_sp, _) = self.config_store.get_shell_voice_profile(&active_shell);
+            if let Some(id) = sak_sp {
+                if !updated_voices.iter().any(|v| v.style_id == id) {
+                    self.config_store.set_shell_voice_speaker(&active_shell, 0, None);
+                }
+            }
+            if let Some(id) = ker_sp {
+                if !updated_voices.iter().any(|v| v.style_id == id) {
+                    self.config_store.set_shell_voice_speaker(&active_shell, 1, None);
+                }
+            }
+        }
+
         let _ = self.proxy.send_event(UserEvent::RefreshMenus);
         Ok(self.get_voices())
     }
@@ -3622,6 +3751,107 @@ impl ServerBackend for GuiServerBackend {
             .map_err(|e| format!("GUI 이벤트 전송 실패: {e}"))?;
         rx.recv_timeout(Duration::from_secs(3))
             .map_err(|e| format!("설정 변경 타임아웃: {e}"))?
+    }
+
+    fn get_memos(&self) -> Value {
+        let store = crate::accessory_utils::MemoStore::new(&self.config_store.config_dir);
+        let memos = store.list();
+        json!({ "count": memos.len(), "memos": memos })
+    }
+
+    fn on_memo_action(&self, req: crate::sstp_server::MemoActionReq) -> Result<Value, String> {
+        let store = crate::accessory_utils::MemoStore::new(&self.config_store.config_dir);
+        let act = req
+            .action
+            .as_deref()
+            .unwrap_or("add")
+            .trim()
+            .to_ascii_lowercase();
+        match act.as_str() {
+            "add" => {
+                let txt = req.text.as_deref().unwrap_or("");
+                let item = store.add(txt)?;
+                let memos = store.list();
+                Ok(json!({ "memo": item, "count": memos.len(), "memos": memos }))
+            }
+            "toggle" => {
+                let id = req.id.ok_or_else(|| "id required".to_string())?;
+                let item = store
+                    .toggle_done(id)
+                    .ok_or_else(|| format!("memo #{id} not found"))?;
+                let memos = store.list();
+                Ok(json!({ "memo": item, "count": memos.len(), "memos": memos }))
+            }
+            "delete" => {
+                let id = req.id.ok_or_else(|| "id required".to_string())?;
+                if !store.delete(id) {
+                    return Err(format!("memo #{id} not found"));
+                }
+                let memos = store.list();
+                Ok(json!({ "deleted_id": id, "count": memos.len(), "memos": memos }))
+            }
+            "clear_done" => {
+                let removed = store.clear_done();
+                let memos = store.list();
+                Ok(json!({ "removed": removed, "count": memos.len(), "memos": memos }))
+            }
+            other => Err(format!("Invalid memo action: {other}")),
+        }
+    }
+
+    fn get_calendar(&self) -> Value {
+        calendar_snapshot_from_store(&self.config_store)
+    }
+
+    fn on_calendar_action(&self, req: crate::sstp_server::CalendarConfigReq) -> Result<Value, String> {
+        let mut cfg = self.config_store.get();
+        let mut next_urls = cfg.calendar_ics_urls.clone();
+        if req.clear_ics_urls {
+            next_urls.clear();
+        }
+        if let Some(ref raw_url) = req.add_ics_url {
+            let valid = crate::calendar_sync::validate_calendar_ics_url(raw_url)?;
+            if !next_urls.iter().any(|u| u == &valid) {
+                next_urls.push(valid);
+            }
+        }
+        cfg = self.config_store.update(ConfigPatch {
+            calendar_enabled: req.enabled.or_else(|| if req.add_ics_url.is_some() { Some(true) } else { None }),
+            calendar_use_os_native: req.use_os_native,
+            calendar_ics_urls: if req.clear_ics_urls || req.add_ics_url.is_some() {
+                Some(next_urls)
+            } else {
+                None
+            },
+            calendar_home_location: req.home_location,
+            calendar_default_travel_mins: req.default_travel_mins,
+            calendar_prep_mins: req.prep_mins,
+            calendar_remind_mins: req.remind_mins,
+            calendar_briefing_interval_mins: req.briefing_interval_mins,
+            ..Default::default()
+        });
+        let do_sync = req
+            .action
+            .as_deref()
+            .is_some_and(|a| a.eq_ignore_ascii_case("sync"))
+            || req.add_ics_url.is_some();
+        if do_sync {
+            let mut st = crate::calendar_sync::CalendarSyncState::default();
+            st.load_from_disk(&self.config_store.config_dir);
+            let evs = crate::calendar_sync::sync_all_calendars_blocking(
+                &cfg.calendar_ics_urls,
+                cfg.calendar_use_os_native,
+                &self.config_store.config_dir,
+                &cfg.calendar_home_location,
+                cfg.calendar_default_travel_mins,
+                &mut st.geocode_cache,
+            )?;
+            st.events = evs;
+            st.last_sync_ts = chrono::Utc::now().timestamp();
+            st.save_to_disk(&self.config_store.config_dir);
+        }
+        let _ = self.proxy.send_event(UserEvent::RefreshMenus);
+        Ok(self.get_calendar())
     }
 }
 
@@ -3768,6 +3998,12 @@ struct AppRuntime {
     battery_status: crate::accessory_utils::BatteryStatus,
     low_battery_notified: bool,
     last_pomo_ui_refresh: Instant,
+    pending_auto_talk_actions: Option<Vec<DialogueAction>>,
+    aivm_busy_label: Option<String>,
+    calendar_state: Arc<Mutex<crate::calendar_sync::CalendarSyncState>>,
+    calendar_last_sync: Instant,
+    calendar_last_alert_check: Instant,
+    calendar_last_briefing: Instant,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -4126,10 +4362,24 @@ impl AppRuntime {
                 })
             })
             .collect();
+        let installed_models: Vec<Value> =
+            crate::companion_extras::cached_installed_aivm_models()
+                .into_iter()
+                .map(|m| {
+                    json!({
+                        "uuid": m.uuid,
+                        "name": m.name,
+                        "is_default_model": m.is_default_model,
+                        "speaker_names": m.speaker_names,
+                    })
+                })
+                .collect();
         json!({
             "active_shell": cfg.active_shell_id,
             "voice_tts": cfg.voice_tts,
             "tts_engine": cfg.tts_engine,
+            "voice_speed": cfg.voice_speed,
+            "voice_intonation": cfg.voice_intonation,
             "engine_label": eng_lbl,
             "engine_base_url": base_url,
             "sakura_speaker_override": sak_sp,
@@ -4143,6 +4393,7 @@ impl AppRuntime {
             "resolved_kero_voice": resolved.kero_label,
             "used_female_fallback": resolved.used_female_fallback,
             "installed_aivm_uuids": installed_uuids,
+            "installed_aivm_models": installed_models,
             "curated_aivm_catalog": catalog,
             "voices": voices_json,
         })
@@ -4151,7 +4402,7 @@ impl AppRuntime {
     pub(crate) fn settings_snapshot_from_store(store: &ConfigStore) -> Value {
         let cfg = store.get();
         let eff_lang = crate::i18n::resolve_ui_lang(&cfg.ui_language);
-        json!({
+        let mut out = json!({
             "config_dir": store.config_dir.display().to_string(),
             "config_file": store.file_path.display().to_string(),
             "os_platform": std::env::consts::OS,
@@ -4186,14 +4437,19 @@ impl AppRuntime {
             "auto_talk_interval_sec": cfg.auto_talk_interval_sec,
             "interest_news_weight": cfg.interest_news_weight,
             "interests": store.active_interests(),
-            "macos_accept_first_mouse": cfg.macos_accept_first_mouse,
-            "macos_window_shadow": cfg.macos_window_shadow,
-            "macos_show_in_dock": cfg.macos_show_in_dock,
-            "windows_skip_taskbar": cfg.windows_skip_taskbar,
-            "windows_undecorated_shadow": cfg.windows_undecorated_shadow,
-            "linux_prefer_x11": cfg.linux_prefer_x11,
-            "linux_respect_workarea": cfg.linux_respect_workarea,
-        })
+        });
+        if let Some(map) = out.as_object_mut() {
+            map.insert("voice_speed".to_string(), json!(cfg.voice_speed));
+            map.insert("voice_intonation".to_string(), json!(cfg.voice_intonation));
+            map.insert("macos_accept_first_mouse".to_string(), json!(cfg.macos_accept_first_mouse));
+            map.insert("macos_window_shadow".to_string(), json!(cfg.macos_window_shadow));
+            map.insert("macos_show_in_dock".to_string(), json!(cfg.macos_show_in_dock));
+            map.insert("windows_skip_taskbar".to_string(), json!(cfg.windows_skip_taskbar));
+            map.insert("windows_undecorated_shadow".to_string(), json!(cfg.windows_undecorated_shadow));
+            map.insert("linux_prefer_x11".to_string(), json!(cfg.linux_prefer_x11));
+            map.insert("linux_respect_workarea".to_string(), json!(cfg.linux_respect_workarea));
+        }
+        out
     }
 
     fn build_settings_snapshot(&self) -> Value {
@@ -4282,6 +4538,59 @@ impl AppRuntime {
             interests_list.join(", ")
         };
 
+        let (cal_count, cal_connected) = {
+            let now_ts = chrono::Utc::now().timestamp();
+            let ev_cnt = self
+                .calendar_state
+                .lock()
+                .map(|st| st.upcoming_events(now_ts, 48).len())
+                .unwrap_or(0);
+            let conn = cfg.calendar_use_os_native || !cfg.calendar_ics_urls.is_empty();
+            (ev_cnt, conn)
+        };
+        let calendar_status_summary = if !cal_connected {
+            match ui_lang {
+                crate::i18n::UiLang::Ko => "미연결".to_string(),
+                crate::i18n::UiLang::En => "Not connected".to_string(),
+                crate::i18n::UiLang::Ja => "未連携".to_string(),
+            }
+        } else {
+            let feed_n = cfg.calendar_ics_urls.len();
+            match ui_lang {
+                crate::i18n::UiLang::Ko => format!("예정 {cal_count}건 · 피드 {feed_n}"),
+                crate::i18n::UiLang::En => format!("{cal_count} upcoming · {feed_n} feeds"),
+                crate::i18n::UiLang::Ja => format!("予定 {cal_count}件・フィード {feed_n}"),
+            }
+        };
+        let calendar_briefing_label = if cfg.calendar_briefing_interval_mins == 0 {
+            match ui_lang {
+                crate::i18n::UiLang::Ko => "끄기".to_string(),
+                crate::i18n::UiLang::En => "Off".to_string(),
+                crate::i18n::UiLang::Ja => "OFF".to_string(),
+            }
+        } else {
+            let m = cfg.calendar_briefing_interval_mins;
+            if m % 60 == 0 {
+                let h = m / 60;
+                match ui_lang {
+                    crate::i18n::UiLang::Ko => format!("{h}시간마다"),
+                    crate::i18n::UiLang::En => format!("Every {h}h"),
+                    crate::i18n::UiLang::Ja => format!("{h}時間ごと"),
+                }
+            } else {
+                match ui_lang {
+                    crate::i18n::UiLang::Ko => format!("{m}분마다"),
+                    crate::i18n::UiLang::En => format!("Every {m}m"),
+                    crate::i18n::UiLang::Ja => format!("{m}分ごと"),
+                }
+            }
+        };
+        let calendar_travel_label = match ui_lang {
+            crate::i18n::UiLang::Ko => format!("{}분 (+준비 {}분)", cfg.calendar_default_travel_mins, cfg.calendar_prep_mins),
+            crate::i18n::UiLang::En => format!("{}m (+{}m prep)", cfg.calendar_default_travel_mins, cfg.calendar_prep_mins),
+            crate::i18n::UiLang::Ja => format!("{}分（+準備{}分）", cfg.calendar_default_travel_mins, cfg.calendar_prep_mins),
+        };
+
         SettingsPanelData {
             cfg,
             config_path_display,
@@ -4301,6 +4610,11 @@ impl AppRuntime {
             pomodoro_preset_label,
             pomodoro_button_label,
             power_save_label,
+            installed_aivm_models: crate::companion_extras::cached_installed_aivm_models(),
+            aivm_busy_label: self.aivm_busy_label.clone(),
+            calendar_status_summary,
+            calendar_briefing_label,
+            calendar_travel_label,
         }
     }
 
@@ -4799,6 +5113,24 @@ impl AppRuntime {
         self.pomodoro.set_preset(next);
     }
 
+    fn sync_pomodoro_pose(&mut self) {
+        let active = self.pomodoro.is_active();
+        let (sak_target, ker_target) = if active { (9, 13) } else { (0, 10) };
+        if let Some(ref gpu) = self.gpu {
+            let mut m = self.manifest.lock().expect("manifest mutex poisoned");
+            if let Some(ref mut s) = self.sakura {
+                if m.surfaces.contains_key(&sak_target) && s.surface_id != sak_target {
+                    s.set_surface(&mut m, gpu, sak_target, false);
+                }
+            }
+            if let Some(ref mut k) = self.kero {
+                if m.surfaces.contains_key(&ker_target) && k.surface_id != ker_target {
+                    k.set_surface(&mut m, gpu, ker_target, false);
+                }
+            }
+        }
+    }
+
     fn apply_pomodoro_action(&mut self, action: &str) {
         match action.trim().to_ascii_lowercase().as_str() {
             "start" => self.pomodoro.start_focus(),
@@ -4821,6 +5153,7 @@ impl AppRuntime {
             }
             _ => self.pomodoro.toggle_start_pause(),
         }
+        self.sync_pomodoro_pose();
         let lbl = self.pomodoro.format_button_label(self.effective_ui_lang());
         self.apply_status_feedback(lbl);
     }
@@ -5077,12 +5410,72 @@ impl AppRuntime {
             SettingsAction::StopPomodoro => {
                 self.apply_pomodoro_action("stop");
             }
+            SettingsAction::SkipPomodoro => {
+                self.apply_pomodoro_action("skip");
+            }
             SettingsAction::ShowBacklog => {
                 self.show_backlog_in_balloon();
                 return;
             }
             SettingsAction::CopyLastReply => {
                 self.copy_last_reply_to_clipboard();
+                return;
+            }
+            SettingsAction::ToggleCalendarEnabled => {
+                let next = !cur.calendar_enabled;
+                self.config_store.update(ConfigPatch {
+                    calendar_enabled: Some(next),
+                    ..Default::default()
+                });
+                if next {
+                    self.spawn_calendar_sync(true);
+                }
+            }
+            SettingsAction::ToggleCalendarOsNative => {
+                let next = !cur.calendar_use_os_native;
+                self.config_store.update(ConfigPatch {
+                    calendar_use_os_native: Some(next),
+                    calendar_enabled: if next { Some(true) } else { None },
+                    ..Default::default()
+                });
+                if next {
+                    self.spawn_calendar_sync(true);
+                }
+            }
+            SettingsAction::CycleCalendarBriefing(d) => {
+                const OPTIONS: [u32; 5] = [0, 60, 120, 180, 240];
+                let idx = OPTIONS
+                    .iter()
+                    .position(|&v| v == cur.calendar_briefing_interval_mins)
+                    .unwrap_or(2) as isize;
+                let next = OPTIONS[(idx + d as isize).rem_euclid(OPTIONS.len() as isize) as usize];
+                self.config_store.update(ConfigPatch {
+                    calendar_briefing_interval_mins: Some(next),
+                    ..Default::default()
+                });
+            }
+            SettingsAction::CycleCalendarTravelMins(d) => {
+                const OPTIONS: [u32; 5] = [15, 30, 45, 60, 90];
+                let idx = OPTIONS
+                    .iter()
+                    .position(|&v| v == cur.calendar_default_travel_mins)
+                    .unwrap_or(1) as isize;
+                let next = OPTIONS[(idx + d as isize).rem_euclid(OPTIONS.len() as isize) as usize];
+                self.config_store.update(ConfigPatch {
+                    calendar_default_travel_mins: Some(next),
+                    ..Default::default()
+                });
+            }
+            SettingsAction::PasteCalendarIcsUrl => {
+                self.paste_calendar_ics_from_clipboard();
+                return;
+            }
+            SettingsAction::SyncCalendarNow => {
+                self.spawn_calendar_sync(true);
+                return;
+            }
+            SettingsAction::ShowCalendarAgenda => {
+                self.show_calendar_agenda_in_balloon();
                 return;
             }
             SettingsAction::ToggleAutoStart => {
@@ -5162,6 +5555,30 @@ impl AppRuntime {
             SettingsAction::CycleKeroArchetype(d) => {
                 self.cycle_kero_archetype(d);
                 self.redraw_settings_panel();
+                return;
+            }
+            SettingsAction::SetVoiceSpeed(v) => {
+                self.config_store.update(ConfigPatch {
+                    voice_speed: Some(v.clamp(0.75, 1.35)),
+                    ..Default::default()
+                });
+            }
+            SettingsAction::SetVoiceIntonation(v) => {
+                self.config_store.update(ConfigPatch {
+                    voice_intonation: Some(v.clamp(0.70, 1.50)),
+                    ..Default::default()
+                });
+            }
+            SettingsAction::PreviewVoice(scope) => {
+                self.preview_voice(scope);
+                return;
+            }
+            SettingsAction::InstallAivmModel(uuid, name) => {
+                self.spawn_install_aivm_model(uuid, name);
+                return;
+            }
+            SettingsAction::UninstallAivmModel(uuid, name) => {
+                self.spawn_uninstall_aivm_model(uuid, name);
                 return;
             }
             SettingsAction::CycleProvider(d) => self.cycle_provider(d),
@@ -5402,6 +5819,18 @@ impl AppRuntime {
                 cmd: MenuCommand::OpenCommunicate,
             },
             MenuRow {
+                label: ui_s.menu_ask_clipboard.to_string(),
+                cmd: MenuCommand::AskClipboard,
+            },
+            MenuRow {
+                label: ui_s.menu_quick_memos.to_string(),
+                cmd: MenuCommand::ShowQuickMemos,
+            },
+            MenuRow {
+                label: ui_s.menu_calendar_agenda.to_string(),
+                cmd: MenuCommand::ShowCalendarAgenda,
+            },
+            MenuRow {
                 label: ui_s.menu_settings.to_string(),
                 cmd: MenuCommand::OpenSettings,
             },
@@ -5493,18 +5922,8 @@ impl AppRuntime {
             cmd: MenuCommand::ToggleMenuSection(MenuSection::Voice),
         });
         if voice_open {
-            rows.push(MenuRow {
-                label: format!(
-                    "  {} {}",
-                    if cfg.voice_tts { "✓" } else { " " },
-                    ui_s.menu_voice_tts
-                ),
-                cmd: MenuCommand::ToggleVoiceTts,
-            });
-            let (eng_lbl, all_voices) = crate::companion_extras::cached_tts_voices();
-            let base_url = crate::companion_extras::cached_tts_base_url();
-            let installed_uuids = crate::companion_extras::cached_installed_aivm_uuids();
-            let (sak_sp, ker_sp, arch_override) = self
+            let (_eng_lbl, all_voices) = crate::companion_extras::cached_tts_voices();
+            let (sak_sp, ker_sp, _) = self
                 .config_store
                 .get_shell_voice_profile(&cfg.active_shell_id);
             let (arch, _) = self.active_kero_voice_archetype();
@@ -5515,117 +5934,33 @@ impl AppRuntime {
                 ker_sp,
             );
             rows.push(MenuRow {
-                label: format!("{}{eng_lbl}]", ui_s.menu_voices_hdr_prefix),
-                cmd: MenuCommand::Separator,
-            });
-            if !all_voices.is_empty() {
-                let sample = Self::representative_voice_options(&all_voices, 8);
-                rows.push(MenuRow {
-                    label: format!(
-                        "  {} {} ({})",
-                        if sak_sp.is_none() { "✓" } else { " " },
-                        ui_s.menu_voice_sakura_auto_prefix,
-                        resolved.sakura_label
-                    ),
-                    cmd: MenuCommand::SelectVoiceSpeaker {
-                        scope: 0,
-                        style_id: None,
-                    },
-                });
-                for v in &sample {
-                    let mark = if sak_sp == Some(v.style_id) { "✓" } else { " " };
-                    rows.push(MenuRow {
-                        label: format!("  {mark} (\\0) {}", v.label),
-                        cmd: MenuCommand::SelectVoiceSpeaker {
-                            scope: 0,
-                            style_id: Some(v.style_id),
-                        },
-                    });
-                }
-                rows.push(MenuRow {
-                    label: format!(
-                        "  {} {} ({})",
-                        if ker_sp.is_none() { "✓" } else { " " },
-                        ui_s.menu_voice_kero_auto_prefix,
-                        resolved.kero_label
-                    ),
-                    cmd: MenuCommand::SelectVoiceSpeaker {
-                        scope: 1,
-                        style_id: None,
-                    },
-                });
-                for v in &sample {
-                    let mark = if ker_sp == Some(v.style_id) { "✓" } else { " " };
-                    rows.push(MenuRow {
-                        label: format!("  {mark} (\\1) {}", v.label),
-                        cmd: MenuCommand::SelectVoiceSpeaker {
-                            scope: 1,
-                            style_id: Some(v.style_id),
-                        },
-                    });
-                }
-            } else {
-                rows.push(MenuRow {
-                    label: ui_s.menu_voice_discovering.to_string(),
-                    cmd: MenuCommand::SelectTtsEngine("auto".to_string()),
-                });
-            }
-            rows.push(MenuRow {
-                label: ui_s.menu_voice_arch_hdr.to_string(),
-                cmd: MenuCommand::Separator,
-            });
-            rows.push(MenuRow {
                 label: format!(
-                    "  {} {} ({})",
-                    if arch_override.is_none() { "✓" } else { " " },
-                    ui_s.voice_auto_prefix,
-                    crate::i18n::kero_archetype_label(ui_lang, arch.short_code())
+                    "  {} {}",
+                    if cfg.voice_tts { "✓" } else { " " },
+                    ui_s.menu_voice_tts
                 ),
-                cmd: MenuCommand::SelectKeroVoiceArchetype(None),
+                cmd: MenuCommand::ToggleVoiceTts,
             });
-            for (code, _) in KERO_ARCHETYPE_CHOICES {
-                let mark = if arch_override.as_deref() == Some(*code) { "✓" } else { " " };
-                let albl = crate::i18n::kero_archetype_label(ui_lang, code);
-                rows.push(MenuRow {
-                    label: format!("  {mark} {albl}"),
-                    cmd: MenuCommand::SelectKeroVoiceArchetype(Some((*code).to_string())),
-                });
-            }
             rows.push(MenuRow {
-                label: ui_s.menu_voice_engine_hdr.to_string(),
-                cmd: MenuCommand::Separator,
+                label: format!("  {}", ui_s.menu_test_sakura_voice),
+                cmd: MenuCommand::TestVoice(0),
             });
-            for (eid, _) in TTS_ENGINE_CHOICES {
-                let mark = if cfg.tts_engine == *eid { "✓" } else { " " };
-                let elbl = crate::i18n::tts_engine_label(ui_lang, eid);
-                rows.push(MenuRow {
-                    label: format!("  {mark} {elbl}"),
-                    cmd: MenuCommand::SelectTtsEngine((*eid).to_string()),
-                });
-            }
-            let show_aivis_catalog = cfg.tts_engine == "auto"
-                || cfg.tts_engine == "aivisspeech"
-                || base_url.as_deref().is_some_and(|u| u.contains(":10101"));
-            if show_aivis_catalog {
-                rows.push(MenuRow {
-                    label: ui_s.menu_aivis_hdr.to_string(),
-                    cmd: MenuCommand::Separator,
-                });
-                for m in crate::companion_extras::CURATED_AIVISHUB_MODELS {
-                    let installed = installed_uuids
-                        .iter()
-                        .any(|u| u.eq_ignore_ascii_case(m.uuid));
-                    let mark = if installed { "✓" } else { " " };
-                    let suffix = if installed { ui_s.suffix_installed } else { "" };
-                    rows.push(MenuRow {
-                        label: format!("  {mark} {}{suffix}", m.menu_label),
-                        cmd: MenuCommand::InstallAivmModel {
-                            uuid: m.uuid.to_string(),
-                            name: m.name.to_string(),
-                        },
-                    });
-                }
-            }
+            rows.push(MenuRow {
+                label: format!("  {}", ui_s.menu_test_kero_voice),
+                cmd: MenuCommand::TestVoice(1),
+            });
+            rows.push(MenuRow {
+                label: format!("  \\0: {} ↻", resolved.sakura_label),
+                cmd: MenuCommand::CycleSakuraVoice,
+            });
+            rows.push(MenuRow {
+                label: format!("  \\1: {} ↻", resolved.kero_label),
+                cmd: MenuCommand::CycleKeroVoice,
+            });
+            rows.push(MenuRow {
+                label: format!("  {}", ui_s.menu_manage_voices),
+                cmd: MenuCommand::OpenSettingsTab(2),
+            });
         }
 
         // 3) AI Providers collapsible section
@@ -5682,6 +6017,10 @@ impl AppRuntime {
                 cmd: MenuCommand::TogglePomodoro,
             });
             if self.pomodoro.is_active() {
+                rows.push(MenuRow {
+                    label: format!("  {}", ui_s.menu_pomo_skip),
+                    cmd: MenuCommand::SkipPomodoro,
+                });
                 rows.push(MenuRow {
                     label: format!("  {}", ui_s.menu_pomo_stop),
                     cmd: MenuCommand::StopPomodoro,
@@ -6171,6 +6510,316 @@ impl AppRuntime {
         (menu, map)
     }
 
+    fn preview_voice(&mut self, scope: u8) {
+        if self.smoke_mode {
+            return;
+        }
+        let cfg = self.config_store.get();
+        let ui_lang = self.effective_ui_lang();
+        let (sak_sp, ker_sp, _) = self
+            .config_store
+            .get_shell_voice_profile(&cfg.active_shell_id);
+        let (arch, _) = self.active_kero_voice_archetype();
+        let sample_text = match (scope, ui_lang) {
+            (1, crate::i18n::UiLang::Ko) => "야, 내 목소리 잘 들리나? 포모도로랑 잡담 맡겨만 둬라!",
+            (1, crate::i18n::UiLang::En) => "Hey, how does my voice sound? Ready whenever you are!",
+            (1, crate::i18n::UiLang::Ja) => "おう、わしの声はこんな感じやで！ちょうどええやろ？",
+            (_, crate::i18n::UiLang::Ko) => "안녕하세요! 이 목소리로 이야기해 드릴까요?",
+            (_, crate::i18n::UiLang::En) => "Hello! How does this voice sound to you?",
+            (_, crate::i18n::UiLang::Ja) => "こんにちは！この声でゆっくりお話ししようね。",
+        };
+        crate::companion_extras::speak_dialogue_batch_with_prosody_async(
+            vec![(scope, sample_text.to_string())],
+            &cfg.voicevox_url,
+            &cfg.tts_engine,
+            arch,
+            sak_sp,
+            ker_sp,
+            cfg.voice_speed,
+            cfg.voice_intonation,
+        );
+    }
+
+    fn spawn_install_aivm_model(&mut self, uuid: String, name: String) {
+        let busy = format!("⬇ 「{name}」を導入中…");
+        self.aivm_busy_label = Some(busy.clone());
+        self.apply_status_feedback(busy);
+        self.redraw_settings_panel();
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let base_opt = crate::companion_extras::cached_tts_base_url()
+                .filter(|u| u.contains(":10101"))
+                .or_else(|| {
+                    crate::companion_extras::ensure_tts_engine_ready_with_mode_blocking(
+                        "http://127.0.0.1:10101",
+                        "aivisspeech",
+                        true,
+                    )
+                    .base_url
+                    .filter(|u| u.contains(":10101"))
+                });
+            let (status, msg) = match base_opt {
+                Some(base) => match crate::companion_extras::install_aivm_model_blocking(&base, &uuid) {
+                    Ok(_) => (
+                        format!("✓ 「{name}」を導入しました"),
+                        format!(
+                            "\\0\\s[5]AivisHub から音声モデル「{name}」を導入したよ！\\1\\s[10]自動/手動ですぐ使えるようになったで！\\e"
+                        ),
+                    ),
+                    Err(e) => (
+                        format!("✕ 導入失敗: {e}"),
+                        format!("\\0\\s[3]音声モデル「{name}」の導入に失敗しました: {e}\\e"),
+                    ),
+                },
+                None => (
+                    "AivisSpeech 未起動".to_string(),
+                    "\\0\\s[3]AivisSpeech (port 10101) が起動していないため、AivisHub モデルを導入できません。\\e".to_string(),
+                ),
+            };
+            let _ = proxy.send_event(UserEvent::AivmActionDone { status });
+            let _ = proxy.send_event(UserEvent::RefreshMenus);
+            let _ = proxy.send_event(UserEvent::PlayActions(parse_dialogue(&msg)));
+        });
+    }
+
+    fn spawn_uninstall_aivm_model(&mut self, uuid: String, name: String) {
+        let busy = format!("🗑 「{name}」を削除中…");
+        self.aivm_busy_label = Some(busy.clone());
+        self.apply_status_feedback(busy);
+        self.redraw_settings_panel();
+        let proxy = self.proxy.clone();
+        let store = self.config_store.clone();
+        let active_shell = self.config_store.get().active_shell_id;
+        std::thread::spawn(move || {
+            let base_opt = crate::companion_extras::cached_tts_base_url()
+                .filter(|u| u.contains(":10101"))
+                .or_else(|| {
+                    crate::companion_extras::ensure_tts_engine_ready_with_mode_blocking(
+                        "http://127.0.0.1:10101",
+                        "aivisspeech",
+                        false,
+                    )
+                    .base_url
+                    .filter(|u| u.contains(":10101"))
+                });
+            let (status, msg) = match base_opt {
+                Some(base) => match crate::companion_extras::uninstall_aivm_model_blocking(&base, &uuid) {
+                    Ok(_) => {
+                        let (_, remaining_voices) = crate::companion_extras::cached_tts_voices();
+                        let (sak_sp, ker_sp, _) = store.get_shell_voice_profile(&active_shell);
+                        if let Some(sid) = sak_sp {
+                            if !remaining_voices.iter().any(|v| v.style_id == sid) {
+                                store.set_shell_voice_speaker(&active_shell, 0, None);
+                            }
+                        }
+                        if let Some(kid) = ker_sp {
+                            if !remaining_voices.iter().any(|v| v.style_id == kid) {
+                                store.set_shell_voice_speaker(&active_shell, 1, None);
+                            }
+                        }
+                        (
+                            format!("✓ 「{name}」を削除しました"),
+                            format!(
+                                "\\0\\s[0]音声モデル「{name}」をアンインストールしたよ！\\1\\s[10]スッキリしたな！\\e"
+                            ),
+                        )
+                    }
+                    Err(e) => (
+                        format!("✕ 削除失敗: {e}"),
+                        format!("\\0\\s[3]音声モデル「{name}」の削除に失敗しました: {e}\\e"),
+                    ),
+                },
+                None => (
+                    "AivisSpeech 未起動".to_string(),
+                    "\\0\\s[3]AivisSpeech (port 10101) に接続できないため削除できません。\\e".to_string(),
+                ),
+            };
+            let _ = proxy.send_event(UserEvent::AivmActionDone { status });
+            let _ = proxy.send_event(UserEvent::RefreshMenus);
+            let _ = proxy.send_event(UserEvent::PlayActions(parse_dialogue(&msg)));
+        });
+    }
+
+    fn show_quick_memos_in_balloon(&mut self) {
+        let store = crate::accessory_utils::MemoStore::new(&self.config_store.config_dir);
+        let script = store.format_balloon_script(self.effective_ui_lang());
+        let _ = self
+            .proxy
+            .send_event(UserEvent::PlayActionsNoBacklog(parse_dialogue(&script)));
+    }
+
+    fn show_calendar_agenda_in_balloon(&mut self) {
+        let cfg = self.config_store.get();
+        let connected = cfg.calendar_use_os_native || !cfg.calendar_ics_urls.is_empty();
+        let evs = self
+            .calendar_state
+            .lock()
+            .map(|st| st.events.clone())
+            .unwrap_or_default();
+        let script = crate::calendar_sync::format_agenda_balloon_script(
+            &evs,
+            connected,
+            cfg.calendar_prep_mins,
+            self.effective_ui_lang(),
+        );
+        let _ = self
+            .proxy
+            .send_event(UserEvent::PlayActionsNoBacklog(parse_dialogue(&script)));
+    }
+
+    fn paste_calendar_ics_from_clipboard(&mut self) {
+        let ui_lang = self.effective_ui_lang();
+        let clip = arboard::Clipboard::new()
+            .and_then(|mut c| c.get_text())
+            .unwrap_or_default();
+        match crate::calendar_sync::validate_calendar_ics_url(&clip) {
+            Ok(valid) => {
+                let label = crate::calendar_sync::detect_calendar_source_label(&valid);
+                let mut urls = self.config_store.get().calendar_ics_urls;
+                if !urls.iter().any(|u| u == &valid) {
+                    urls.push(valid);
+                }
+                self.config_store.update(ConfigPatch {
+                    calendar_enabled: Some(true),
+                    calendar_ics_urls: Some(urls),
+                    ..Default::default()
+                });
+                let msg = match ui_lang {
+                    crate::i18n::UiLang::Ko => format!("\\0\\s[5]{label} 캘린더를 연결했어요! 일정을 동기화하고 있어요…\\e"),
+                    crate::i18n::UiLang::En => format!("\\0\\s[5]Connected {label} Calendar! Syncing your schedule…\\e"),
+                    crate::i18n::UiLang::Ja => format!("\\0\\s[5]{label}カレンダーを連携したよ！予定を同期中…\\e"),
+                };
+                let _ = self
+                    .proxy
+                    .send_event(UserEvent::PlayActionsNoBacklog(parse_dialogue(&msg)));
+                self.spawn_calendar_sync(true);
+            }
+            Err(e) => {
+                let msg = match ui_lang {
+                    crate::i18n::UiLang::Ko => format!("\\0\\s[3]클립보드에 올바른 https:// 또는 webcal:// .ics 주소가 없어요: {e}\\e"),
+                    crate::i18n::UiLang::En => format!("\\0\\s[3]Clipboard doesn't contain a valid https:// or webcal:// .ics URL: {e}\\e"),
+                    crate::i18n::UiLang::Ja => format!("\\0\\s[3]クリップボードに有効な https:// または webcal:// の .ics URL がありません: {e}\\e"),
+                };
+                let _ = self
+                    .proxy
+                    .send_event(UserEvent::PlayActionsNoBacklog(parse_dialogue(&msg)));
+            }
+        }
+    }
+
+    fn spawn_calendar_sync(&mut self, notify_status: bool) {
+        if self.smoke_mode {
+            return;
+        }
+        self.calendar_last_sync = Instant::now();
+        let cfg = self.config_store.get();
+        let config_dir = self.config_store.config_dir.clone();
+        let cal_arc = self.calendar_state.clone();
+        let proxy = self.proxy.clone();
+        let ui_lang = self.effective_ui_lang();
+        if notify_status {
+            let busy = match ui_lang {
+                crate::i18n::UiLang::Ko => "📅 캘린더 동기화 중…",
+                crate::i18n::UiLang::En => "📅 Syncing calendars…",
+                crate::i18n::UiLang::Ja => "📅 カレンダー同期中…",
+            };
+            self.apply_status_feedback(busy.to_string());
+        }
+        std::thread::spawn(move || {
+            let mut geo_cache = cal_arc
+                .lock()
+                .map(|g| g.geocode_cache.clone())
+                .unwrap_or_default();
+            let res = crate::calendar_sync::sync_all_calendars_blocking(
+                &cfg.calendar_ics_urls,
+                cfg.calendar_use_os_native,
+                &config_dir,
+                &cfg.calendar_home_location,
+                cfg.calendar_default_travel_mins,
+                &mut geo_cache,
+            );
+            let status = match res {
+                Ok(evs) => {
+                    let cnt = evs.len();
+                    if let Ok(mut g) = cal_arc.lock() {
+                        g.events = evs;
+                        g.last_sync_ts = chrono::Utc::now().timestamp();
+                        g.last_error = None;
+                        g.geocode_cache = geo_cache;
+                        g.save_to_disk(&config_dir);
+                    }
+                    match ui_lang {
+                        crate::i18n::UiLang::Ko => format!("📅 캘린더 동기화 완료 (예정 {cnt}건)"),
+                        crate::i18n::UiLang::En => format!("📅 Calendar synced ({cnt} upcoming)"),
+                        crate::i18n::UiLang::Ja => format!("📅 カレンダー同期完了（予定 {cnt}件）"),
+                    }
+                }
+                Err(e) => {
+                    if let Ok(mut g) = cal_arc.lock() {
+                        g.last_error = Some(e.clone());
+                    }
+                    format!("📅 同期エラー: {e}")
+                }
+            };
+            if notify_status {
+                let _ = proxy.send_event(UserEvent::CalendarSyncDone { status });
+            } else {
+                let _ = proxy.send_event(UserEvent::RefreshMenus);
+            }
+        });
+    }
+
+    fn ask_clipboard_ai(&mut self) {
+        if self.smoke_mode {
+            return;
+        }
+        let ui_lang = self.effective_ui_lang();
+        let clip = arboard::Clipboard::new()
+            .and_then(|mut c| c.get_text())
+            .unwrap_or_default();
+        match crate::accessory_utils::sanitize_clipboard_for_ai(&clip) {
+            Ok(wrapped) => {
+                let prompt = match ui_lang {
+                    crate::i18n::UiLang::Ko => format!(
+                        "다음 클립보드 내용을 핵심만 간결하게 요약·설명하거나 외국어라면 자연스럽게 번역해줘:\n{wrapped}"
+                    ),
+                    crate::i18n::UiLang::En => format!(
+                        "Briefly summarize, explain, or translate the following clipboard text:\n{wrapped}"
+                    ),
+                    crate::i18n::UiLang::Ja => format!(
+                        "次のクリップボード内容を要点を絞って簡潔に要約・解説するか、外国語なら自然な日本語に翻訳して:\n{wrapped}"
+                    ),
+                };
+                self.spawn_user_chat(prompt);
+            }
+            Err(err_key) => {
+                let msg = match (err_key.as_str(), ui_lang) {
+                    ("empty", crate::i18n::UiLang::Ko) => {
+                        "\\0\\s[4]클립보드가 비어 있어요. 텍스트를 복사한 뒤 다시 눌러 주세요!\\e"
+                    }
+                    ("empty", crate::i18n::UiLang::En) => {
+                        "\\0\\s[4]Your clipboard is empty. Copy some text first!\\e"
+                    }
+                    ("empty", _) => {
+                        "\\0\\s[4]クリップボードが空っぽだよ。テキストをコピーしてからもう一度試してね！\\e"
+                    }
+                    (_, crate::i18n::UiLang::Ko) => {
+                        "\\0\\s[3]API 키나 비밀 키로 보이는 내용이 감지되어 보안을 위해 AI 전송을 차단했어요!\\e"
+                    }
+                    (_, crate::i18n::UiLang::En) => {
+                        "\\0\\s[3]Clipboard looks like a secret/API key, so sending to AI was blocked for safety!\\e"
+                    }
+                    (_, _) => {
+                        "\\0\\s[3]APIキーや秘密鍵らしき文字列を検知したため、安全のためAI送信をブロックしたよ！\\e"
+                    }
+                };
+                let _ = self
+                    .proxy
+                    .send_event(UserEvent::PlayActionsNoBacklog(parse_dialogue(msg)));
+            }
+        }
+    }
+
     fn execute_menu_command(&mut self, event_loop: &ActiveEventLoop, cmd: MenuCommand) {
         self.execute_menu_command_inner(Some(event_loop), cmd);
     }
@@ -6187,6 +6836,22 @@ impl AppRuntime {
             }
             MenuCommand::OpenSettings => {
                 self.open_settings_panel();
+            }
+            MenuCommand::OpenSettingsTab(tab) => {
+                self.open_settings_panel();
+                if let Some(ref mut sw) = self.settings {
+                    sw.model.select_tab(tab);
+                }
+                self.redraw_settings_panel();
+            }
+            MenuCommand::AskClipboard => {
+                self.ask_clipboard_ai();
+            }
+            MenuCommand::ShowQuickMemos => {
+                self.show_quick_memos_in_balloon();
+            }
+            MenuCommand::ShowCalendarAgenda => {
+                self.show_calendar_agenda_in_balloon();
             }
             MenuCommand::ToggleMenuSection(sec) => {
                 self.expanded_menu_section = if self.expanded_menu_section == Some(sec) {
@@ -6412,6 +7077,24 @@ impl AppRuntime {
                 self.rebuild_tray_menu();
                 self.redraw_settings_panel();
             }
+            MenuCommand::SkipPomodoro => {
+                self.apply_pomodoro_action("skip");
+                self.rebuild_tray_menu();
+                self.redraw_settings_panel();
+            }
+            MenuCommand::TestVoice(scope) => {
+                self.preview_voice(scope);
+            }
+            MenuCommand::CycleSakuraVoice => {
+                self.cycle_voice_speaker(0, 1);
+                self.rebuild_tray_menu();
+                self.redraw_settings_panel();
+            }
+            MenuCommand::CycleKeroVoice => {
+                self.cycle_voice_speaker(1, 1);
+                self.rebuild_tray_menu();
+                self.redraw_settings_panel();
+            }
             MenuCommand::ShowBacklog => {
                 self.show_backlog_in_balloon();
             }
@@ -6605,37 +7288,7 @@ impl AppRuntime {
                 }
             }
             MenuCommand::InstallAivmModel { uuid, name } => {
-                self.apply_status_feedback(format!("「{name}」を AivisHub から導入中…"));
-                let proxy = self.proxy.clone();
-                std::thread::spawn(move || {
-                    let base_opt = crate::companion_extras::cached_tts_base_url()
-                        .filter(|u| u.contains(":10101"))
-                        .or_else(|| {
-                            crate::companion_extras::ensure_tts_engine_ready_with_mode_blocking(
-                                "http://127.0.0.1:10101",
-                                "aivisspeech",
-                                true,
-                            )
-                            .base_url
-                            .filter(|u| u.contains(":10101"))
-                        });
-                    let msg = match base_opt {
-                        Some(base) => match crate::companion_extras::install_aivm_model_blocking(&base, &uuid) {
-                            Ok(_) => {
-                                let _ = proxy.send_event(UserEvent::RefreshMenus);
-                                format!(
-                                    "\\0\\s[5]AivisHub から音声モデル「{name}」を導入したよ！\\1\\s[10]自動/手動ですぐ使えるようになったで！\\e"
-                                )
-                            }
-                            Err(e) => format!(
-                                "\\0\\s[3]音声モデル「{name}」の導入に失敗しました: {e}\\e"
-                            ),
-                        },
-                        None => "\\0\\s[3]AivisSpeech (port 10101) が起動していないため、AivisHub モデルを導入できません。\\e".to_string(),
-                    };
-                    let _ = proxy.send_event(UserEvent::RefreshMenus);
-                    let _ = proxy.send_event(UserEvent::PlayActions(parse_dialogue(&msg)));
-                });
+                self.spawn_install_aivm_model(uuid, name);
             }
             MenuCommand::CheckUpdates => {
                 let msg = self.ui_strings().status_checking_updates.to_string();
@@ -6788,13 +7441,15 @@ impl AppRuntime {
             .config_store
             .get_shell_voice_profile(&cfg.active_shell_id);
         let (arch, _) = self.active_kero_voice_archetype();
-        crate::companion_extras::speak_dialogue_batch_with_options_async(
+        crate::companion_extras::speak_dialogue_batch_with_prosody_async(
             segs,
             &cfg.voicevox_url,
             &cfg.tts_engine,
             arch,
             sak_sp,
             ker_sp,
+            cfg.voice_speed,
+            cfg.voice_intonation,
         );
     }
 
@@ -6960,11 +7615,22 @@ impl AppRuntime {
                 m.ws.window.set_visible(false);
             }
         }
+        if let Some(deferred) = self.pending_auto_talk_actions.take() {
+            let _ = self.proxy.send_event(UserEvent::PlayActions(deferred));
+        }
     }
 
     fn spawn_user_chat(&mut self, text: String) {
+        self.spawn_user_chat_with_images(text, Vec::new());
+    }
+
+    fn spawn_user_chat_with_images(
+        &mut self,
+        text: String,
+        images: Vec<crate::agent_engine::ImageAttachment>,
+    ) {
         let trimmed = text.trim().to_string();
-        if trimmed.is_empty() {
+        if trimmed.is_empty() && images.is_empty() {
             return;
         }
         self.auto_talk_last = Instant::now();
@@ -6972,13 +7638,21 @@ impl AppRuntime {
         if let Some(ref mut s) = self.sakura {
             s.trigger_bounce(0.016);
         }
-        let thinking = self.ui_strings().status_thinking.to_string();
+        let thinking = if images.is_empty() {
+            self.ui_strings().status_thinking.to_string()
+        } else {
+            format!("🖼 {} …", self.ui_strings().status_thinking)
+        };
         self.apply_status_feedback(thinking);
 
         let eng = self.engine.clone();
         let proxy = self.proxy.clone();
         std::thread::spawn(move || {
-            let reply = eng.handle_user_message(&trimmed);
+            let reply = if images.is_empty() {
+                eng.handle_user_message(&trimmed)
+            } else {
+                eng.handle_user_message_with_images(&trimmed, &images)
+            };
             let _ = proxy.send_event(UserEvent::PlayActions(reply.actions));
             let _ = proxy.send_event(UserEvent::RefreshMenus);
         });
@@ -7095,12 +7769,19 @@ impl AppRuntime {
                     let in_rect = |r: (f64, f64, f64, f64)| -> bool {
                         r.2 > r.0 && local.0 >= r.0 && local.0 <= r.2 && local.1 >= r.1 && local.1 <= r.3
                     };
-                    let has_text = !cw.text.trim().is_empty() || !cw.ime_preedit.trim().is_empty();
+                    let has_text = !cw.text.trim().is_empty()
+                        || !cw.ime_preedit.trim().is_empty()
+                        || cw.attached_image.is_some();
                     let new_close = in_rect(cw.close_rect);
                     let new_send = has_text && in_rect(cw.send_rect);
-                    if cw.hovered_close != new_close || cw.hovered_send != new_send {
+                    let new_attach = in_rect(cw.attach_rect);
+                    if cw.hovered_close != new_close
+                        || cw.hovered_send != new_send
+                        || cw.hovered_attach != new_attach
+                    {
                         cw.hovered_close = new_close;
                         cw.hovered_send = new_send;
+                        cw.hovered_attach = new_attach;
                         if let Some(ref gpu) = self.gpu {
                             cw.redraw(&self.balloon_skin, &mut self.text_renderer, gpu, ui_lang);
                         }
@@ -7419,6 +8100,28 @@ impl AppRuntime {
                             self.apply_pomodoro_action("start");
                             self.rebuild_tray_menu();
                             self.redraw_settings_panel();
+                        } else if let Some(memo_id) = cid.strip_prefix("__memo_done_") {
+                            self.playback.sakura_choices.clear();
+                            self.playback.kero_choices.clear();
+                            if let Ok(id) = memo_id.parse::<u64>() {
+                                let store = crate::accessory_utils::MemoStore::new(
+                                    &self.config_store.config_dir,
+                                );
+                                let _ = store.set_done(id, true);
+                            }
+                            self.show_quick_memos_in_balloon();
+                        } else if cid == "__memo_clear_done__" {
+                            self.playback.sakura_choices.clear();
+                            self.playback.kero_choices.clear();
+                            let store = crate::accessory_utils::MemoStore::new(
+                                &self.config_store.config_dir,
+                            );
+                            let _ = store.clear_done();
+                            self.show_quick_memos_in_balloon();
+                        } else if cid == "__cal_sync__" {
+                            self.playback.sakura_choices.clear();
+                            self.playback.kero_choices.clear();
+                            self.spawn_calendar_sync(true);
                         } else {
                             self.playback.sakura_choices.clear();
                             self.playback.kero_choices.clear();
@@ -7458,7 +8161,8 @@ impl AppRuntime {
                 }
             }
             Some(UiWindowTarget::Communicate) if button == MouseButton::Left && state == ElementState::Pressed => {
-                let mut submit_text: Option<String> = None;
+                let mut submit_payload: Option<(String, Vec<crate::agent_engine::ImageAttachment>)> = None;
+                let mut open_image_picker = false;
                 let mut closed_now = false;
                 let ui_lang = self.effective_ui_lang();
                 if let Some(ref mut cw) = self.communicate {
@@ -7471,26 +8175,35 @@ impl AppRuntime {
                             cw.focused = false;
                             cw.hovered_close = false;
                             cw.hovered_send = false;
+                            cw.hovered_attach = false;
                             cw.ime_preedit.clear();
                             cw.ws.window.set_visible(false);
                             closed_now = true;
+                        } else if in_rect(cw.attach_rect, pos) {
+                            if cw.attached_image.is_some() {
+                                cw.attached_image = None;
+                            } else {
+                                open_image_picker = true;
+                            }
                         } else if in_rect(cw.send_rect, pos) {
                             let combined = format!("{}{}", cw.text, cw.ime_preedit);
                             let trimmed = combined.trim().to_string();
-                            if !trimmed.is_empty() {
-                                submit_text = Some(trimmed);
+                            let imgs: Vec<_> = cw.attached_image.take().into_iter().collect();
+                            if !trimmed.is_empty() || !imgs.is_empty() {
+                                submit_payload = Some((trimmed, imgs));
                                 cw.text.clear();
                                 cw.ime_preedit.clear();
                                 cw.visible = false;
                                 cw.focused = false;
                                 cw.hovered_close = false;
                                 cw.hovered_send = false;
+                                cw.hovered_attach = false;
                                 cw.ws.window.set_visible(false);
                                 closed_now = true;
                             }
                         }
                     }
-                    if !closed_now {
+                    if !closed_now && !open_image_picker {
                         cw.focused = true;
                         cw.cursor_on = true;
                         cw.last_blink = Instant::now();
@@ -7500,8 +8213,30 @@ impl AppRuntime {
                         }
                     }
                 }
-                if let Some(msg) = submit_text {
-                    self.spawn_user_chat(msg);
+                if open_image_picker && !self.smoke_mode {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Images (PNG / JPG / BMP)", &["png", "jpg", "jpeg", "bmp"])
+                        .pick_file()
+                    {
+                        match crate::agent_engine::load_image_attachment(&path) {
+                            Ok(att) => {
+                                if let Some(ref mut cw) = self.communicate {
+                                    cw.attached_image = Some(att);
+                                    cw.focused = true;
+                                    cw.ws.window.focus_window();
+                                    if let Some(ref gpu) = self.gpu {
+                                        cw.redraw(&self.balloon_skin, &mut self.text_renderer, gpu, ui_lang);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                self.apply_status_feedback(format!("🖼 {e}"));
+                            }
+                        }
+                    }
+                }
+                if let Some((msg, imgs)) = submit_payload {
+                    self.spawn_user_chat_with_images(msg, imgs);
                 }
             }
             Some(UiWindowTarget::Menu) if button == MouseButton::Left && state == ElementState::Released => {
@@ -7650,7 +8385,7 @@ impl AppRuntime {
     }
 
     fn handle_communicate_key(&mut self, logical_key: &Key, text: Option<&str>) {
-        let mut submit_text: Option<String> = None;
+        let mut submit_payload: Option<(String, Vec<crate::agent_engine::ImageAttachment>)> = None;
         let ui_lang = self.effective_ui_lang();
         if let Some(ref mut cw) = self.communicate {
             cw.focused = true;
@@ -7663,17 +8398,20 @@ impl AppRuntime {
                     cw.focused = false;
                     cw.hovered_close = false;
                     cw.hovered_send = false;
+                    cw.hovered_attach = false;
                     cw.ime_preedit.clear();
                     cw.ws.window.set_visible(false);
                 }
                 Key::Named(NamedKey::Enter) => {
                     if cw.ime_preedit.is_empty() {
-                        submit_text = Some(cw.text.clone());
+                        let imgs: Vec<_> = cw.attached_image.take().into_iter().collect();
+                        submit_payload = Some((cw.text.clone(), imgs));
                         cw.text.clear();
                         cw.visible = false;
                         cw.focused = false;
                         cw.hovered_close = false;
                         cw.hovered_send = false;
+                        cw.hovered_attach = false;
                         cw.ws.window.set_visible(false);
                     }
                 }
@@ -7712,8 +8450,8 @@ impl AppRuntime {
                 }
             }
         }
-        if let Some(msg) = submit_text {
-            self.spawn_user_chat(msg);
+        if let Some((msg, imgs)) = submit_payload {
+            self.spawn_user_chat_with_images(msg, imgs);
         }
     }
 
@@ -8250,7 +8988,7 @@ impl AppRuntime {
                 sb.utterance_min_w = 0;
                 sb.large = false;
             }
-            let short_script = "\\0\\s[0]안녕! 何か藍(NanikaAi) v0.1.10!\\e";
+            let short_script = "\\0\\s[0]안녕! 何か藍(NanikaAi) v0.1.11!\\e";
             self.playback.enqueue(parse_dialogue(short_script));
             let _ = self.playback.fast_forward();
             self.sync_balloons_to_playback();
@@ -8276,7 +9014,7 @@ impl AppRuntime {
                 sb.utterance_min_w = 0;
                 sb.large = false;
             }
-            let demo_script = "\\0\\s[0]안녕! 100% Safe Rust 何か藍(NanikaAi) v0.1.10 テスト完了だよ！\\n\\n長い文章では吹き出しが内容に合わせて滑らかに広がり、最大サイズに達すると自動的にスクロールバーとトラックが表示されて、マウスホイールで快適に読み進められます。\\n\\n1行目: 外付けサイドカー Live2D 解剖学的関節・多層髪・衣装揺れ有効化。\\n2行目: うにゅうの40%半透明サングラスと無欠損表情レイヤーを保持。\\n3行目: Gemma/SentencePieceのバイトフォールバック文字も完全復元。\\w3\\1\\s[10]40%半透明サングラスの上からもバッチリ見えてるぜ。\\e";
+            let demo_script = "\\0\\s[0]안녕! 100% Safe Rust 何か藍(NanikaAi) v0.1.11 テスト完了だよ！\\n\\n長い文章では吹き出しが内容に合わせて滑らかに広がり、最大サイズに達すると自動的にスクロールバーとトラックが表示されて、マウスホイールで快適に読み進められます。\\n\\n1行目: 外付けサイドカー Live2D 解剖学的関節・多層髪・衣装揺れ有効化。\\n2行目: うにゅうの40%半透明サングラスと無欠損表情レイヤーを保持。\\n3行目: Gemma/SentencePieceのバイトフォールバック文字も完全復元。\\w3\\1\\s[10]40%半透明サングラスの上からもバッチリ見えてるぜ。\\e";
             self.playback.enqueue(parse_dialogue(demo_script));
             let _ = self.playback.fast_forward();
             self.sync_balloons_to_playback();
@@ -9278,9 +10016,12 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                 anim_start: Instant::now(),
                 hovered_close: false,
                 hovered_send: false,
+                hovered_attach: false,
                 last_local_cursor: None,
                 close_rect: (0.0, 0.0, 0.0, 0.0),
                 send_rect: (0.0, 0.0, 0.0, 0.0),
+                attach_rect: (0.0, 0.0, 0.0, 0.0),
+                attached_image: None,
                 last_render_bmp: RgbaBitmap::new_transparent(16, 16),
             });
         }
@@ -9292,8 +10033,8 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                 hovered_idx: None,
                 scroll_row: 0,
                 scroll_accum: 0.0,
-                win_size: (304, 420),
-                row_h: 24.0,
+                win_size: (320, 420),
+                row_h: 26.0,
                 max_visible_rows: 32,
                 last_render_bmp: RgbaBitmap::new_transparent(16, 16),
             });
@@ -9449,6 +10190,24 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                 self.maybe_speak_actions(&actions);
                 self.playback.enqueue(actions);
             }
+            UserEvent::AutoTalkActions(actions) => {
+                if self.menu.as_ref().is_some_and(|m| m.visible) {
+                    self.pending_auto_talk_actions = Some(actions);
+                } else {
+                    let _ = self.proxy.send_event(UserEvent::PlayActions(actions));
+                }
+            }
+            UserEvent::AivmActionDone { status } => {
+                self.aivm_busy_label = None;
+                self.apply_status_feedback(status);
+                self.redraw_settings_panel();
+                self.rebuild_tray_menu();
+            }
+            UserEvent::CalendarSyncDone { status } => {
+                self.apply_status_feedback(status);
+                self.redraw_settings_panel();
+                self.rebuild_tray_menu();
+            }
             UserEvent::PlayActionsNoBacklog(actions) => {
                 if actions.iter().any(|a| a.scope == Scope::Sakura) {
                     if let Some(ref mut sb) = self.sakura_balloon {
@@ -9516,10 +10275,16 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                     .tts_engine
                     .as_deref()
                     .map(crate::config_store::normalize_tts_engine);
-                if req.voice_tts.is_some() || norm_engine.is_some() {
+                if req.voice_tts.is_some()
+                    || norm_engine.is_some()
+                    || req.voice_speed.is_some()
+                    || req.voice_intonation.is_some()
+                {
                     self.config_store.update(ConfigPatch {
                         voice_tts: req.voice_tts,
                         tts_engine: norm_engine,
+                        voice_speed: req.voice_speed.map(|v| v.clamp(0.75, 1.35)),
+                        voice_intonation: req.voice_intonation.map(|v| v.clamp(0.70, 1.50)),
                         ..Default::default()
                     });
                 }
@@ -9597,6 +10362,8 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                     always_on_top: req.always_on_top,
                     live2d_motion: req.live2d_motion,
                     hourly_chime: req.hourly_chime,
+                    voice_speed: req.voice_speed,
+                    voice_intonation: req.voice_intonation,
                     auto_talk_interval_sec: req.auto_talk_interval_sec,
                     interest_news_weight: req.interest_news_weight,
                     macos_accept_first_mouse: req.macos_accept_first_mouse,
@@ -9825,6 +10592,36 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                     .unwrap_or_default();
                 if ext == "nar" {
                     self.install_and_activate_nar(&path);
+                } else if ext == "ics" {
+                    let cal_dir = self.config_store.config_dir.join("calendars");
+                    let _ = std::fs::create_dir_all(&cal_dir);
+                    if let Some(fname) = path.file_name() {
+                        if std::fs::copy(&path, cal_dir.join(fname)).is_ok() {
+                            self.config_store.update(ConfigPatch {
+                                calendar_enabled: Some(true),
+                                ..Default::default()
+                            });
+                            self.spawn_calendar_sync(true);
+                        }
+                    }
+                } else if crate::agent_engine::is_supported_image_path(&path) {
+                    match crate::agent_engine::load_image_attachment(&path) {
+                        Ok(att) => {
+                            self.open_communicate_near_sakura();
+                            let ui_lang = self.effective_ui_lang();
+                            if let Some(ref mut cw) = self.communicate {
+                                cw.attached_image = Some(att);
+                                if let Some(ref gpu) = self.gpu {
+                                    cw.redraw(&self.balloon_skin, &mut self.text_renderer, gpu, ui_lang);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let _ = self.proxy.send_event(UserEvent::PlayActionsNoBacklog(parse_dialogue(
+                                &format!("\\0\\s[3]🖼 {e}\\e"),
+                            )));
+                        }
+                    }
                 } else if ext == "zip" {
                     let dest_base = self.config_store.config_dir.clone();
                     match install_nar_archive(
@@ -10000,11 +10797,22 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
             } else {
                 None
             };
+            let pomo_peering_target = if self.pomodoro.is_active() {
+                self.kero.as_ref().filter(|k| k.visible).map(|k| {
+                    (
+                        k.logical_pos.0 + k.win_size.0 as f64 * 0.55,
+                        k.logical_pos.1 + k.win_size.1 as f64 * 0.72,
+                    )
+                })
+            } else {
+                None
+            };
+            let sakura_gaze_target = pomo_peering_target.or(global_cursor);
             if let Some(ref gpu) = self.gpu {
                 let m = self.manifest.lock().expect("manifest mutex poisoned");
                 if let Some(ref mut s) = self.sakura {
                     s.tick_seriko(&m, gpu, speaking_sakura);
-                    s.tick_live2d(gpu, live2d_on, global_cursor, speaking_sakura);
+                    s.tick_live2d(gpu, live2d_on, sakura_gaze_target, speaking_sakura);
                 }
                 if let Some(ref mut k) = self.kero {
                     if k.visible {
@@ -10017,6 +10825,7 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
 
         // Pomodoro countdown & phase transition notifications
         if let Some(trans) = self.pomodoro.tick() {
+            self.sync_pomodoro_pose();
             if !eff_hidden {
                 let script = crate::accessory_utils::build_pomodoro_transition_script(
                     trans,
@@ -10042,8 +10851,13 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
             }
         }
 
-        let suppress_interruptions =
-            cfg_now.quiet_mode || eff_hidden || self.pomodoro.is_focusing();
+        let menu_open = self.menu.as_ref().is_some_and(|m| m.visible);
+        let suppress_interruptions = should_suppress_interruptions(
+            cfg_now.quiet_mode,
+            eff_hidden,
+            self.pomodoro.is_focusing(),
+            menu_open,
+        );
 
         // Poll due reminders & hourly chime every second when idle/not closing
         if self.closing_at.is_none() && self.reminder_poll_last.elapsed() >= Duration::from_secs(1) {
@@ -10072,7 +10886,7 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
             }
         }
 
-        // Auto-talk periodic idle talk (paused during Quiet Mode, Hidden, or Pomodoro Focus)
+        // Auto-talk periodic idle talk (paused during Quiet Mode, Hidden, Pomodoro Focus, or open Menu)
         let interval = cfg_now.auto_talk_interval_sec;
         if interval > 0
             && !suppress_interruptions
@@ -10084,9 +10898,65 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                 let proxy = self.proxy.clone();
                 std::thread::spawn(move || {
                     if let Some(reply) = eng.handle_auto_talk() {
-                        let _ = proxy.send_event(UserEvent::PlayActions(reply.actions));
+                        let _ = proxy.send_event(UserEvent::AutoTalkActions(reply.actions));
                     }
                 });
+            }
+        }
+
+        // Calendar background sync (every 15 min) + travel departure alerts (every 30s) + periodic briefing
+        if cfg_now.calendar_enabled && self.closing_at.is_none() {
+            if self.calendar_last_sync.elapsed() >= Duration::from_secs(15 * 60) {
+                self.spawn_calendar_sync(false);
+            }
+            if self.calendar_last_alert_check.elapsed() >= Duration::from_secs(30) {
+                self.calendar_last_alert_check = Instant::now();
+                if !cfg_now.quiet_mode && !eff_hidden && !menu_open {
+                    let now_ts = Utc::now().timestamp();
+                    let due_alerts = self
+                        .calendar_state
+                        .lock()
+                        .map(|mut st| {
+                            st.poll_due_alerts(
+                                now_ts,
+                                cfg_now.calendar_prep_mins,
+                                cfg_now.calendar_remind_mins,
+                            )
+                        })
+                        .unwrap_or_default();
+                    if let Some(first_alert) = due_alerts.into_iter().next() {
+                        let script = crate::calendar_sync::format_calendar_alert_script(
+                            &first_alert,
+                            self.effective_ui_lang(),
+                        );
+                        let _ = self
+                            .proxy
+                            .send_event(UserEvent::PlayActions(parse_dialogue(&script)));
+                        self.calendar_last_briefing = Instant::now();
+                    } else if cfg_now.calendar_briefing_interval_mins > 0
+                        && !suppress_interruptions
+                        && self.playback.steps.is_empty()
+                        && self.calendar_last_briefing.elapsed()
+                            >= Duration::from_secs(cfg_now.calendar_briefing_interval_mins as u64 * 60)
+                    {
+                        self.calendar_last_briefing = Instant::now();
+                        let evs = self
+                            .calendar_state
+                            .lock()
+                            .map(|st| st.events.clone())
+                            .unwrap_or_default();
+                        if let Some(script) = crate::calendar_sync::format_periodic_briefing_script(
+                            &evs,
+                            now_ts,
+                            cfg_now.calendar_prep_mins,
+                            self.effective_ui_lang(),
+                        ) {
+                            let _ = self
+                                .proxy
+                                .send_event(UserEvent::AutoTalkActions(parse_dialogue(&script)));
+                        }
+                    }
+                }
             }
         }
     }
@@ -10173,6 +11043,7 @@ pub fn run(smoke_test: bool) -> Result<(), String> {
         Some(status_cb),
     );
 
+    let cfg_dir_for_cal = config_store.config_dir.clone();
     let smoke_passed = Arc::new(Mutex::new(false));
     let mut app = AppRuntime {
         smoke_mode: smoke_test,
@@ -10224,6 +11095,16 @@ pub fn run(smoke_test: bool) -> Result<(), String> {
         battery_status: crate::accessory_utils::BatteryStatus::default(),
         low_battery_notified: false,
         last_pomo_ui_refresh: Instant::now(),
+        pending_auto_talk_actions: None,
+        aivm_busy_label: None,
+        calendar_state: {
+            let mut st = crate::calendar_sync::CalendarSyncState::default();
+            st.load_from_disk(&cfg_dir_for_cal);
+            Arc::new(Mutex::new(st))
+        },
+        calendar_last_sync: Instant::now() - Duration::from_secs(14 * 60 + 50),
+        calendar_last_alert_check: Instant::now(),
+        calendar_last_briefing: Instant::now(),
     };
 
     event_loop
@@ -10237,6 +11118,52 @@ pub fn run(smoke_test: bool) -> Result<(), String> {
         return Err("스모크 테스트가 통과되지 않았습니다.".to_string());
     }
     Ok(())
+}
+
+/// Pure helper determining whether periodic interruptions (auto-talk, hourly chime, calendar briefing)
+/// should be suppressed (during Quiet Mode, Hidden/Fullscreen, Pomodoro Focus, or open Right-Click Menu).
+pub fn should_suppress_interruptions(
+    quiet_mode: bool,
+    eff_hidden: bool,
+    pomo_focusing: bool,
+    menu_open: bool,
+) -> bool {
+    quiet_mode || eff_hidden || pomo_focusing || menu_open
+}
+
+/// Public snapshot helper for `/api/settings` (guarantees `api_key` and secret `calendar_ics_urls` are never exposed).
+pub fn settings_snapshot_from_store(store: &ConfigStore) -> Value {
+    AppRuntime::settings_snapshot_from_store(store)
+}
+
+/// Public snapshot helper for `/api/calendar` (guarantees secret `calendar_ics_urls` and raw `calendar_home_location` are never exposed).
+pub fn calendar_snapshot_from_store(store: &ConfigStore) -> Value {
+    let cfg = store.get();
+    let mut st = crate::calendar_sync::CalendarSyncState::default();
+    st.load_from_disk(&store.config_dir);
+    let now_ts = chrono::Utc::now().timestamp();
+    let evs = st.upcoming_events(now_ts, 48);
+    let connected = cfg.calendar_use_os_native || !cfg.calendar_ics_urls.is_empty();
+    let sources: Vec<&'static str> = cfg
+        .calendar_ics_urls
+        .iter()
+        .map(|u| crate::calendar_sync::detect_calendar_source_label(u))
+        .collect();
+    json!({
+        "enabled": cfg.calendar_enabled,
+        "connected": connected,
+        "use_os_native": cfg.calendar_use_os_native,
+        "ics_feed_count": cfg.calendar_ics_urls.len(),
+        "ics_sources": sources,
+        "home_location_set": !cfg.calendar_home_location.trim().is_empty(),
+        "default_travel_mins": cfg.calendar_default_travel_mins,
+        "prep_mins": cfg.calendar_prep_mins,
+        "remind_mins": cfg.calendar_remind_mins,
+        "briefing_interval_mins": cfg.calendar_briefing_interval_mins,
+        "last_sync_ts": st.last_sync_ts,
+        "count": evs.len(),
+        "events": evs,
+    })
 }
 
 #[cfg(test)]

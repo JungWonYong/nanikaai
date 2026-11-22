@@ -1,4 +1,4 @@
-# 何か藍 — NanikaAi (`v0.1.10`)
+# 何か藍 — NanikaAi (`v0.1.11`)
 
 > 🌐 **[日本語](README.md)** | **[English](README.en.md)** | **한국어** · 🎬 **[데모 페이지](https://jungwonyong.github.io/nanikaai/?lang=ko)**
 
