@@ -146,6 +146,10 @@ pub enum SettingsAction {
     InstallAivmModel(String, String),
     UninstallAivmModel(String, String),
     CycleProvider(i32),
+    CycleRouterModel(i32),
+    CycleCodingModel(i32),
+    CycleReasoningModel(i32),
+    CycleCloudFallback(i32),
     SetupLocalAi,
     ToggleEnableTools,
     ToggleEnableClipboard,
@@ -1475,6 +1479,77 @@ impl SettingsPanelModel {
                     SettingsAction::ToggleEnableClipboard,
                     &mut viewport_hits,
                 );
+                let router_lbl = format_routing_model_label(
+                    data.ui_lang,
+                    &data.cfg.router_model,
+                    "Auto (FunctionGemma)",
+                    true,
+                );
+                cur_y = self.draw_cycle_row(
+                    &mut vp_bmp,
+                    text_renderer,
+                    scale,
+                    cur_y,
+                    right_edge,
+                    "cyc_router_model",
+                    s.lbl_router_model,
+                    &router_lbl,
+                    SettingsAction::CycleRouterModel(-1),
+                    SettingsAction::CycleRouterModel(1),
+                    &mut viewport_hits,
+                );
+                let coding_lbl = format_routing_model_label(
+                    data.ui_lang,
+                    &data.cfg.coding_model,
+                    "Auto (Devstral)",
+                    false,
+                );
+                cur_y = self.draw_cycle_row(
+                    &mut vp_bmp,
+                    text_renderer,
+                    scale,
+                    cur_y,
+                    right_edge,
+                    "cyc_coding_model",
+                    s.lbl_coding_model,
+                    &coding_lbl,
+                    SettingsAction::CycleCodingModel(-1),
+                    SettingsAction::CycleCodingModel(1),
+                    &mut viewport_hits,
+                );
+                let reasoning_lbl = format_routing_model_label(
+                    data.ui_lang,
+                    &data.cfg.reasoning_model,
+                    "Auto (31B / GPT-OSS)",
+                    false,
+                );
+                cur_y = self.draw_cycle_row(
+                    &mut vp_bmp,
+                    text_renderer,
+                    scale,
+                    cur_y,
+                    right_edge,
+                    "cyc_reasoning_model",
+                    s.lbl_reasoning_model,
+                    &reasoning_lbl,
+                    SettingsAction::CycleReasoningModel(-1),
+                    SettingsAction::CycleReasoningModel(1),
+                    &mut viewport_hits,
+                );
+                let cloud_lbl = format_cloud_fallback_label(&data.cfg.cloud_fallback);
+                cur_y = self.draw_cycle_row(
+                    &mut vp_bmp,
+                    text_renderer,
+                    scale,
+                    cur_y,
+                    right_edge,
+                    "cyc_cloud_fallback",
+                    s.lbl_cloud_fallback,
+                    &cloud_lbl,
+                    SettingsAction::CycleCloudFallback(-1),
+                    SettingsAction::CycleCloudFallback(1),
+                    &mut viewport_hits,
+                );
 
                 cur_y += 6.0;
                 cur_y = self.draw_section_header(
@@ -1674,7 +1749,7 @@ impl SettingsPanelModel {
                 };
                 24.0 + 40.0 + 5.0 * 42.0 + 2.0 * 52.0 + 28.0 + busy_h + installed_rows * 40.0 + uninst_h + 16.0
             }
-            _ => 600.0,
+            _ => 786.0,
         }
     }
 
@@ -2401,5 +2476,40 @@ impl SettingsPanelModel {
             );
         }
         y + card_h + 6.0
+    }
+}
+
+fn format_routing_model_label(
+    lang: UiLang,
+    value: &str,
+    auto_label: &str,
+    is_router: bool,
+) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("off") {
+        if is_router {
+            return "OFF".to_string();
+        }
+        return match lang {
+            UiLang::Ko => "메인 모델 유지".to_string(),
+            UiLang::En => "Use Main Model".to_string(),
+            UiLang::Ja => "メインモデル維持".to_string(),
+        };
+    }
+    if trimmed.eq_ignore_ascii_case("auto") {
+        return auto_label.to_string();
+    }
+    trimmed.to_string()
+}
+
+fn format_cloud_fallback_label(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "off" => "OFF".to_string(),
+        "gemini-paid" => "Gemini CLI (agy)".to_string(),
+        "gemini-api" => "Gemini API".to_string(),
+        "claude" => "Claude (API/CLI)".to_string(),
+        "chatgpt-free" => "ChatGPT / Codex".to_string(),
+        "openai-compatible" => "OpenAI Compat".to_string(),
+        other => other.to_string(),
     }
 }

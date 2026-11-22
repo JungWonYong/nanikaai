@@ -434,6 +434,14 @@ pub struct AgentConfig {
     pub api_key: String,
     #[serde(default = "default_model")]
     pub model: String,
+    #[serde(default)]
+    pub router_model: String,
+    #[serde(default)]
+    pub coding_model: String,
+    #[serde(default)]
+    pub reasoning_model: String,
+    #[serde(default)]
+    pub cloud_fallback: String,
     #[serde(default = "default_true")]
     pub enable_tools: bool,
     #[serde(default = "default_true")]
@@ -549,6 +557,10 @@ impl Default for AgentConfig {
             ssh_tunnel_target: String::new(),
             api_key: String::new(),
             model: default_model(),
+            router_model: String::new(),
+            coding_model: String::new(),
+            reasoning_model: String::new(),
+            cloud_fallback: String::new(),
             enable_tools: true,
             enable_clipboard_tool: true,
             auto_talk_interval_sec: default_autotalk(),
@@ -612,6 +624,10 @@ pub struct ConfigPatch {
     pub remote_endpoint_url: Option<String>,
     pub api_key: Option<String>,
     pub model: Option<String>,
+    pub router_model: Option<String>,
+    pub coding_model: Option<String>,
+    pub reasoning_model: Option<String>,
+    pub cloud_fallback: Option<String>,
     pub enable_tools: Option<bool>,
     pub enable_clipboard_tool: Option<bool>,
     pub auto_talk_interval_sec: Option<u64>,
@@ -825,6 +841,18 @@ impl ConfigStore {
         }
         if let Some(v) = patch.model {
             guard.model = v;
+        }
+        if let Some(v) = patch.router_model {
+            guard.router_model = v.trim().chars().take(96).collect();
+        }
+        if let Some(v) = patch.coding_model {
+            guard.coding_model = v.trim().chars().take(96).collect();
+        }
+        if let Some(v) = patch.reasoning_model {
+            guard.reasoning_model = v.trim().chars().take(96).collect();
+        }
+        if let Some(v) = patch.cloud_fallback {
+            guard.cloud_fallback = crate::agent_engine::normalize_cloud_fallback_provider(&v);
         }
         if let Some(v) = patch.enable_tools {
             guard.enable_tools = v;

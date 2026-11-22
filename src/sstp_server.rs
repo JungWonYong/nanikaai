@@ -185,6 +185,10 @@ pub struct SettingsPatchReq {
     pub windows_undecorated_shadow: Option<bool>,
     pub linux_prefer_x11: Option<bool>,
     pub linux_respect_workarea: Option<bool>,
+    pub router_model: Option<String>,
+    pub coding_model: Option<String>,
+    pub reasoning_model: Option<String>,
+    pub cloud_fallback: Option<String>,
     #[serde(default)]
     pub reset_defaults: bool,
 }
@@ -227,6 +231,31 @@ pub fn validate_settings_patch(req: &SettingsPatchReq) -> Result<(), String> {
     if let Some(ref ps) = req.power_save_mode {
         if !crate::accessory_utils::is_valid_power_save_mode(ps) {
             return Err("Invalid power_save_mode: must be one of auto, on, off".to_string());
+        }
+    }
+    for (field, val_opt) in [
+        ("router_model", &req.router_model),
+        ("coding_model", &req.coding_model),
+        ("reasoning_model", &req.reasoning_model),
+    ] {
+        if let Some(raw) = val_opt {
+            let trimmed = raw.trim();
+            if trimmed.chars().count() > 96 || trimmed.chars().any(|c| c.is_control()) {
+                return Err(format!(
+                    "Invalid {field}: must be <= 96 chars without control characters"
+                ));
+            }
+            if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("auto") {
+                crate::agent_engine::assert_allowed_model(trimmed)?;
+            }
+        }
+    }
+    if let Some(ref cf) = req.cloud_fallback {
+        if !crate::agent_engine::is_valid_cloud_fallback_provider(cf) {
+            return Err(
+                "Invalid cloud_fallback: must be empty/off or one of gemini-paid, gemini-api, claude, chatgpt-free, openai-compatible"
+                    .to_string(),
+            );
         }
     }
     if let Some(idx) = req.pomodoro_preset_idx {

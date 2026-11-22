@@ -4432,6 +4432,10 @@ impl AppRuntime {
             "active_balloon_id": cfg.active_balloon_id,
             "provider": cfg.provider,
             "model": cfg.model,
+            "router_model": cfg.router_model,
+            "coding_model": cfg.coding_model,
+            "reasoning_model": cfg.reasoning_model,
+            "cloud_fallback": cfg.cloud_fallback,
             "enable_tools": cfg.enable_tools,
             "enable_clipboard_tool": cfg.enable_clipboard_tool,
             "auto_talk_interval_sec": cfg.auto_talk_interval_sec,
@@ -4832,6 +4836,109 @@ impl AppRuntime {
         } else {
             let _ = self.handle_provider_switch(p.id.clone(), Some(p.default_model.clone()));
         }
+    }
+
+    fn cycle_routing_model(&mut self, slot: &str, delta: i32) {
+        let cfg = self.config_store.get();
+        let installed: Vec<String> = if self.smoke_mode {
+            Vec::new()
+        } else {
+            self.engine
+                .list_ollama_models(&cfg.endpoint_url, 350)
+                .into_iter()
+                .filter(|m| !crate::agent_engine::is_forbidden_model(m))
+                .collect()
+        };
+
+        let mut choices: Vec<String> = vec![String::new(), "auto".to_string()];
+        let push_unique = |list: &mut Vec<String>, item: String| {
+            if !list.iter().any(|x| x == &item) {
+                list.push(item);
+            }
+        };
+
+        match slot {
+            "router" => {
+                for m in &installed {
+                    if m.to_ascii_lowercase().starts_with("functiongemma") {
+                        push_unique(&mut choices, m.clone());
+                    }
+                }
+            }
+            "coding" => {
+                for pref in crate::agent_engine::CODING_PREFERRED_MODELS {
+                    if let Some(m) = crate::agent_engine::match_installed_ollama_tag(pref, &installed) {
+                        push_unique(&mut choices, m);
+                    }
+                }
+                for m in &installed {
+                    if !crate::agent_engine::is_router_utility_model(m) {
+                        push_unique(&mut choices, m.clone());
+                    }
+                }
+            }
+            _ => {
+                for pref in crate::agent_engine::REASONING_PREFERRED_MODELS {
+                    if let Some(m) = crate::agent_engine::match_installed_ollama_tag(pref, &installed) {
+                        push_unique(&mut choices, m);
+                    }
+                }
+                for m in &installed {
+                    if !crate::agent_engine::is_router_utility_model(m) {
+                        push_unique(&mut choices, m.clone());
+                    }
+                }
+            }
+        }
+
+        let current = match slot {
+            "router" => cfg.router_model.trim().to_string(),
+            "coding" => cfg.coding_model.trim().to_string(),
+            _ => cfg.reasoning_model.trim().to_string(),
+        };
+        if !current.is_empty() && !choices.iter().any(|x| x == &current) {
+            choices.push(current.clone());
+        }
+        let pos = choices.iter().position(|c| c == &current).unwrap_or(0) as isize;
+        let next = (pos + delta as isize).rem_euclid(choices.len() as isize) as usize;
+        let next_val = choices[next].clone();
+
+        match slot {
+            "router" => {
+                self.config_store.update(ConfigPatch {
+                    router_model: Some(next_val),
+                    ..Default::default()
+                });
+            }
+            "coding" => {
+                self.config_store.update(ConfigPatch {
+                    coding_model: Some(next_val),
+                    ..Default::default()
+                });
+            }
+            _ => {
+                self.config_store.update(ConfigPatch {
+                    reasoning_model: Some(next_val),
+                    ..Default::default()
+                });
+            }
+        }
+    }
+
+    fn cycle_cloud_fallback(&mut self, delta: i32) {
+        let choices = crate::agent_engine::CLOUD_FALLBACK_PROVIDERS;
+        if choices.is_empty() {
+            return;
+        }
+        let cur = crate::agent_engine::normalize_cloud_fallback_provider(
+            &self.config_store.get().cloud_fallback,
+        );
+        let pos = choices.iter().position(|&c| c == cur.as_str()).unwrap_or(0) as isize;
+        let next = (pos + delta as isize).rem_euclid(choices.len() as isize) as usize;
+        self.config_store.update(ConfigPatch {
+            cloud_fallback: Some(choices[next].to_string()),
+            ..Default::default()
+        });
     }
 
     fn cycle_tts_engine(&mut self, delta: i32) {
@@ -5582,6 +5689,10 @@ impl AppRuntime {
                 return;
             }
             SettingsAction::CycleProvider(d) => self.cycle_provider(d),
+            SettingsAction::CycleRouterModel(d) => self.cycle_routing_model("router", d),
+            SettingsAction::CycleCodingModel(d) => self.cycle_routing_model("coding", d),
+            SettingsAction::CycleReasoningModel(d) => self.cycle_routing_model("reasoning", d),
+            SettingsAction::CycleCloudFallback(d) => self.cycle_cloud_fallback(d),
             SettingsAction::SetupLocalAi => {
                 self.start_one_click_local_ai_setup();
                 return;
@@ -10373,6 +10484,10 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                     windows_undecorated_shadow: req.windows_undecorated_shadow,
                     linux_prefer_x11: req.linux_prefer_x11,
                     linux_respect_workarea: req.linux_respect_workarea,
+                    router_model: req.router_model,
+                    coding_model: req.coding_model,
+                    reasoning_model: req.reasoning_model,
+                    cloud_fallback: req.cloud_fallback,
                     ..Default::default()
                 });
                 self.pomodoro.set_preset(updated_cfg.pomodoro_preset_idx);

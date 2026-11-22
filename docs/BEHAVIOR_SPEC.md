@@ -19,7 +19,7 @@
 
 ---
 
-## 2. 現行動作仕様および判定基準一覧（46 項目）
+## 2. 現行動作仕様および判定基準一覧（48 項目）
 
 | 仕様 ID | 領域 | 期待される現行動作（仕様） | 合格基準（パス条件） | 検証手段 |
 | :--- | :--- | :--- | :--- | :--- |
@@ -37,6 +37,8 @@
 | `SPEC-AI-02` | Ollama 適応 | 初心者向けローカルモデル候補を幅広に自動選択する | `PREFERRED_MODELS` に `gemma4:e4b`・`llama3.2:3b` 等が含まれ、`provider_catalog()` の `"ollama"` 既定モデルが `"auto"` であること | `behavior_spec` / unit tests |
 | `SPEC-AI-03` | 設定永続化 | `config.json` と記憶データをディスクへ保存・再読込できる | `ConfigStore::update(ConfigPatch)` 後の値が新規 `ConfigStore::new` インスタンスで一致すること | `behavior_spec` / unit tests |
 | `SPEC-AI-04` | 無料ローカルAI 1クリック自動準備＆一般向け既定順序 | 新規ユーザー向けに `"ollama"` を `provider_catalog()` 先頭に配置し（`"linux-ollama"` は互換維持で末尾）、起動/オフライン時吹き出し・設定パネル Tab 3・メニューの 1 クリック操作で PC メモリ容量に応じた安全な無料軽量モデル（`gemma4:e2b` / `gemma4:e4b` / `llama3.2:3b`）を自動取得・接続できること | `provider_catalog()[0].id == "ollama"`、RAM 別の `recommend_local_ollama_candidates` 全候補が `assert_allowed_model` を通過、模擬 `/api/pull` 進捗ストリーム完了まで `prepare_local_ollama_blocking` が成功し、オフライン応答が `__setup_local_ai__` 選択肢を含むこと | `behavior_spec` / `--smoke-test` Phase E7 |
+| `SPEC-AI-05` | FunctionGemma 二段階ルーティング（安全ツール事前実行＆特化モデル切替） | `config.json`・`/api/settings`・設定パネル Tab 3 から `router_model`（既定 OFF / `"auto"` / `"functiongemma:latest"` 等）と任意の `coding_model` / `reasoning_model` を設定・永続化でき、有効時は読み取り専用ツール（`SAFE_PRE_ROUTE_TOOLS`）のみ事前実行しつつ破壊的ツール・禁止モデルを遮断し、コーディング/推論モデルへ切替えた場合もさくらスクリプト形式で安全に応答すること | 禁止モデル指定が `validate_settings_patch` および解決関数で拒否され、`SAFE_PRE_ROUTE_TOOLS` に変更系ツールが含まれず、模擬 Ollama サーバーで A（事前ツール実行＋1ターン応答）と B（`route_model` による `coding_model` 切替＋さくらスクリプト補完）が両方 PASS すること | `behavior_spec` (`spec_ai_05_functiongemma_routing_and_guardrails`) |
+| `SPEC-AI-06` | 3段階エスカレーション（軽量 `e4b` ➔ 画像/推論 `31b` ➔ クラウド昇格・障害フォールバック） | `cloud_fallback`（既定 OFF / `gemini-paid` / `gemini-api` / `claude` / `chatgpt-free` / `openai-compatible`）を永続化・バリデーションでき、軽量メインモデル（`gemma4:e4b` 等）使用時に画像添付時は高精細ビジョンモデル（`gemma4:31b` 等）へ自動昇格し、ルーターが `"cloud"` 昇格を判定した場合またはローカル Ollama 障害時は設定済みクラウドプロバイダーへ自動フォールバックすること | 不正な `cloud_fallback` が `validate_settings_patch` で拒否され、模擬サーバーにて①画像添付時の `e4b` ➔ `31b` ビジョン昇格、②`route_model("cloud")` による Tier 3 クラウド昇格、③ローカル HTTP 500 時の自動クラウドフォールバックの全 3 経路が PASS すること | `behavior_spec` (`spec_ai_06_tiered_escalation_vision_and_cloud_fallback`) |
 | `SPEC-UI-01` | GPU/Live2D 基盤 | シェーダ定数レイアウトと 2D sRGB 前乗算合成・減衰バネ物理・足元固定表示が破綻しない | `ShaderParams` が `96 B`（WGSL 整合）であり、`Rgba8Unorm` 2D sRGB 空間で合成・前乗算出力し、スモーク検証で `neo_default` の足元・短文吹き出し・スクロール長文・メニューを正常描画すること | unit tests / `--smoke-test` |
 | `SPEC-UI-02` | クロス OS 構成 | macOS / Windows ではトレイ統合し、Linux は右クリックメニューで完結する | `tray_icon` 依存が `macos`/`windows` のみに限定され、Linux/Windows/macOS 全ターゲットでコンパイル可能であること | CI / `cargo test` |
 | `SPEC-UI-03` | リリース版数 | `Cargo.toml` と配布バンドル版数が一致し、文書過負荷更新を避ける | `Cargo.toml` の版数と `scripts/build_macos.sh` のバンドル版数が一致し、`scripts/build_macos.sh` が正常終了すること | `verify_behavior.py --mode full` |

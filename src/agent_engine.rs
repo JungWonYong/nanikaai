@@ -38,6 +38,357 @@ pub const FORBIDDEN_MODEL_PREFIXES: &[&str] = &[
     "qwen", "deepseek", "yi", "baichuan", "glm", "moonshot", "kimi", "minimax", "internlm",
     "stepfun", "doubao", "hunyuan",
 ];
+pub const ROUTER_PREFERRED_MODELS: &[&str] = &["functiongemma:latest", "functiongemma"];
+pub const CODING_PREFERRED_MODELS: &[&str] = &[
+    "devstral-small-2:latest",
+    "devstral-small-2",
+    "devstral:24b",
+    "devstral:latest",
+    "codestral:22b",
+    "codestral:latest",
+];
+pub const REASONING_PREFERRED_MODELS: &[&str] = &[
+    "gemma4:31b",
+    "gpt-oss:20b",
+    "gpt-oss:latest",
+    "nemotron-3-nano:latest",
+    "nemotron-3-nano",
+];
+pub const VISION_ESCALATION_MODELS: &[&str] = &[
+    "gemma4:31b",
+    "gemma4:26b",
+    "gemma4:12b",
+];
+pub const CLOUD_FALLBACK_PROVIDERS: &[&str] = &[
+    "",
+    "gemini-paid",
+    "gemini-api",
+    "claude",
+    "chatgpt-free",
+    "openai-compatible",
+];
+/// Strictly read-only builtin tools safe for 270M FunctionGemma pre-routing execution.
+/// Mutating tools (delete_memo, complete_memo, set_reminder, add_memo, memory_save, interest_save)
+/// and local sensitive-data tools (read_clipboard, read_text_file, list_files) are intentionally excluded.
+pub const SAFE_PRE_ROUTE_TOOLS: &[&str] = &[
+    "get_weather",
+    "get_system_status",
+    "list_memos",
+    "list_reminders",
+    "list_upcoming_events",
+    "memory_search",
+    "calculate",
+    "check_ollama_models",
+    "web_search",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteRole {
+    Chat,
+    Coding,
+    Reasoning,
+    Cloud,
+}
+
+pub fn is_valid_cloud_fallback_provider(raw: &str) -> bool {
+    let low = raw.trim().to_ascii_lowercase();
+    low.is_empty()
+        || low == "off"
+        || matches!(
+            low.as_str(),
+            "gemini-paid" | "gemini-api" | "claude" | "chatgpt-free" | "openai-compatible"
+        )
+}
+
+pub fn normalize_cloud_fallback_provider(raw: &str) -> String {
+    let low = raw.trim().to_ascii_lowercase();
+    if low.is_empty() || low == "off" {
+        return String::new();
+    }
+    if is_valid_cloud_fallback_provider(&low) {
+        low
+    } else {
+        String::new()
+    }
+}
+
+/// Escalate lightweight edge models (e.g., `gemma4:e4b`, `gemma4:e2b`, `llama3.2:3b`) to a larger
+/// local vision model (`gemma4:31b` / `26b` / `12b`) when an image attachment is present.
+pub fn resolve_vision_escalation_model(base_model: &str, installed: &[String]) -> Option<String> {
+    let low = base_model.trim().to_ascii_lowercase();
+    let is_edge_lightweight = low.contains(":e2b")
+        || low.contains(":e4b")
+        || low.ends_with(":3b")
+        || low.ends_with(":4b");
+    if !is_edge_lightweight {
+        return None;
+    }
+    for &pref in VISION_ESCALATION_MODELS {
+        if let Some(found) = match_installed_ollama_tag(pref, installed) {
+            if assert_allowed_model(&found).is_ok() {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+#[derive(Debug, Clone)]
+pub struct RouterDecision {
+    pub router_model: String,
+    pub target_role: RouteRole,
+    pub pre_routed_tool: Option<(String, Value)>,
+}
+
+pub fn is_router_utility_model(model: &str) -> bool {
+    let low = model.trim().to_ascii_lowercase();
+    low.starts_with("functiongemma")
+        || low.starts_with("embeddinggemma")
+        || low.contains("embed")
+}
+
+pub fn is_safe_pre_route_tool(name: &str) -> bool {
+    SAFE_PRE_ROUTE_TOOLS.contains(&name)
+}
+
+pub fn match_installed_ollama_tag(candidate: &str, installed: &[String]) -> Option<String> {
+    let trimmed = candidate.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(exact) = installed.iter().find(|m| m.as_str() == trimmed) {
+        return Some(exact.clone());
+    }
+    if !trimmed.contains(':') {
+        let with_latest = format!("{trimmed}:latest");
+        if let Some(m) = installed.iter().find(|m| m.as_str() == with_latest) {
+            return Some(m.clone());
+        }
+        let prefix = format!("{trimmed}:");
+        if let Some(m) = installed.iter().find(|m| m.starts_with(&prefix)) {
+            return Some(m.clone());
+        }
+    }
+    None
+}
+
+pub fn resolve_router_model_from_list(
+    configured: &str,
+    installed: &[String],
+) -> Result<Option<String>, String> {
+    let trimmed = configured.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("off") {
+        return Ok(None);
+    }
+    if trimmed.eq_ignore_ascii_case("auto") {
+        for &pref in ROUTER_PREFERRED_MODELS {
+            if let Some(found) = match_installed_ollama_tag(pref, installed) {
+                assert_allowed_model(&found)?;
+                return Ok(Some(found));
+            }
+        }
+        return Ok(None);
+    }
+    assert_allowed_model(trimmed)?;
+    if let Some(found) = match_installed_ollama_tag(trimmed, installed) {
+        return Ok(Some(found));
+    }
+    if installed.is_empty() {
+        return Ok(Some(trimmed.to_string()));
+    }
+    Ok(None)
+}
+
+pub fn resolve_role_model_from_list(
+    role: RouteRole,
+    cfg: &AgentConfig,
+    installed: &[String],
+) -> Result<Option<String>, String> {
+    let (configured, preferred) = match role {
+        RouteRole::Chat | RouteRole::Cloud => return Ok(None),
+        RouteRole::Coding => (cfg.coding_model.trim(), CODING_PREFERRED_MODELS),
+        RouteRole::Reasoning => (cfg.reasoning_model.trim(), REASONING_PREFERRED_MODELS),
+    };
+    if configured.is_empty() || configured.eq_ignore_ascii_case("off") {
+        return Ok(None);
+    }
+    if configured.eq_ignore_ascii_case("auto") {
+        for &pref in preferred {
+            if let Some(found) = match_installed_ollama_tag(pref, installed) {
+                assert_allowed_model(&found)?;
+                return Ok(Some(found));
+            }
+        }
+        return Ok(None);
+    }
+    assert_allowed_model(configured)?;
+    if let Some(found) = match_installed_ollama_tag(configured, installed) {
+        return Ok(Some(found));
+    }
+    if installed.is_empty() {
+        return Ok(Some(configured.to_string()));
+    }
+    Ok(None)
+}
+
+/// Conservative keyword heuristic used as fallback when FunctionGemma omits the meta `route_model`
+/// call and the user has explicitly configured `coding_model` or `reasoning_model`.
+pub fn classify_route_role_heuristic(prompt: &str) -> RouteRole {
+    classify_route_role_heuristic_with_cloud(prompt, false)
+}
+
+pub fn classify_route_role_heuristic_with_cloud(prompt: &str, allow_cloud: bool) -> RouteRole {
+    let low = prompt.to_ascii_lowercase();
+    if allow_cloud {
+        let cloud_kw = [
+            "클라우드로",
+            "제미니로",
+            "제미니에게",
+            "gemini로",
+            "심층 리서치",
+            "초정밀 분석",
+            "クラウドで",
+            "geminiに",
+            "geminiで",
+            "深層リサーチ",
+            "ask gemini",
+            "use cloud",
+            "deep research",
+        ];
+        if cloud_kw.iter().any(|k| low.contains(k)) {
+            return RouteRole::Cloud;
+        }
+    }
+    let coding_kw = [
+        "rust",
+        "cargo",
+        "python",
+        "typescript",
+        "javascript",
+        "sql",
+        "regex",
+        "refactor",
+        "debug",
+        "compile",
+        "pytest",
+        "코드",
+        "코딩",
+        "디버깅",
+        "리팩토링",
+        "버그 수정",
+        "함수 작성",
+        "스크립트",
+        "コード",
+        "デバッグ",
+        "リファクタ",
+        "バグ修正",
+        "実装して",
+        "関数を書",
+    ];
+    if coding_kw.iter().any(|k| low.contains(k)) {
+        return RouteRole::Coding;
+    }
+    let reasoning_kw = [
+        "architecture",
+        "trade-off",
+        "tradeoff",
+        "root cause",
+        "benchmark",
+        "아키텍처",
+        "트레이드오프",
+        "근본 원인",
+        "왜왜 분석",
+        "심층 분석",
+        "설계 비교",
+        "アーキテクチャ",
+        "トレードオフ",
+        "根本原因",
+        "なぜなぜ分析",
+        "設計比較",
+    ];
+    if reasoning_kw.iter().any(|k| low.contains(k)) {
+        return RouteRole::Reasoning;
+    }
+    RouteRole::Chat
+}
+
+pub fn build_functiongemma_router_tools(enable_tools: bool, enable_model_routing: bool) -> Value {
+    build_functiongemma_router_tools_ex(enable_tools, enable_model_routing, false)
+}
+
+pub fn build_functiongemma_router_tools_ex(
+    enable_tools: bool,
+    enable_model_routing: bool,
+    enable_cloud_routing: bool,
+) -> Value {
+    let mut list: Vec<Value> = Vec::new();
+    if enable_tools {
+        if let Some(arr) = tools_schema().as_array() {
+            for item in arr {
+                let name = item
+                    .get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("");
+                if is_safe_pre_route_tool(name) {
+                    list.push(item.clone());
+                }
+            }
+        }
+    }
+    if enable_model_routing || enable_cloud_routing {
+        let mut roles = Vec::new();
+        if enable_model_routing {
+            roles.push(json!("coding"));
+            roles.push(json!("reasoning"));
+        }
+        if enable_cloud_routing {
+            roles.push(json!("cloud"));
+        }
+        let desc = if enable_cloud_routing {
+            "Route the request to a higher-tier model ONLY when needed: 'coding' for programming/debugging, 'reasoning' for deep local analysis/math, or 'cloud' for frontier-level deep research or explicit cloud/Gemini requests. Do not call for normal chat."
+        } else {
+            "Route the request to a specialized local model ONLY when the user explicitly asks for programming/coding/debugging ('coding') or deep architectural/mathematical analysis ('reasoning'). Do not call for normal chat."
+        };
+        list.push(json!({
+            "type": "function",
+            "function": {
+                "name": "route_model",
+                "description": desc,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "role": {
+                            "type": "string",
+                            "enum": roles,
+                            "description": "Target specialized tier to select."
+                        }
+                    },
+                    "required": ["role"]
+                }
+            }
+        }));
+    }
+    Value::Array(list)
+}
+
+/// Ensure a reply from a specialized coding/reasoning model is safely wrapped in Sakura Script
+/// if the model omitted `\0` / `\e` dialogue markers.
+pub fn ensure_sakura_script_reply(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return "\\0\\s[1]……少し考えがまとまらなかったわ。\\e".to_string();
+    }
+    if trimmed.contains("\\0") || trimmed.contains("\\h") {
+        if trimmed.contains("\\e") {
+            trimmed.to_string()
+        } else {
+            format!("{trimmed}\\e")
+        }
+    } else {
+        format!("\\0\\s[0]{trimmed}\\e")
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageAttachment {
@@ -1116,11 +1467,137 @@ impl AgentEngine {
         };
         let chosen = models
             .iter()
-            .find(|m| !is_forbidden_model(m))
+            .find(|m| !is_forbidden_model(m) && !is_router_utility_model(m))
             .cloned()
             .unwrap_or_else(|| fallback.to_string());
         assert_allowed_model(&chosen)?;
         Ok(chosen)
+    }
+
+    fn run_functiongemma_router(
+        &self,
+        base_url: &str,
+        cfg: &AgentConfig,
+        prompt: &str,
+        installed: &[String],
+        allow_tools: bool,
+    ) -> Option<RouterDecision> {
+        let router_model = match resolve_router_model_from_list(&cfg.router_model, installed) {
+            Ok(Some(m)) => m,
+            _ => return None,
+        };
+        let enable_tools = cfg.enable_tools && allow_tools;
+        let enable_model_routing =
+            !cfg.coding_model.trim().is_empty() || !cfg.reasoning_model.trim().is_empty();
+        let enable_cloud_routing =
+            !normalize_cloud_fallback_provider(&cfg.cloud_fallback).is_empty();
+        if !enable_tools && !enable_model_routing && !enable_cloud_routing {
+            return None;
+        }
+        let tools = build_functiongemma_router_tools_ex(
+            enable_tools,
+            enable_model_routing,
+            enable_cloud_routing,
+        );
+        if tools.as_array().is_none_or(|a| a.is_empty()) {
+            return None;
+        }
+
+        let client = reqwest::blocking::Client::builder()
+            .connect_timeout(Duration::from_millis(1200))
+            .timeout(Duration::from_secs(6))
+            .build()
+            .ok()?;
+
+        let url = format!("{base_url}/api/chat");
+        let payload = json!({
+            "model": router_model,
+            "messages": [
+                {
+                    "role": "developer",
+                    "content": "You are a fast router model that can call the provided functions. Call a tool ONLY when the user's request clearly requires it; otherwise answer with no tool call."
+                },
+                {"role": "user", "content": prompt}
+            ],
+            "tools": tools,
+            "stream": false,
+            "keep_alive": "15m",
+            "options": {
+                "temperature": 0.0,
+                "num_predict": 192
+            }
+        });
+
+        let mut target_role = RouteRole::Chat;
+        let mut pre_routed_tool: Option<(String, Value)> = None;
+
+        if let Ok(resp) = client.post(&url).json(&payload).send() {
+            if resp.status().is_success() {
+                if let Ok(data) = resp.json::<Value>() {
+                    let tcalls = data
+                        .get("message")
+                        .and_then(|m| m.get("tool_calls"))
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    for tc in tcalls {
+                        let fn_obj = tc.get("function").unwrap_or(&Value::Null);
+                        let Some(tname) = fn_obj.get("name").and_then(|v| v.as_str()) else {
+                            continue;
+                        };
+                        let targs = match fn_obj.get("arguments") {
+                            Some(Value::String(s)) => {
+                                serde_json::from_str(s).unwrap_or_else(|_| json!({}))
+                            }
+                            Some(v @ Value::Object(_)) => v.clone(),
+                            _ => json!({}),
+                        };
+                        if tname == "route_model" && (enable_model_routing || enable_cloud_routing) {
+                            if let Some(role_str) = targs.get("role").and_then(|v| v.as_str()) {
+                                match role_str.trim().to_ascii_lowercase().as_str() {
+                                    "coding" if enable_model_routing => {
+                                        target_role = RouteRole::Coding
+                                    }
+                                    "reasoning" if enable_model_routing => {
+                                        target_role = RouteRole::Reasoning
+                                    }
+                                    "cloud" if enable_cloud_routing => {
+                                        target_role = RouteRole::Cloud
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        } else if enable_tools
+                            && pre_routed_tool.is_none()
+                            && is_safe_pre_route_tool(tname)
+                        {
+                            pre_routed_tool = Some((tname.to_string(), targs));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Conservative heuristic fallback for explicit coding/reasoning/cloud switching
+        if (enable_model_routing || enable_cloud_routing) && target_role == RouteRole::Chat {
+            let heur = classify_route_role_heuristic_with_cloud(prompt, enable_cloud_routing);
+            match heur {
+                RouteRole::Cloud if enable_cloud_routing => target_role = RouteRole::Cloud,
+                RouteRole::Coding | RouteRole::Reasoning if enable_model_routing => {
+                    target_role = heur;
+                }
+                _ => {}
+            }
+        }
+
+        if target_role == RouteRole::Chat && pre_routed_tool.is_none() {
+            return None;
+        }
+        Some(RouterDecision {
+            router_model,
+            target_role,
+            pre_routed_tool,
+        })
     }
 
     pub fn sanitize_reply_for_history(&self, raw_reply: &str) -> String {
@@ -1237,11 +1714,96 @@ impl AgentEngine {
         } else {
             cfg.endpoint_url.trim().trim_end_matches('/')
         };
-        let model = self.resolve_ollama_model(cfg, is_remote)?;
-        assert_allowed_model(&model)?;
+        let base_model = self.resolve_ollama_model(cfg, is_remote)?;
+        assert_allowed_model(&base_model)?;
         let url = format!("{base_url}/api/chat");
 
+        let use_tools = cfg.enable_tools && allow_tools;
+        let mut tools_used = Vec::new();
+        let mut model = base_model.clone();
+        let mut pre_routed_context: Option<String> = None;
+
+        // Tier 2 Vision auto-escalation: when an image is attached and primary model is lightweight (e.g. gemma4:e4b),
+        // automatically escalate to installed high-precision vision model (gemma4:31b / 26b / 12b).
+        if !images.is_empty() {
+            let installed = self.list_ollama_models(base_url, 800);
+            if let Some(vision_model) = resolve_vision_escalation_model(&base_model, &installed) {
+                self.emit_status(&format!("Vision Escalation ➔ {vision_model}"), true);
+                model = vision_model;
+            }
+        }
+
+        // Optional FunctionGemma tiered router:
+        // - Pattern A: safe read-only tool pre-route
+        // - Pattern B: Tier 2 local coding/reasoning switch OR Tier 3 cloud escalation
+        if !cfg.router_model.trim().is_empty() && images.is_empty() {
+            let installed = self.list_ollama_models(base_url, 800);
+            if let Some(decision) =
+                self.run_functiongemma_router(base_url, cfg, prompt, &installed, allow_tools)
+            {
+                if decision.target_role == RouteRole::Cloud {
+                    let cloud_prov = normalize_cloud_fallback_provider(&cfg.cloud_fallback);
+                    if !cloud_prov.is_empty() {
+                        self.emit_status(
+                            &format!("Router ({}) ➔ Cloud ({cloud_prov}) 昇格中...", decision.router_model),
+                            true,
+                        );
+                        if let Ok(cloud_rep) = self.dispatch_cloud_provider(
+                            &cloud_prov,
+                            cfg,
+                            prompt,
+                            images,
+                            save_hist,
+                        ) {
+                            return Ok(cloud_rep);
+                        }
+                        // Cloud escalation failed: fall back smoothly to Tier 2 reasoning model if installed
+                        if let Ok(Some(local_tier2)) =
+                            resolve_role_model_from_list(RouteRole::Reasoning, cfg, &installed)
+                        {
+                            if assert_allowed_model(&local_tier2).is_ok() {
+                                model = local_tier2;
+                            }
+                        }
+                    }
+                }
+                if let Some((tname, targs)) = decision.pre_routed_tool {
+                    if use_tools && is_safe_pre_route_tool(&tname) {
+                        tools_used.push(tname.clone());
+                        self.emit_status(
+                            &format!("Router ({}) ➔ {} 実行中...", decision.router_model, tname),
+                            true,
+                        );
+                        let out = wrap_untrusted_data(
+                            &format!("tool:{tname}"),
+                            &self.tool_runner.execute(&tname, &targs),
+                        );
+                        pre_routed_context = Some(format!(
+                            "[Pre-fetched tool result via router `{}` for `{}`]:\n{}\nUse this verified tool output directly to answer the user without calling `{}` again unless more data is needed.",
+                            decision.router_model, tname, out, tname
+                        ));
+                    }
+                }
+                if matches!(decision.target_role, RouteRole::Coding | RouteRole::Reasoning) {
+                    if let Ok(Some(override_model)) =
+                        resolve_role_model_from_list(decision.target_role, cfg, &installed)
+                    {
+                        if assert_allowed_model(&override_model).is_ok() {
+                            model = override_model;
+                        }
+                    }
+                }
+            }
+        }
+        let switched_specialized = model != base_model;
+
         let mut sys_msg = self.build_system_prompt(cfg);
+        if switched_specialized {
+            sys_msg.push_str(
+                "\n\n[ROUTED SPECIALIST MODEL NOTE]: You were selected for specialized coding/reasoning. \
+                 Give a clear, accurate technical answer wrapped in valid Sakura Script (\\0\\s[0]...\\e).",
+            );
+        }
         if prompt.chars().any(|c| ('\u{ac00}'..='\u{d7a3}').contains(&c)) && !prompt.starts_with('[') {
             sys_msg.push_str(
                 "\n\n[CRITICAL INSTRUCTION FOR THIS TURN]: The user spoke in Korean (한국어). \
@@ -1256,10 +1818,11 @@ impl AgentEngine {
         for item in self.active_history_tail(hist_limit) {
             messages.push(json!({"role": item.role, "content": item.content}));
         }
+        if let Some(ctx) = pre_routed_context {
+            messages.push(json!({"role": "system", "content": ctx}));
+        }
         messages.push(build_multimodal_user_message("ollama", prompt, images));
 
-        let use_tools = cfg.enable_tools && allow_tools;
-        let mut tools_used = Vec::new();
         let max_turns = if use_tools { 4 } else { 1 };
         let tag_label = if is_remote {
             format!("Remote GPU ({model})")
@@ -1352,6 +1915,8 @@ impl AgentEngine {
 
             let raw_reply = if content_str.trim().is_empty() {
                 "\\0\\s[1]……少し考えがまとまらなかったわ。\\e".to_string()
+            } else if switched_specialized {
+                ensure_sakura_script_reply(content_str)
             } else {
                 content_str.trim().to_string()
             };
@@ -1890,6 +2455,80 @@ impl AgentEngine {
         })
     }
 
+    fn dispatch_cloud_provider(
+        &self,
+        provider_id: &str,
+        base_cfg: &AgentConfig,
+        prompt: &str,
+        images: &[ImageAttachment],
+        save_hist: bool,
+    ) -> Result<AgentReply, String> {
+        let mut cloud_cfg = base_cfg.clone();
+        cloud_cfg.provider = provider_id.to_string();
+        if let Some(info) = provider_catalog().into_iter().find(|p| p.id == provider_id) {
+            if !info.default_model.is_empty() {
+                cloud_cfg.model = info.default_model;
+            }
+        }
+        match provider_id {
+            "gemini-paid" => {
+                let agy_bin = find_agy_bin()
+                    .ok_or_else(|| "Antigravity CLI (agy) が見つかりません。".to_string())?;
+                let model = if cloud_cfg.model.starts_with("gemini-") {
+                    cloud_cfg.model.clone()
+                } else {
+                    "gemini-3.8-flash-low".to_string()
+                };
+                assert_allowed_model(&model)?;
+                let m_clone = model.clone();
+                self.run_cli_react_loop(
+                    &cloud_cfg,
+                    prompt,
+                    save_hist,
+                    &model,
+                    &format!("Gemini ({model})"),
+                    move |fp| invoke_agy_cli(&agy_bin, fp, &m_clone),
+                )
+            }
+            "gemini-api" => self.run_gemini_api(&cloud_cfg, prompt, images, save_hist),
+            "chatgpt-free" => {
+                if let Some(codex_bin) = find_codex_bin() {
+                    let model = if !cloud_cfg.model.trim().is_empty() && cloud_cfg.model != "auto" {
+                        cloud_cfg.model.clone()
+                    } else {
+                        "auto".to_string()
+                    };
+                    if model != "auto" {
+                        assert_allowed_model(&model)?;
+                    }
+                    let m_clone = model.clone();
+                    self.run_cli_react_loop(
+                        &cloud_cfg,
+                        prompt,
+                        save_hist,
+                        "chatgpt-free",
+                        "ChatGPT",
+                        move |fp| invoke_codex_cli(&codex_bin, fp, &m_clone),
+                    )
+                } else if let Some(agy_bin) = find_agy_bin() {
+                    self.run_cli_react_loop(
+                        &cloud_cfg,
+                        prompt,
+                        save_hist,
+                        "gpt-oss-120b-medium",
+                        "ChatGPT",
+                        move |fp| invoke_agy_cli(&agy_bin, fp, "gpt-oss-120b-medium"),
+                    )
+                } else {
+                    Err("Codex CLI も Antigravity CLI も見つかりません。".to_string())
+                }
+            }
+            "claude" => self.run_claude(&cloud_cfg, prompt, images, save_hist),
+            "openai-compatible" => self.run_openai_compat(&cloud_cfg, prompt, images, save_hist),
+            other => Err(format!("Unsupported cloud fallback provider: {other}")),
+        }
+    }
+
     fn dispatch(&self, prompt: &str, save_hist: bool, allow_tools: bool) -> AgentReply {
         self.dispatch_with_images(prompt, &[], save_hist, allow_tools)
     }
@@ -1917,7 +2556,7 @@ impl AgentEngine {
             if !cfg.model.trim().is_empty() && cfg.model != "auto" {
                 assert_allowed_model(&cfg.model)?;
             }
-            match cfg.provider.as_str() {
+            let primary_res = match cfg.provider.as_str() {
                 "linux-ollama" | "remote-ollama" => {
                     self.run_ollama(&cfg, prompt, images, save_hist, true, allow_tools)
                 }
@@ -1966,7 +2605,24 @@ impl AgentEngine {
                 "claude" => self.run_claude(&cfg, prompt, images, save_hist),
                 "openai-compatible" => self.run_openai_compat(&cfg, prompt, images, save_hist),
                 _ => self.run_ollama(&cfg, prompt, images, save_hist, false, allow_tools),
+            };
+            // Tier 3 automatic cloud fallback when local Ollama fails/times out and user enabled `cloud_fallback`
+            let is_local_provider = matches!(
+                cfg.provider.as_str(),
+                "ollama" | "linux-ollama" | "remote-ollama"
+            );
+            if primary_res.is_err() && is_local_provider {
+                let cloud_prov = normalize_cloud_fallback_provider(&cfg.cloud_fallback);
+                if !cloud_prov.is_empty() {
+                    self.emit_status(&format!("Local AI 失敗 ➔ Cloud ({cloud_prov}) へフォールバック中..."), true);
+                    if let Ok(cloud_rep) =
+                        self.dispatch_cloud_provider(&cloud_prov, &cfg, prompt, images, save_hist)
+                    {
+                        return Ok(cloud_rep);
+                    }
+                }
             }
+            primary_res
         })();
 
         if let Ok(mut b) = self.busy.lock() {

@@ -12,6 +12,6 @@ NanikaAi exposes a local **HTTP JSON API** (`127.0.0.1:9821`) and a classic **SS
 | Switch skin | `POST http://127.0.0.1:9821/api/skin` | `{"shell": "neo_default", "balloon": "clean_default"}` |
 | Switch AI provider | `POST http://127.0.0.1:9821/api/provider` | `{"provider": "ollama", "model": "auto"}` |
 | Voices / TTS | `GET /api/voices` · `POST /api/voice` | `{"tts_engine": "auto", "kero_voice_archetype": "boy"}` |
-| Settings / Backlog | `GET/POST /api/settings` · `GET /api/backlog` | `{"ui_language": "auto", "quiet_mode": false, "pomodoro_action": "start"}` |
+| Settings / Backlog | `GET/POST /api/settings` · `GET /api/backlog` | `{"ui_language": "auto", "router_model": "auto", "coding_model": "auto", "reasoning_model": "auto", "cloud_fallback": "gemini-paid"}` |
 | List skins / providers | `GET /api/skins` · `GET /api/providers` | `curl -s http://127.0.0.1:9821/api/providers` |
 | Classic TCP `SSTP/1.4` | `127.0.0.1:9801` | `SEND SSTP/1.4` (`Charset: UTF-8`, `Script: ...`) |

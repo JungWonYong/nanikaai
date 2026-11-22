@@ -3096,3 +3096,562 @@ fn spec_acc_06_multi_calendar_travel_alerts_and_image_attachment() {
 
     let _ = fs::remove_dir_all(&tmp);
 }
+
+#[test]
+fn spec_ai_05_functiongemma_routing_and_guardrails() {
+    use nanikaai::agent_engine::{
+        build_functiongemma_router_tools, classify_route_role_heuristic,
+        ensure_sakura_script_reply, is_router_utility_model, is_safe_pre_route_tool,
+        resolve_role_model_from_list, resolve_router_model_from_list, AgentEngine, RouteRole,
+    };
+    use nanikaai::builtin_tools::BuiltinToolRunner;
+    use nanikaai::config_store::{ConfigPatch, ConfigStore};
+    use nanikaai::shell_parser::ShellManager;
+    use nanikaai::sstp_server::{validate_settings_patch, SettingsPatchReq};
+    use serde_json::json;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+
+    // 1. Strict read-only safety boundary for FunctionGemma pre-routing
+    assert!(is_safe_pre_route_tool("get_weather"));
+    assert!(is_safe_pre_route_tool("get_system_status"));
+    assert!(is_safe_pre_route_tool("calculate"));
+    assert!(is_safe_pre_route_tool("list_memos"));
+    for unsafe_tool in [
+        "delete_memo",
+        "complete_memo",
+        "set_reminder",
+        "add_memo",
+        "memory_save",
+        "interest_save",
+        "read_clipboard",
+        "read_text_file",
+    ] {
+        assert!(
+            !is_safe_pre_route_tool(unsafe_tool),
+            "mutating/sensitive tool '{unsafe_tool}' must never be in SAFE_PRE_ROUTE_TOOLS"
+        );
+    }
+    assert!(is_router_utility_model("functiongemma:latest"));
+    assert!(!is_router_utility_model("gemma4:31b"));
+
+    // 2. Config persistence + security rejection of forbidden Chinese models
+    let tmp = std::env::temp_dir().join(format!(
+        "nanikaai_spec_ai_05_{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+
+    let store = ConfigStore::new(Some(tmp.clone()));
+    let updated = store.update(ConfigPatch {
+        router_model: Some("auto".to_string()),
+        coding_model: Some("devstral-small-2:latest".to_string()),
+        reasoning_model: Some("gpt-oss:20b".to_string()),
+        ..Default::default()
+    });
+    assert_eq!(updated.router_model, "auto");
+    assert_eq!(updated.coding_model, "devstral-small-2:latest");
+    assert_eq!(updated.reasoning_model, "gpt-oss:20b");
+
+    let reloaded = ConfigStore::new(Some(tmp.clone())).get();
+    assert_eq!(reloaded.router_model, "auto");
+    assert_eq!(reloaded.coding_model, "devstral-small-2:latest");
+    assert_eq!(reloaded.reasoning_model, "gpt-oss:20b");
+
+    let bad_req = SettingsPatchReq {
+        router_model: Some("qwen3:8b".to_string()),
+        ..Default::default()
+    };
+    assert!(
+        validate_settings_patch(&bad_req).is_err(),
+        "forbidden model in router_model must be rejected"
+    );
+    let bad_coding = SettingsPatchReq {
+        coding_model: Some("deepseek-coder:6.7b".to_string()),
+        ..Default::default()
+    };
+    assert!(
+        validate_settings_patch(&bad_coding).is_err(),
+        "forbidden model in coding_model must be rejected"
+    );
+
+    // 3. Resolution helpers + heuristics + Sakura Script guard
+    let installed = vec![
+        "functiongemma:latest".to_string(),
+        "gemma4:31b".to_string(),
+        "devstral-small-2:latest".to_string(),
+        "gpt-oss:20b".to_string(),
+    ];
+    assert_eq!(
+        resolve_router_model_from_list("auto", &installed).unwrap(),
+        Some("functiongemma:latest".to_string())
+    );
+    assert_eq!(resolve_router_model_from_list("", &installed).unwrap(), None);
+    assert!(resolve_router_model_from_list("qwen3:8b", &installed).is_err());
+
+    assert_eq!(
+        resolve_role_model_from_list(RouteRole::Coding, &reloaded, &installed).unwrap(),
+        Some("devstral-small-2:latest".to_string())
+    );
+    assert_eq!(
+        resolve_role_model_from_list(RouteRole::Reasoning, &reloaded, &installed).unwrap(),
+        Some("gpt-oss:20b".to_string())
+    );
+    assert_eq!(
+        classify_route_role_heuristic("Rust 함수 버그 디버깅해줘"),
+        RouteRole::Coding
+    );
+    assert_eq!(
+        classify_route_role_heuristic("아키텍처 트레이드오프 심층 분석해줘"),
+        RouteRole::Reasoning
+    );
+    assert_eq!(classify_route_role_heuristic("오늘 기분 어때?"), RouteRole::Chat);
+
+    let wrapped = ensure_sakura_script_reply("fn fib(n: u32) -> u32 { n }");
+    assert!(wrapped.starts_with("\\0\\s[0]") && wrapped.ends_with("\\e"));
+
+    let router_tools = build_functiongemma_router_tools(true, true);
+    let tool_names: Vec<&str> = router_tools
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v["function"]["name"].as_str())
+        .collect();
+    assert!(tool_names.contains(&"calculate"));
+    assert!(tool_names.contains(&"route_model"));
+    assert!(!tool_names.contains(&"delete_memo"));
+
+    // 4. End-to-end mock Ollama HTTP server verifying BOTH Pattern A (tool pre-route) and Pattern B (coding model switch)
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock ollama");
+    let addr = listener.local_addr().unwrap();
+    let seen_models: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let seen_clone = Arc::clone(&seen_models);
+
+    let server_handle = thread::spawn(move || {
+        // Expect 6 HTTP requests across 2 chat calls:
+        // Call 1 (Pattern A): GET /api/tags -> POST /api/chat (functiongemma -> calculate) -> POST /api/chat (gemma4:31b)
+        // Call 2 (Pattern B): GET /api/tags -> POST /api/chat (functiongemma -> route_model coding) -> POST /api/chat (devstral-small-2:latest)
+        for _ in 0..6 {
+            let Ok((mut stream, _)) = listener.accept() else {
+                break;
+            };
+            let mut buf = Vec::new();
+            let mut tmp_b = [0u8; 4096];
+            let mut header_end = None;
+            let mut content_len = 0usize;
+            while let Ok(n) = stream.read(&mut tmp_b) {
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp_b[..n]);
+                if header_end.is_none() {
+                    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        header_end = Some(pos + 4);
+                        let hdr = String::from_utf8_lossy(&buf[..pos]);
+                        for line in hdr.lines() {
+                            if let Some((k, v)) = line.split_once(':') {
+                                if k.trim().eq_ignore_ascii_case("content-length") {
+                                    content_len = v.trim().parse().unwrap_or(0);
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(he) = header_end {
+                    if buf.len() >= he + content_len {
+                        break;
+                    }
+                }
+            }
+            let req_text = String::from_utf8_lossy(&buf);
+            let first_line = req_text.lines().next().unwrap_or("");
+            let body_json: Value = header_end
+                .and_then(|he| serde_json::from_slice(&buf[he..]).ok())
+                .unwrap_or_else(|| json!({}));
+
+            let resp_body = if first_line.starts_with("GET /api/tags") {
+                json!({
+                    "models": [
+                        {"name": "functiongemma:latest"},
+                        {"name": "gemma4:31b"},
+                        {"name": "devstral-small-2:latest"},
+                        {"name": "gpt-oss:20b"}
+                    ]
+                })
+                .to_string()
+            } else {
+                let model = body_json["model"].as_str().unwrap_or("").to_string();
+                seen_clone.lock().unwrap().push(model.clone());
+                let user_msg = body_json["messages"]
+                    .as_array()
+                    .and_then(|a| a.last())
+                    .and_then(|m| m["content"].as_str())
+                    .unwrap_or("");
+                if model.starts_with("functiongemma") {
+                    if user_msg.contains("7*8") {
+                        json!({
+                            "message": {
+                                "role": "assistant",
+                                "content": "",
+                                "tool_calls": [{
+                                    "function": {"name": "calculate", "arguments": {"expression": "7*8"}}
+                                }]
+                            }
+                        })
+                        .to_string()
+                    } else {
+                        json!({
+                            "message": {
+                                "role": "assistant",
+                                "content": "",
+                                "tool_calls": [{
+                                    "function": {"name": "route_model", "arguments": {"role": "coding"}}
+                                }]
+                            }
+                        })
+                        .to_string()
+                    }
+                } else if model.starts_with("devstral-small-2") {
+                    json!({
+                        "message": {
+                            "role": "assistant",
+                            "content": "fn ok() -> i32 { 42 }"
+                        }
+                    })
+                    .to_string()
+                } else {
+                    json!({
+                        "message": {
+                            "role": "assistant",
+                            "content": "\\0\\s[5]7*8은 56이야!\\e"
+                        }
+                    })
+                    .to_string()
+                }
+            };
+
+            let http_resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                resp_body.len(),
+                resp_body
+            );
+            let _ = stream.write_all(http_resp.as_bytes());
+        }
+    });
+
+    store.update(ConfigPatch {
+        provider: Some("ollama".to_string()),
+        endpoint_url: Some(format!("http://{addr}")),
+        model: Some("gemma4:31b".to_string()),
+        router_model: Some("auto".to_string()),
+        coding_model: Some("auto".to_string()),
+        reasoning_model: Some("auto".to_string()),
+        enable_tools: Some(true),
+        ..Default::default()
+    });
+    let runner = BuiltinToolRunner::new(store.clone(), Some(tmp.clone()));
+    let manifest = ShellManager::new(vec![
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/shells"),
+        tmp.join("user_shells"),
+    ])
+    .load_shell("neo_default")
+    .expect("load neo_default");
+    let engine = AgentEngine::new(store.clone(), runner, Arc::new(Mutex::new(manifest)), None);
+
+    // Pattern A test: FunctionGemma pre-executes `calculate` before primary `gemma4:31b`
+    let reply_a = engine.handle_user_message("7*8 계산해줘");
+    assert_eq!(reply_a.used_model, "gemma4:31b");
+    assert!(
+        reply_a.tools_used.iter().any(|t| t == "calculate"),
+        "expected calculate to be pre-routed via functiongemma, got {:?}",
+        reply_a.tools_used
+    );
+    assert!(reply_a.raw_reply.contains("56"));
+
+    // Pattern B test: FunctionGemma routes coding query to `devstral-small-2:latest` + Sakura Script guard
+    let reply_b = engine.handle_user_message("Rust 코드 예제 짜줘");
+    assert_eq!(reply_b.used_model, "devstral-small-2:latest");
+    assert!(reply_b.raw_reply.starts_with("\\0\\s[0]"));
+    assert!(reply_b.raw_reply.ends_with("\\e"));
+    assert!(reply_b.raw_reply.contains("fn ok()"));
+
+    let _ = server_handle.join();
+    let models_called = seen_models.lock().unwrap().clone();
+    assert!(
+        models_called.iter().any(|m| m.starts_with("functiongemma")),
+        "router model must be called"
+    );
+    assert!(
+        models_called.iter().any(|m| m == "devstral-small-2:latest"),
+        "coding model must be invoked on routed coding request"
+    );
+
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn spec_ai_06_tiered_escalation_vision_and_cloud_fallback() {
+    use nanikaai::agent_engine::{
+        build_functiongemma_router_tools_ex, classify_route_role_heuristic_with_cloud,
+        is_valid_cloud_fallback_provider, normalize_cloud_fallback_provider,
+        resolve_vision_escalation_model, AgentEngine, ImageAttachment, RouteRole,
+    };
+    use nanikaai::builtin_tools::BuiltinToolRunner;
+    use nanikaai::config_store::{ConfigPatch, ConfigStore};
+    use nanikaai::shell_parser::ShellManager;
+    use nanikaai::sstp_server::{validate_settings_patch, SettingsPatchReq};
+    use serde_json::json;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+
+    // 1. Validation & normalization for cloud_fallback
+    assert!(is_valid_cloud_fallback_provider(""));
+    assert!(is_valid_cloud_fallback_provider("off"));
+    assert!(is_valid_cloud_fallback_provider("gemini-paid"));
+    assert!(is_valid_cloud_fallback_provider("gemini-api"));
+    assert!(is_valid_cloud_fallback_provider("claude"));
+    assert!(!is_valid_cloud_fallback_provider("unknown-cloud"));
+    assert_eq!(normalize_cloud_fallback_provider("OFF"), "");
+    assert_eq!(normalize_cloud_fallback_provider("Gemini-Paid"), "gemini-paid");
+
+    let invalid_req = SettingsPatchReq {
+        cloud_fallback: Some("rogue-provider".to_string()),
+        ..Default::default()
+    };
+    assert!(validate_settings_patch(&invalid_req).is_err());
+
+    // 2. Vision escalation helper & cloud routing schema/heuristics
+    let installed = vec![
+        "functiongemma:latest".to_string(),
+        "gemma4:e4b".to_string(),
+        "gemma4:31b".to_string(),
+    ];
+    assert_eq!(
+        resolve_vision_escalation_model("gemma4:e4b", &installed),
+        Some("gemma4:31b".to_string())
+    );
+    assert_eq!(
+        resolve_vision_escalation_model("gemma4:31b", &installed),
+        None
+    );
+
+    assert_eq!(
+        classify_route_role_heuristic_with_cloud("제미니로 심층 리서치해줘", true),
+        RouteRole::Cloud
+    );
+    assert_ne!(
+        classify_route_role_heuristic_with_cloud("제미니로 심층 리서치해줘", false),
+        RouteRole::Cloud
+    );
+    let tools_cloud = build_functiongemma_router_tools_ex(true, true, true);
+    let route_tool = tools_cloud
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["function"]["name"] == "route_model")
+        .expect("route_model tool present");
+    let role_enum = route_tool["function"]["parameters"]["properties"]["role"]["enum"]
+        .as_array()
+        .unwrap();
+    assert!(role_enum.iter().any(|v| v == "cloud"));
+
+    // 3. Mock server exercising:
+    //    (a) Image attachment on gemma4:e4b -> auto-escalates to gemma4:31b (Tier 2 Vision)
+    //    (b) Router returns route_model(role="cloud") -> escalates to Tier 3 cloud endpoint (/v1/chat/completions)
+    //    (c) Local Ollama returns HTTP 500 -> automatic Tier 3 cloud fallback
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock tiered server");
+    let addr = listener.local_addr().unwrap();
+    let recorded_paths: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+    let rec_clone = Arc::clone(&recorded_paths);
+
+    let server_handle = thread::spawn(move || {
+        // Call (a) Vision: GET /api/tags, POST /api/chat (gemma4:31b) = 2 reqs
+        // Call (b) Cloud Escalation: GET /api/tags, POST /api/chat (functiongemma->cloud), POST /v1/chat/completions = 3 reqs
+        // Call (c) Local 500 Fallback: GET /api/tags, POST /api/chat (functiongemma->no tool), POST /api/chat (e4b->500), POST /v1/chat/completions = 4 reqs
+        for _ in 0..9 {
+            let Ok((mut stream, _)) = listener.accept() else {
+                break;
+            };
+            let mut buf = Vec::new();
+            let mut tmp_b = [0u8; 4096];
+            let mut header_end = None;
+            let mut content_len = 0usize;
+            while let Ok(n) = stream.read(&mut tmp_b) {
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&tmp_b[..n]);
+                if header_end.is_none() {
+                    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        header_end = Some(pos + 4);
+                        let hdr = String::from_utf8_lossy(&buf[..pos]);
+                        for line in hdr.lines() {
+                            if let Some((k, v)) = line.split_once(':') {
+                                if k.trim().eq_ignore_ascii_case("content-length") {
+                                    content_len = v.trim().parse().unwrap_or(0);
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(he) = header_end {
+                    if buf.len() >= he + content_len {
+                        break;
+                    }
+                }
+            }
+            let req_text = String::from_utf8_lossy(&buf);
+            let first_line = req_text.lines().next().unwrap_or("").to_string();
+            let path = first_line.split_whitespace().nth(1).unwrap_or("").to_string();
+            let body_json: Value = header_end
+                .and_then(|he| serde_json::from_slice(&buf[he..]).ok())
+                .unwrap_or_else(|| json!({}));
+            let model = body_json["model"].as_str().unwrap_or("").to_string();
+            rec_clone.lock().unwrap().push((path.clone(), model.clone()));
+
+            let (status_line, resp_body) = if path == "/api/tags" {
+                (
+                    "HTTP/1.1 200 OK",
+                    json!({
+                        "models": [
+                            {"name": "functiongemma:latest"},
+                            {"name": "gemma4:e4b"},
+                            {"name": "gemma4:31b"}
+                        ]
+                    })
+                    .to_string(),
+                )
+            } else if path.ends_with("/chat/completions") {
+                (
+                    "HTTP/1.1 200 OK",
+                    json!({
+                        "choices": [{
+                            "message": {
+                                "role": "assistant",
+                                "content": "\\0\\s[5]클라우드 Tier 3에서 응답했어요!\\e"
+                            }
+                        }]
+                    })
+                    .to_string(),
+                )
+            } else if model.starts_with("functiongemma") {
+                let user_msg = body_json["messages"]
+                    .as_array()
+                    .and_then(|a| a.last())
+                    .and_then(|m| m["content"].as_str())
+                    .unwrap_or("");
+                if user_msg.contains("심층 리서치") {
+                    (
+                        "HTTP/1.1 200 OK",
+                        json!({
+                            "message": {
+                                "role": "assistant",
+                                "content": "",
+                                "tool_calls": [{
+                                    "function": {"name": "route_model", "arguments": {"role": "cloud"}}
+                                }]
+                            }
+                        })
+                        .to_string(),
+                    )
+                } else {
+                    (
+                        "HTTP/1.1 200 OK",
+                        json!({
+                            "message": {
+                                "role": "assistant",
+                                "content": ""
+                            }
+                        })
+                        .to_string(),
+                    )
+                }
+            } else if model == "gemma4:31b" {
+                (
+                    "HTTP/1.1 200 OK",
+                    json!({
+                        "message": {
+                            "role": "assistant",
+                            "content": "\\0\\s[5]31B 비전 모델로 이미지를 정밀 분석했어요!\\e"
+                        }
+                    })
+                    .to_string(),
+                )
+            } else {
+                // Force local e4b HTTP 500 on call (c) to test automatic cloud fallback
+                ("HTTP/1.1 500 Internal Server Error", "{\"error\":\"boom\"}".to_string())
+            };
+
+            let http_resp = format!(
+                "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                resp_body.len(),
+                resp_body
+            );
+            let _ = stream.write_all(http_resp.as_bytes());
+        }
+    });
+
+    let tmp = std::env::temp_dir().join(format!("nanikaai_spec_ai_06_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+
+    let store = ConfigStore::new(Some(tmp.clone()));
+    store.update(ConfigPatch {
+        provider: Some("ollama".to_string()),
+        endpoint_url: Some(format!("http://{addr}")),
+        model: Some("gemma4:e4b".to_string()),
+        router_model: Some("auto".to_string()),
+        reasoning_model: Some("auto".to_string()),
+        cloud_fallback: Some("openai-compatible".to_string()),
+        enable_tools: Some(true),
+        ..Default::default()
+    });
+    assert_eq!(store.get().cloud_fallback, "openai-compatible");
+
+    let runner = BuiltinToolRunner::new(store.clone(), Some(tmp.clone()));
+    let manifest = ShellManager::new(vec![
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/shells"),
+        tmp.join("user_shells"),
+    ])
+    .load_shell("neo_default")
+    .expect("load neo_default");
+    let engine = AgentEngine::new(store.clone(), runner, Arc::new(Mutex::new(manifest)), None);
+
+    // (a) Vision escalation: e4b + image -> gemma4:31b
+    let img = ImageAttachment {
+        file_name: "sample.jpg".to_string(),
+        mime_type: "image/jpeg".to_string(),
+        base64_data: "AAAA".to_string(),
+        width: 64,
+        height: 64,
+    };
+    let rep_vision = engine.handle_user_message_with_images("이 그림 검수해줘", &[img]);
+    assert_eq!(rep_vision.used_model, "gemma4:31b");
+    assert!(rep_vision.raw_reply.contains("31B"));
+
+    // (b) Explicit Tier 3 Cloud Escalation via router
+    let rep_cloud = engine.handle_user_message("심층 리서치 부탁해");
+    assert!(!rep_cloud.offline_fallback);
+    assert!(rep_cloud.raw_reply.contains("Tier 3"));
+
+    // (c) Local Ollama HTTP 500 -> automatic Tier 3 cloud fallback
+    let rep_fallback = engine.handle_user_message("안녕");
+    assert!(!rep_fallback.offline_fallback);
+    assert!(rep_fallback.raw_reply.contains("Tier 3"));
+
+    let _ = server_handle.join();
+    let rec = recorded_paths.lock().unwrap().clone();
+    assert!(rec.iter().any(|(p, m)| p == "/api/chat" && m == "gemma4:31b"));
+    assert_eq!(
+        rec.iter().filter(|(p, _)| p.ends_with("/chat/completions")).count(),
+        2,
+        "both Tier 3 escalation and local-error fallback must reach cloud endpoint"
+    );
+
+    let _ = fs::remove_dir_all(&tmp);
+}
