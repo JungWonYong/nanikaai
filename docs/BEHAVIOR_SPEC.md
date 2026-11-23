@@ -1,7 +1,7 @@
 # 何か藍 (`NanikaAi`) — 現行動作仕様および自動検証基準 (`BEHAVIOR_SPEC`)
 
-- **Document Version**: `v1.18.0`
-- **Target Software**: `nanikaai` `v0.1.11+`
+- **Document Version**: `v1.18.1`
+- **Target Software**: `nanikaai` `v0.1.12+`
 - **Purpose**: テスト実行前の機密・個人情報・AI指示配置境界検査（Phase 0）、改修後の自動動作確認テスト（`cargo test` / `--smoke-test` / 静的監査）における合否基準、変更内容に応じた検証ティアおよび結果報告様式を定義する。
 
 ---
