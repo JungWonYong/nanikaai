@@ -68,6 +68,30 @@ pub trait ServerBackend: Send + Sync + 'static {
     fn on_calendar_action(&self, _req: CalendarConfigReq) -> Result<Value, String> {
         Err("calendar not supported".to_string())
     }
+    fn get_narration(&self) -> Value {
+        serde_json::to_value(crate::narrator::current_narration_status())
+            .unwrap_or_else(|_| json!({ "active": false }))
+    }
+    fn on_narrate_action(&self, _req: NarrateReq) -> Result<Value, String> {
+        Err("narration not supported".to_string())
+    }
+    fn on_kindle_narrate_action(&self, _req: KindleNarrateReq) -> Result<Value, String> {
+        Err("kindle narration not supported".to_string())
+    }
+    fn get_diary(&self) -> Value {
+        let d = crate::task_diary::current_diary();
+        json!({
+            "title": d.title,
+            "updated_at": d.updated_at,
+            "progress": d.progress_bar(),
+            "completed": d.completed_count(),
+            "total": d.tasks.len(),
+            "tasks": d.tasks,
+        })
+    }
+    fn on_diary_action(&self, _req: DiaryActionReq) -> Result<Value, String> {
+        Err("diary not supported".to_string())
+    }
 }
 
 #[derive(Clone)]
@@ -75,6 +99,66 @@ struct AppState {
     backend: Arc<dyn ServerBackend>,
     http_port: u16,
     tcp_port: u16,
+}
+
+#[derive(Deserialize, Default, Clone, Debug)]
+pub struct NarrateReq {
+    #[serde(default)]
+    pub action: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub preset: Option<String>,
+    #[serde(default)]
+    pub episode: Option<String>,
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+#[derive(Deserialize, Default, Clone, Debug)]
+pub struct KindleNarrateReq {
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub direction: Option<String>,
+    #[serde(default)]
+    pub max_pages: Option<usize>,
+    #[serde(default)]
+    pub page_turn_delay_ms: Option<u64>,
+    #[serde(default)]
+    pub preset: Option<String>,
+    #[serde(default)]
+    pub tts_engine: Option<String>,
+    #[serde(default)]
+    pub speaker_id: Option<i64>,
+    #[serde(default)]
+    pub open_browser: Option<bool>,
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+#[derive(Deserialize, Default, Clone, Debug)]
+pub struct DiaryActionReq {
+    #[serde(default)]
+    pub action: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub tasks: Option<Vec<String>>,
+    #[serde(default)]
+    pub task_index: Option<usize>,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub result: Option<String>,
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -121,6 +205,12 @@ pub struct VoiceConfigReq {
     pub uninstall_aivm_uuid: Option<String>,
     pub voice_speed: Option<f32>,
     pub voice_intonation: Option<f32>,
+    #[serde(default)]
+    pub kindle_tts_engine: Option<String>,
+    #[serde(default)]
+    pub kindle_voice_speaker: Option<i64>,
+    #[serde(default)]
+    pub clear_kindle_voice_speaker: bool,
 }
 
 /// JSON payload for quick sticky memo actions (`add` / `toggle` / `delete` / `clear_done`).
@@ -600,6 +690,121 @@ async fn handle_get_calendar(State(st): State<AppState>) -> Json<Value> {
     Json(obj)
 }
 
+async fn handle_get_narrate(State(st): State<AppState>) -> Json<Value> {
+    let b = st.backend.clone();
+    let mut obj = tokio::task::spawn_blocking(move || b.get_narration())
+        .await
+        .unwrap_or_else(|_| json!({ "active": false }));
+    if let Some(map) = obj.as_object_mut() {
+        map.insert("ok".to_string(), json!(true));
+    }
+    Json(obj)
+}
+
+async fn handle_post_narrate(
+    State(st): State<AppState>,
+    Json(req): Json<NarrateReq>,
+) -> Response {
+    let b = st.backend.clone();
+    let res = tokio::task::spawn_blocking(move || b.on_narrate_action(req))
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+    match res {
+        Ok(mut obj) => {
+            if let Some(map) = obj.as_object_mut() {
+                map.insert("ok".to_string(), json!(true));
+            }
+            (StatusCode::OK, Json(obj)).into_response()
+        }
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"ok": false, "error": err})),
+        )
+            .into_response(),
+    }
+}
+
+async fn handle_post_narrate_kindle(
+    State(st): State<AppState>,
+    Json(req): Json<KindleNarrateReq>,
+) -> Response {
+    let b = st.backend.clone();
+    let res = tokio::task::spawn_blocking(move || b.on_kindle_narrate_action(req))
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+    match res {
+        Ok(mut obj) => {
+            if let Some(map) = obj.as_object_mut() {
+                map.insert("ok".to_string(), json!(true));
+            }
+            (StatusCode::OK, Json(obj)).into_response()
+        }
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"ok": false, "error": err})),
+        )
+            .into_response(),
+    }
+}
+
+async fn handle_get_diary(State(st): State<AppState>) -> Json<Value> {
+    let b = st.backend.clone();
+    let mut obj = tokio::task::spawn_blocking(move || b.get_diary())
+        .await
+        .unwrap_or_else(|_| json!({ "tasks": [] }));
+    if let Some(map) = obj.as_object_mut() {
+        map.insert("ok".to_string(), json!(true));
+    }
+    Json(obj)
+}
+
+async fn handle_post_diary(
+    State(st): State<AppState>,
+    Json(req): Json<DiaryActionReq>,
+) -> Response {
+    let b = st.backend.clone();
+    let res = tokio::task::spawn_blocking(move || b.on_diary_action(req))
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+    match res {
+        Ok(mut obj) => {
+            if let Some(map) = obj.as_object_mut() {
+                map.insert("ok".to_string(), json!(true));
+            }
+            (StatusCode::OK, Json(obj)).into_response()
+        }
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"ok": false, "error": err})),
+        )
+            .into_response(),
+    }
+}
+
+async fn handle_post_narrate_stop(State(st): State<AppState>) -> Response {
+    let b = st.backend.clone();
+    let req = NarrateReq {
+        action: Some("stop".to_string()),
+        ..Default::default()
+    };
+    let res = tokio::task::spawn_blocking(move || b.on_narrate_action(req))
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+    match res {
+        Ok(mut obj) => {
+            if let Some(map) = obj.as_object_mut() {
+                map.insert("ok".to_string(), json!(true));
+            }
+            (StatusCode::OK, Json(obj)).into_response()
+        }
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"ok": false, "error": err})),
+        )
+            .into_response(),
+    }
+}
+
 async fn handle_post_calendar(
     State(st): State<AppState>,
     Json(req): Json<CalendarConfigReq>,
@@ -761,6 +966,10 @@ pub fn start_dual_server(
                     .route("/api/backlog", get(handle_get_backlog))
                     .route("/api/memos", get(handle_get_memos).post(handle_post_memos))
                     .route("/api/calendar", get(handle_get_calendar).post(handle_post_calendar))
+                    .route("/api/narrate", get(handle_get_narrate).post(handle_post_narrate))
+                    .route("/api/narrate/kindle", post(handle_post_narrate_kindle))
+                    .route("/api/narrate/stop", post(handle_post_narrate_stop))
+                    .route("/api/diary", get(handle_get_diary).post(handle_post_diary))
                     .route("/api/settings", get(handle_get_settings).post(handle_post_settings))
                     .route("/api/speak", post(handle_speak))
                     .route("/api/chat", post(handle_chat))

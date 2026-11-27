@@ -140,6 +140,8 @@ pub enum SettingsAction {
     CycleSakuraVoice(i32),
     CycleKeroVoice(i32),
     CycleKeroArchetype(i32),
+    CycleKindleTtsEngine(i32),
+    CycleKindleVoice(i32),
     SetVoiceSpeed(f32),
     SetVoiceIntonation(f32),
     PreviewVoice(u8),
@@ -174,6 +176,8 @@ pub struct SettingsPanelData {
     pub sakura_voice_label: String,
     pub kero_voice_label: String,
     pub kero_archetype_label: String,
+    pub kindle_tts_engine_label: String,
+    pub kindle_voice_label: String,
     pub recommended_local_ai_hint: String,
     pub local_ai_setup_busy: bool,
     pub interests_summary: String,
@@ -1199,6 +1203,32 @@ impl SettingsPanelModel {
                     SettingsAction::CycleKeroArchetype(1),
                     &mut viewport_hits,
                 );
+                cur_y = self.draw_cycle_row(
+                    &mut vp_bmp,
+                    text_renderer,
+                    scale,
+                    cur_y,
+                    right_edge,
+                    "cyc_kindle_tts_engine",
+                    s.lbl_kindle_tts_engine,
+                    &data.kindle_tts_engine_label,
+                    SettingsAction::CycleKindleTtsEngine(-1),
+                    SettingsAction::CycleKindleTtsEngine(1),
+                    &mut viewport_hits,
+                );
+                cur_y = self.draw_cycle_row(
+                    &mut vp_bmp,
+                    text_renderer,
+                    scale,
+                    cur_y,
+                    right_edge,
+                    "cyc_kindle_voice",
+                    s.lbl_kindle_voice,
+                    &data.kindle_voice_label,
+                    SettingsAction::CycleKindleVoice(-1),
+                    SettingsAction::CycleKindleVoice(1),
+                    &mut viewport_hits,
+                );
                 let spd_txt = format!("{:.2}x", data.cfg.voice_speed);
                 cur_y = self.draw_slider_row(
                     &mut vp_bmp,
@@ -2107,6 +2137,8 @@ impl SettingsPanelModel {
                 "cyc_sakura_voice" => "cyc_sakura_voice_prev",
                 "cyc_kero_voice" => "cyc_kero_voice_prev",
                 "cyc_kero_arch" => "cyc_kero_arch_prev",
+                "cyc_kindle_tts_engine" => "cyc_kindle_tts_engine_prev",
+                "cyc_kindle_voice" => "cyc_kindle_voice_prev",
                 "cyc_provider" => "cyc_provider_prev",
                 _ => "cyc_autotalk_prev",
             };
@@ -2120,6 +2152,8 @@ impl SettingsPanelModel {
                 "cyc_sakura_voice" => "cyc_sakura_voice_next",
                 "cyc_kero_voice" => "cyc_kero_voice_next",
                 "cyc_kero_arch" => "cyc_kero_arch_next",
+                "cyc_kindle_tts_engine" => "cyc_kindle_tts_engine_next",
+                "cyc_kindle_voice" => "cyc_kindle_voice_next",
                 "cyc_provider" => "cyc_provider_next",
                 _ => "cyc_autotalk_next",
             };

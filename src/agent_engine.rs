@@ -432,6 +432,8 @@ pub fn ensure_sakura_script_reply(raw: &str) -> String {
 }
 
 /// Build an immediate in-character mascot reaction shown while escalating to a heavier Tier 2/3 model.
+/// Selects deterministically among 3 natural Sakura & Unyu variants per (language, role) so
+/// consecutive escalations feel warm and non-repetitive without introducing flaky randomness.
 pub fn build_escalation_reaction_script(
     role: RouteRole,
     is_vision: bool,
@@ -449,27 +451,201 @@ pub fn build_escalation_reaction_script(
         crate::i18n::resolve_ui_lang(ui_lang)
     };
 
+    let variant = prompt
+        .bytes()
+        .fold(0usize, |acc, b| acc.wrapping_mul(31).wrapping_add(b as usize))
+        % 3;
+
     if is_vision {
-        return match lang {
-            crate::i18n::UiLang::Ko => "\\0\\s[3]그림을 더 꼼꼼히 살펴볼게요! 고해상도 모델로 확인 중이니 잠시만 기다려 주세요…\\1\\s[10]디테일까지 확실하게 보자고!\\e".to_string(),
-            crate::i18n::UiLang::Ja => "\\0\\s[3]画像をじっくり確認しますね。高精細モデルで見てみますので少し待ってください…\\1\\s[10]細部までしっかりチェックや！\\e".to_string(),
-            crate::i18n::UiLang::En => "\\0\\s[3]Let me take a closer look at this image with my high-precision vision model. One moment please…\\1\\s[10]Checking every detail!\\e".to_string(),
+        let scripts: [&str; 3] = match lang {
+            crate::i18n::UiLang::Ko => [
+                "\\0\\s[3]그림을 더 꼼꼼히 살펴볼게요! 고해상도 눈으로 확인 중이니 잠시만 기다려 주세요…\\1\\s[10]디테일까지 확실하게 보자고!\\e",
+                "\\0\\s[3]잠깐만요, 고해상도로 구석구석 확대해서 살펴볼게요! 잠시만 기다려 주세요…\\1\\s[10]놓치는 부분 없이 싹 다 체크 중!\\e",
+                "\\0\\s[3]흥미로운 이미지네요! 고해상도 모드로 찬찬히 읽고 올 테니 잠시만 기다려 주세요…\\1\\s[10]눈 크게 뜨고 보고 있어!\\e",
+            ],
+            crate::i18n::UiLang::Ja => [
+                "\\0\\s[3]画像をじっくり確認しますね。高精細モードで見てみますので少し待ってください…\\1\\s[10]細部までしっかりチェックや！\\e",
+                "\\0\\s[3]ちょっと隅々まで拡大して見てみますね。少し待ってくださいね…\\1\\s[10]見逃しゼロで確認中やで！\\e",
+                "\\0\\s[3]なるほど、細かいところまで丁寧に読み取りますね。少し待ってください…\\1\\s[10]目ぇ凝らして見とるからな！\\e",
+            ],
+            crate::i18n::UiLang::En => [
+                "\\0\\s[3]Let me take a closer look at this image with high-precision vision. One moment please…\\1\\s[10]Checking every detail!\\e",
+                "\\0\\s[3]Zooming in closely so I don't miss a thing—please wait a moment…\\1\\s[10]Eyes wide open!\\e",
+                "\\0\\s[3]Ooh, let me examine every corner of this picture carefully. Hold on just a moment…\\1\\s[10]Inspecting it thoroughly!\\e",
+            ],
         };
+        return scripts[variant].to_string();
     }
 
-    match (lang, role) {
-        (crate::i18n::UiLang::Ko, RouteRole::Coding) => "\\0\\s[3]코딩 관련 질문이네요! 전문 모델로 전환해서 꼼꼼히 작성해 볼게요. 잠시만 기다려 주세요…\\1\\s[10]코드 쪽은 전문가한테 맡기는 게 확실하지!\\e".to_string(),
-        (crate::i18n::UiLang::Ko, RouteRole::Cloud) => "\\0\\s[3]이건 더 깊고 넓게 찾아볼게요. 클라우드 AI와 함께 확인하고 올 테니 잠시만 기다려 주세요…\\1\\s[10]조금만 기다려 줘!\\e".to_string(),
-        (crate::i18n::UiLang::Ko, _) => "\\0\\s[3]이건 조금 더 깊게 생각해 볼 필요가 있겠어요. 잠시만 기다려 주세요…\\1\\s[10]신중하게 정리해 보자고!\\e".to_string(),
+    let scripts: [&str; 3] = match (lang, role) {
+        (crate::i18n::UiLang::Ko, RouteRole::Coding) => [
+            "\\0\\s[3]코드 관련 질문이네요! 꼼꼼하게 설계해서 작성해 볼게요. 잠시만 기다려 주세요…\\1\\s[10]버그 없게 딱 정리해 보자고!\\e",
+            "\\0\\s[3]오, 개발 이야기네요! 코드 흐름부터 차근차근 확인하고 올게요. 잠시만 기다려 주세요…\\1\\s[10]코딩 모드로 집중 돌입!\\e",
+            "\\0\\s[3]실수 없이 깔끔한 코드로 답해 드릴게요! 잠시만 기다려 주세요…\\1\\s[10]전문 감각 발동 중이니까 기대해!\\e",
+        ],
+        (crate::i18n::UiLang::Ko, RouteRole::Cloud) => [
+            "\\0\\s[3]이건 더 깊고 넓게 찾아볼게요. 클라우드 AI와 함께 확인하고 올 테니 잠시만 기다려 주세요…\\1\\s[10]최신 정보까지 싹 훑고 올게!\\e",
+            "\\0\\s[3]더 정확한 답을 위해 클라우드 AI한테도 물어보고 올게요! 잠시만 기다려 주세요…\\1\\s[10]금방 알차게 정리해서 돌아올게!\\e",
+            "\\0\\s[3]깊이 있는 주제네요! 클라우드 AI와 같이 꼼꼼히 조사하고 올 테니 잠시만 기다려 주세요…\\1\\s[10]조금만 기다려 줘!\\e",
+        ],
+        (crate::i18n::UiLang::Ko, _) => [
+            "\\0\\s[3]이건 조금 더 깊게 생각해 볼 필요가 있겠어요. 잠시만 기다려 주세요…\\1\\s[10]신중하게 정리해 보자고!\\e",
+            "\\0\\s[3]음, 차근차근 논리를 따져 볼게요! 잠시만 기다려 주세요…\\1\\s[10]머리 풀가동 들어갑니다!\\e",
+            "\\0\\s[3]좋은 질문이에요! 빠짐없이 정리해서 말씀드릴 테니 잠시만 기다려 주세요…\\1\\s[10]깊이 생각 중이니까 조금만!\\e",
+        ],
 
-        (crate::i18n::UiLang::Ja, RouteRole::Coding) => "\\0\\s[3]コードのご相談ですね。専門モデルに切り替えてしっかり考えます、少し待ってくださいね…\\1\\s[10]コードは専用モデルに任せるのが確実やな！\\e".to_string(),
-        (crate::i18n::UiLang::Ja, RouteRole::Cloud) => "\\0\\s[3]より詳しく調べてきますね。クラウドAIと連携して確認しますので少しお待ちください…\\1\\s[10]ちょっと待っとってな！\\e".to_string(),
-        (crate::i18n::UiLang::Ja, _) => "\\0\\s[3]これはもう少し深く考えたほうがよさそうです。少しだけ待ってくださいね…\\1\\s[10]じっくり整理してみよか！\\e".to_string(),
+        (crate::i18n::UiLang::Ja, RouteRole::Coding) => [
+            "\\0\\s[3]コードのご相談ですね。しっかり組み立てて考えますので、少し待ってくださいね…\\1\\s[10]バグなしできれいに仕上げよな！\\e",
+            "\\0\\s[3]開発のお話ですね！コードの流れを丁寧に確認します、少し待ってください…\\1\\s[10]コーディングモード全開やで！\\e",
+            "\\0\\s[3]ミスなく実用的なコードでお返ししますね。少し待ってくださいね…\\1\\s[10]ここは腕の見せどころや！\\e",
+        ],
+        (crate::i18n::UiLang::Ja, RouteRole::Cloud) => [
+            "\\0\\s[3]より詳しく調べてきますね。クラウドAIと連携して確認しますので少し待ってください…\\1\\s[10]最新情報までバッチリ見てくるで！\\e",
+            "\\0\\s[3]もっと深く調べるためにクラウドAIにも相談してきますね。少し待ってください…\\1\\s[10]ちょっと待っとってな！\\e",
+            "\\0\\s[3]奥深いテーマですね！クラウドAIと一緒に丁寧に調べてきます、少し待ってください…\\1\\s[10]すぐまとめて戻ってくるわ！\\e",
+        ],
+        (crate::i18n::UiLang::Ja, _) => [
+            "\\0\\s[3]これはもう少し深く考えたほうがよさそうです。少し待ってくださいね…\\1\\s[10]じっくり整理してみよか！\\e",
+            "\\0\\s[3]うーん、筋道を立ててしっかり考えてみますね。少し待ってください…\\1\\s[10]頭フル回転モードや！\\e",
+            "\\0\\s[3]いい質問ですね！抜け漏れなくまとめますので、少し待ってくださいね…\\1\\s[10]丁寧に考えとるから待っとってな！\\e",
+        ],
 
-        (crate::i18n::UiLang::En, RouteRole::Coding) => "\\0\\s[3]That's a coding question! Switching to my specialist coding model—please hold on a moment…\\1\\s[10]Leave the code to the pro!\\e".to_string(),
-        (crate::i18n::UiLang::En, RouteRole::Cloud) => "\\0\\s[3]Let me consult the cloud AI to dig deeper into this. Just a moment please…\\1\\s[10]Hang tight!\\e".to_string(),
-        (crate::i18n::UiLang::En, _) => "\\0\\s[3]Let me think a bit more deeply about this with my larger model. Please wait a moment…\\1\\s[10]Taking a closer look!\\e".to_string(),
+        (crate::i18n::UiLang::En, RouteRole::Coding) => [
+            "\\0\\s[3]Ooh, a coding question! Let me work through the code carefully—please hold on a moment…\\1\\s[10]Time to write something clean!\\e",
+            "\\0\\s[3]Let me double-check the logic and structure for this code. Just a moment please…\\1\\s[10]Switching into full dev mode!\\e",
+            "\\0\\s[3]I want to make sure this code is rock-solid. Please wait just a moment…\\1\\s[10]No bugs on our watch!\\e",
+        ],
+        (crate::i18n::UiLang::En, RouteRole::Cloud) => [
+            "\\0\\s[3]Let me consult the cloud AI to dig deeper into this. Just a moment please…\\1\\s[10]Hang tight!\\e",
+            "\\0\\s[3]I'll check with the cloud AI so I can bring back a thorough answer. One moment please…\\1\\s[10]Doing a deep dive!\\e",
+            "\\0\\s[3]That's a great topic—let me team up with the cloud AI to research it. Please wait a moment…\\1\\s[10]Back in a flash!\\e",
+        ],
+        (crate::i18n::UiLang::En, _) => [
+            "\\0\\s[3]Let me think a bit more deeply about this so I get it right. Please wait a moment…\\1\\s[10]Taking a closer look!\\e",
+            "\\0\\s[3]Hmm, this deserves a careful step-by-step check. Hold on just a moment…\\1\\s[10]Brain gears spinning!\\e",
+            "\\0\\s[3]Good question! Give me a moment to organize a thorough answer…\\1\\s[10]Thinking it through carefully!\\e",
+        ],
+    };
+    scripts[variant].to_string()
+}
+
+/// Detect high-confidence specialist escalation cues (KO/JA/EN) to assist Tier 1 (`gemma4:e4b`)
+/// self-escalation sensitivity without triggering false positives on casual chat or 1-line queries.
+pub fn detect_self_escalation_hint(
+    prompt: &str,
+    enable_coding: bool,
+    enable_reasoning: bool,
+    enable_cloud: bool,
+) -> Option<&'static str> {
+    let trimmed = prompt.trim();
+    if trimmed.is_empty() {
+        return None;
     }
+    let low = trimmed.to_lowercase();
+    let char_len = trimmed.chars().count();
+
+    // 1. Explicit cloud AI / frontier deep research request
+    if enable_cloud {
+        const CLOUD_CUES: &[&str] = &[
+            "gemini",
+            "제미나이",
+            "클라우드 ai",
+            "클라우드로",
+            "クラウド",
+            "deep research",
+            "심층 리서치",
+            "심층 조사",
+            "最新論文",
+            "論文トレンド",
+        ];
+        if CLOUD_CUES.iter().any(|k| low.contains(k)) {
+            return Some("cloud");
+        }
+    }
+
+    // Guard: keep short 1-line definition questions direct on Tier 1
+    const SHORT_DEF_CUES: &[&str] = &["뭐야", "뭔지", "한 줄", "とは", "what is"];
+    if char_len < 22 && SHORT_DEF_CUES.iter().any(|k| low.contains(k)) {
+        return None;
+    }
+
+    // 2. Non-trivial coding / debugging / refactoring request
+    if enable_coding {
+        const CODE_LANGS: &[&str] = &[
+            "rust",
+            "python",
+            "react",
+            "typescript",
+            "javascript",
+            "tokio",
+            "sql",
+            "async",
+            "useeffect",
+            "regex",
+            "c++",
+            "golang",
+            "java",
+            "swift",
+            "kotlin",
+        ];
+        const CODE_VERBS: &[&str] = &[
+            "코드",
+            "구현",
+            "디버깅",
+            "리팩토링",
+            "짜줘",
+            "에러",
+            "버그",
+            "테스트",
+            "実装",
+            "デバッグ",
+            "リファクタ",
+            "コード",
+            "単体テスト",
+            "implement",
+            "debug",
+            "refactor",
+            "fix this",
+            "deadlock",
+            "데드락",
+            "커스텀 훅",
+            "무한 리렌더링",
+        ];
+        if CODE_VERBS.iter().any(|v| low.contains(v))
+            && (CODE_LANGS.iter().any(|l| low.contains(l)) || char_len >= 28)
+        {
+            return Some("coding");
+        }
+    }
+
+    // 3. Deep mathematical proof / formal derivation / architecture trade-off analysis
+    if enable_reasoning && char_len >= 24 {
+        const REASONING_CUES: &[&str] = &[
+            "증명",
+            "트레이드오프",
+            "비교 분석",
+            "하한 복잡도",
+            "시간복잡도",
+            "베이즈",
+            "알고리즘",
+            "아키텍처",
+            "합의 알고리즘",
+            "証明",
+            "トレードオフ",
+            "比較分析",
+            "アーキテクチャ",
+            "proof",
+            "derive",
+            "trade-off",
+            "architecture",
+            "complexity",
+        ];
+        if REASONING_CUES.iter().any(|c| low.contains(c)) {
+            return Some("reasoning");
+        }
+    }
+
+    None
 }
 
 /// Build the `escalate_to_expert` native tool schema exposed to Tier 1 (`gemma4:e4b`)
@@ -496,7 +672,7 @@ pub fn build_self_escalation_tool(
         "type": "function",
         "function": {
             "name": "escalate_to_expert",
-            "description": "Hand off the user's request to a stronger specialist model ONLY when genuinely needed: 'coding' for writing/debugging/refactoring non-trivial code, 'reasoning' for deep math/proofs/complex architecture/trade-off analysis, or 'cloud' for frontier deep research or when the user explicitly asks for Gemini/cloud AI. NEVER call for greetings, everyday chat, weather, memos, reminders, or simple questions you can answer directly.",
+            "description": "Delegate complex coding, deep reasoning, or cloud research requests to a stronger specialist model. tier='coding': writing/implementing code, debugging, refactoring, framework/concurrency code. tier='reasoning': math proofs, formal derivations, algorithm complexity proofs, or deep architecture trade-offs. tier='cloud': frontier deep research or explicit Gemini/cloud AI requests. NEVER call for casual chat, greetings, weather, reminders, simple facts, or 1-line definitions.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -2000,15 +2176,29 @@ impl AgentEngine {
             );
         } else if self_esc_tool.is_some() {
             sys_msg.push_str(
-                "\n\n[SELF-ESCALATION GUIDANCE]: Answer greetings, casual chat, and normal questions directly. \
-                 ONLY if the user asks for non-trivial programming/debugging ('coding'), deep logical/math/architecture analysis ('reasoning'), \
-                 or frontier deep research / explicit Gemini cloud help ('cloud'), call `escalate_to_expert(tier)` immediately instead of guessing.",
+                "\n\n[MULTI-TASK DIARY GUIDANCE]: Whenever the user's request requires executing multiple tasks or steps (2+ tasks), \
+                 call `diary_plan(title, tasks)` first to open the illustrated two-page Task Diary, and call `diary_update(task_index, status, result)` \
+                 as each task starts/finishes so the left page shows checkboxes + progress bar and the right page logs execution results.\n\n\
+                 [SELF-ESCALATION GUIDANCE]: Answer greetings, casual chat, weather/tools, and simple facts directly. \
+                 For non-trivial coding/debugging ('coding'), deep math/proofs/architecture analysis ('reasoning'), \
+                 or explicit Gemini/cloud deep research ('cloud'), call `escalate_to_expert(tier)` immediately instead of guessing.",
             );
+            if let Some(hint_tier) = detect_self_escalation_hint(
+                prompt,
+                enable_coding_esc,
+                enable_reasoning_esc,
+                enable_cloud_esc,
+            ) {
+                sys_msg.push_str(&format!(
+                    "\n\n[ESCALATION HINT]: High-complexity/specialist signal detected (`{hint_tier}`). \
+                     Call `escalate_to_expert(tier=\"{hint_tier}\")` immediately unless this is merely casual chat."
+                ));
+            }
         }
         if prompt.chars().any(|c| ('\u{ac00}'..='\u{d7a3}').contains(&c)) && !prompt.starts_with('[') {
             sys_msg.push_str(
                 "\n\n[CRITICAL INSTRUCTION FOR THIS TURN]: The user spoke in Korean (한국어). \
-                 Respond 100% in natural Korean ONLY (한국어로만 대답하고 일본어는 섞지 마세요). \
+                 When writing a direct final reply (not a tool call), respond 100% in natural Korean ONLY (한국어로만 대답하고 일본어는 섞지 마세요). \
                  Keep Sakura Script format (\\0\\s[5]...\\1\\s[10]...\\e; \\0 uses \\s[0]-\\s[9], \\1 uses \\s[10]+ ONLY). \
                  Include concrete numbers/titles from tool results.",
             );
@@ -2203,6 +2393,19 @@ impl AgentEngine {
                     "content": content_str,
                     "tool_calls": tcalls,
                 }));
+                let non_diary_names: Vec<String> = tcalls
+                    .iter()
+                    .filter_map(|tc| tc.get("function").and_then(|f| f.get("name")).and_then(|v| v.as_str()))
+                    .filter(|n| !n.is_empty() && *n != "escalate_to_expert" && !n.starts_with("diary_"))
+                    .map(String::from)
+                    .collect();
+                let auto_diary_active = non_diary_names.len() >= 2
+                    && !tools_used.iter().any(|t| t == "diary_plan");
+                if auto_diary_active {
+                    let plan_title: String = prompt.trim().chars().take(28).collect();
+                    crate::task_diary::plan_diary_tasks(&plan_title, &non_diary_names);
+                }
+                let mut auto_diary_idx = 0usize;
                 for tc in tcalls {
                     let fn_obj = tc.get("function").unwrap_or(&Value::Null);
                     let Some(tname) = fn_obj.get("name").and_then(|v| v.as_str()) else {
@@ -2221,15 +2424,37 @@ impl AgentEngine {
                     }
                     tools_used.push(tname.to_string());
                     self.emit_status(&format!("Tool: {tname} 実行中..."), true);
+                    let is_tracked_step = auto_diary_active && !tname.starts_with("diary_");
+                    if is_tracked_step {
+                        auto_diary_idx += 1;
+                        crate::task_diary::update_diary_task(
+                            auto_diary_idx,
+                            crate::task_diary::DiaryTaskStatus::Running,
+                            "",
+                            Some(tname),
+                        );
+                    }
                     let targs = match fn_obj.get("arguments") {
                         Some(Value::String(s)) => serde_json::from_str(s).unwrap_or_else(|_| json!({})),
                         Some(v @ Value::Object(_)) => v.clone(),
                         _ => json!({}),
                     };
-                    let out = wrap_untrusted_data(
-                        &format!("tool:{tname}"),
-                        &self.tool_runner.execute(tname, &targs),
-                    );
+                    let raw_out = self.tool_runner.execute(tname, &targs);
+                    if is_tracked_step {
+                        let ok = !raw_out.contains("\"ok\":false") && !raw_out.contains("\"ok\": false");
+                        let summary: String = raw_out.chars().take(60).collect();
+                        crate::task_diary::update_diary_task(
+                            auto_diary_idx,
+                            if ok {
+                                crate::task_diary::DiaryTaskStatus::Done
+                            } else {
+                                crate::task_diary::DiaryTaskStatus::Failed
+                            },
+                            &summary,
+                            Some(tname),
+                        );
+                    }
+                    let out = wrap_untrusted_data(&format!("tool:{tname}"), &raw_out);
                     messages.push(json!({"role": "tool", "tool_name": tname, "content": out}));
                 }
                 continue;

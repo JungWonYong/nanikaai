@@ -21,7 +21,7 @@ use winit::dpi::{LogicalPosition, LogicalSize, PhysicalSize};
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
-use winit::window::{Window, WindowAttributes, WindowId, WindowLevel};
+use winit::window::{CursorIcon, Window, WindowAttributes, WindowId, WindowLevel};
 
 #[cfg(target_os = "macos")]
 use winit::platform::macos::{
@@ -2991,6 +2991,14 @@ const TTS_ENGINE_CHOICES: &[(&str, &str)] = &[
     ("os", "OS 標準音声 (Native TTS)"),
 ];
 
+const KINDLE_TTS_ENGINE_CHOICES: &[(&str, &str)] = &[
+    ("inherit", "標準エンジンに従う"),
+    ("auto", "自動 (AivisSpeech→VOICEVOX)"),
+    ("aivisspeech", "AivisSpeech (port 10101)"),
+    ("voicevox", "VOICEVOX (port 50021)"),
+    ("coeiroink", "COEIROINK (port 50032)"),
+];
+
 const KERO_ARCHETYPE_CHOICES: &[(&str, &str)] = &[
     ("boy", "少年/中性 (うにゅう標準)"),
     ("girl", "女の子相棒 (女性パートナ)"),
@@ -3048,6 +3056,10 @@ enum MenuCommand {
     InstallAivmModel { uuid: String, name: String },
     CheckUpdates,
     InstallNarDialog,
+    NarrateFileDialog,
+    KindleNarrateMenu,
+    StopNarration,
+    ToggleDiary,
     ResetPositions,
     ClearHistory,
     Quit,
@@ -3273,6 +3285,45 @@ impl SettingsWindowState {
     }
 }
 
+struct DiaryWindowState {
+    ws: WindowSurface,
+    visible: bool,
+    win_size: (u32, u32),
+    dragging_header: bool,
+    resizing_corner: bool,
+    drag_start_cursor: (f64, f64),
+    drag_start_pos: (f64, f64),
+    resize_start_size: (u32, u32),
+    last_resize_redraw: Instant,
+    last_local_cursor: Option<(f64, f64)>,
+    last_render_bmp: RgbaBitmap,
+}
+
+impl DiaryWindowState {
+    fn redraw(
+        &mut self,
+        diary: &crate::task_diary::TaskDiary,
+        text_renderer: &mut TextRenderer,
+        gpu: &GpuContext,
+        lang: crate::i18n::UiLang,
+    ) {
+        let (lw, lh) = crate::task_diary::clamp_diary_size(self.win_size.0, self.win_size.1);
+        self.win_size = (lw, lh);
+        let _ = self
+            .ws
+            .window
+            .request_inner_size(LogicalSize::new(lw, lh));
+        let scale = self.ws.window.scale_factor().clamp(1.0, 3.0) as f32;
+        let canvas =
+            crate::task_diary::render_diary_canvas_sized(diary, text_renderer, lw, lh, scale, lang);
+        let phys = PhysicalSize::new(canvas.width.max(1), canvas.height.max(1));
+        self.ws.resize(gpu, phys);
+        self.ws.upload_rgba(gpu, &canvas);
+        self.last_render_bmp = canvas;
+        self.ws.window.request_redraw();
+    }
+}
+
 #[derive(Debug, Clone)]
 enum PlaybackStep {
     Action(DialogueAction),
@@ -3430,6 +3481,10 @@ enum UserEvent {
     },
     CalendarSyncDone {
         status: String,
+    },
+    DiaryUpdated {
+        open: bool,
+        close: bool,
     },
     ServerGetHealth(mpsc::Sender<Value>),
     ServerGetSkins(mpsc::Sender<Value>),
@@ -3597,6 +3652,15 @@ impl ServerBackend for GuiServerBackend {
                 "auto" | "aivisspeech" | "aivis" | "voicevox" | "vv" | "coeiroink" | "os" | "native"
             ) {
                 return Err(format!("Invalid tts_engine: {eng}"));
+            }
+        }
+        if let Some(ref keng) = req.kindle_tts_engine {
+            let norm = keng.trim().to_ascii_lowercase();
+            if !matches!(
+                norm.as_str(),
+                "" | "inherit" | "default" | "auto" | "aivisspeech" | "aivis" | "voicevox" | "vv" | "coeiroink"
+            ) {
+                return Err(format!("Invalid kindle_tts_engine: {keng}"));
             }
         }
         if let Some(ref arch) = req.kero_voice_archetype {
@@ -3853,6 +3917,192 @@ impl ServerBackend for GuiServerBackend {
         let _ = self.proxy.send_event(UserEvent::RefreshMenus);
         Ok(self.get_calendar())
     }
+
+    fn on_narrate_action(&self, req: crate::sstp_server::NarrateReq) -> Result<Value, String> {
+        if req
+            .action
+            .as_deref()
+            .is_some_and(|a| a.eq_ignore_ascii_case("stop"))
+        {
+            let stopped = crate::narrator::stop_narration();
+            let _ = self.proxy.send_event(UserEvent::RefreshMenus);
+            return Ok(json!({
+                "stopped": stopped,
+                "status": crate::narrator::current_narration_status(),
+            }));
+        }
+
+        let doc = if let Some(ref p_str) = req.path {
+            let p = Path::new(p_str.trim());
+            if p_str.trim().is_empty() {
+                return Err("path が空です。".to_string());
+            }
+            crate::narrator::load_narration_document(p, req.episode.as_deref())?
+        } else if let Some(ref raw_text) = req.text {
+            let t = raw_text.trim();
+            if t.is_empty() {
+                return Err("text が空です。".to_string());
+            }
+            let title = req
+                .title
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("Text")
+                .to_string();
+            let utterances = crate::narrator::build_utterances_from_text("api", t);
+            if utterances.is_empty() {
+                return Err("朗読可能なテキストがありません。".to_string());
+            }
+            crate::narrator::NarrationDocument {
+                title,
+                source_kind: "text".to_string(),
+                utterances,
+            }
+        } else {
+            return Err("path または text を指定してください。".to_string());
+        };
+
+        let cfg = self.config_store.get();
+        let (sak_sp, _, _) = self
+            .config_store
+            .get_shell_voice_profile(&cfg.active_shell_id);
+        let ui_lang = crate::i18n::resolve_ui_lang(&cfg.ui_language);
+        let preset = crate::narrator::NarratorPreset::parse(req.preset.as_deref());
+        let proxy_b = self.proxy.clone();
+        let proxy_s = self.proxy.clone();
+        let st = crate::narrator::start_narration_async(
+            doc,
+            preset,
+            cfg.voicevox_url,
+            cfg.tts_engine,
+            sak_sp,
+            cfg.voice_speed,
+            cfg.voice_intonation,
+            ui_lang,
+            req.dry_run,
+            Arc::new(move |actions| {
+                let _ = proxy_b.send_event(UserEvent::PlayActionsNoBacklog(actions));
+            }),
+            Some(Arc::new(move |label| {
+                let _ = proxy_s.send_event(UserEvent::StatusUpdate(label, true));
+            })),
+        );
+        let _ = self.proxy.send_event(UserEvent::RefreshMenus);
+        Ok(serde_json::to_value(st).unwrap_or_else(|_| json!({ "active": true })))
+    }
+
+    fn on_kindle_narrate_action(
+        &self,
+        req: crate::sstp_server::KindleNarrateReq,
+    ) -> Result<Value, String> {
+        let cfg = self.config_store.get();
+        let (sak_sp, _, _) = self
+            .config_store
+            .get_shell_voice_profile(&cfg.active_shell_id);
+        let ui_lang = crate::i18n::resolve_ui_lang(&cfg.ui_language);
+        let effective_engine = req
+            .tts_engine
+            .as_deref()
+            .map(|e| crate::config_store::resolve_kindle_tts_engine(e, &cfg.tts_engine))
+            .unwrap_or_else(|| {
+                crate::config_store::resolve_kindle_tts_engine(&cfg.kindle_tts_engine, &cfg.tts_engine)
+            });
+        let kcfg = crate::narrator::KindleSessionConfig {
+            kindle_url: req
+                .url
+                .unwrap_or_else(|| crate::narrator::DEFAULT_KINDLE_URL.to_string()),
+            direction: crate::narrator::KindlePageDirection::parse(req.direction.as_deref()),
+            max_pages: req.max_pages.unwrap_or(50),
+            page_turn_delay_ms: req.page_turn_delay_ms.unwrap_or(1300),
+            preset: crate::narrator::NarratorPreset::parse(req.preset.as_deref()),
+            speaker_id: req.speaker_id.or(cfg.kindle_voice_speaker),
+            open_browser: req.open_browser.unwrap_or(true),
+            dry_run: req.dry_run,
+        };
+        let proxy_b = self.proxy.clone();
+        let proxy_s = self.proxy.clone();
+        let st = crate::narrator::start_kindle_narration_async(
+            kcfg,
+            cfg.voicevox_url,
+            effective_engine,
+            sak_sp,
+            cfg.voice_speed,
+            cfg.voice_intonation,
+            ui_lang,
+            Arc::new(move |actions| {
+                let _ = proxy_b.send_event(UserEvent::PlayActionsNoBacklog(actions));
+            }),
+            Some(Arc::new(move |label| {
+                let _ = proxy_s.send_event(UserEvent::StatusUpdate(label, true));
+            })),
+        )?;
+        let _ = self.proxy.send_event(UserEvent::RefreshMenus);
+        Ok(serde_json::to_value(st).unwrap_or_else(|_| json!({ "active": true })))
+    }
+
+    fn on_diary_action(
+        &self,
+        req: crate::sstp_server::DiaryActionReq,
+    ) -> Result<Value, String> {
+        if req.width.is_some() || req.height.is_some() {
+            let _ = self.config_store.update(ConfigPatch {
+                diary_width: req.width,
+                diary_height: req.height,
+                ..Default::default()
+            });
+        }
+        let act = req
+            .action
+            .as_deref()
+            .unwrap_or(if req.width.is_some() || req.height.is_some() {
+                "resize"
+            } else {
+                "plan"
+            })
+            .trim()
+            .to_ascii_lowercase();
+        match act.as_str() {
+            "open" | "resize" => {
+                let _ = self.proxy.send_event(UserEvent::DiaryUpdated {
+                    open: true,
+                    close: false,
+                });
+            }
+            "close" => {
+                let _ = self.proxy.send_event(UserEvent::DiaryUpdated {
+                    open: false,
+                    close: true,
+                });
+            }
+            "clear" => {
+                crate::task_diary::clear_diary();
+            }
+            "update" => {
+                let idx = req.task_index.unwrap_or(1);
+                let st = crate::task_diary::DiaryTaskStatus::parse(
+                    req.status.as_deref().unwrap_or("done"),
+                );
+                let res = req.result.as_deref().unwrap_or("");
+                crate::task_diary::update_diary_task(idx, st, res, req.title.as_deref());
+            }
+            _ => {
+                let title = req.title.as_deref().unwrap_or("Task Diary");
+                let tasks = req.tasks.unwrap_or_default();
+                if tasks.is_empty() {
+                    return Err("tasks が空です。".to_string());
+                }
+                crate::task_diary::plan_diary_tasks(title, &tasks);
+            }
+        }
+        let mut resp = self.get_diary();
+        let cfg = self.config_store.get();
+        if let Some(obj) = resp.as_object_mut() {
+            obj.insert("width".to_string(), json!(cfg.diary_width));
+            obj.insert("height".to_string(), json!(cfg.diary_height));
+        }
+        Ok(resp)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -3976,6 +4226,7 @@ struct AppRuntime {
     communicate: Option<CommunicateWindowState>,
     menu: Option<MenuWindowState>,
     settings: Option<SettingsWindowState>,
+    diary: Option<DiaryWindowState>,
     expanded_menu_section: Option<MenuSection>,
     playback: PlaybackQueue,
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -3999,6 +4250,7 @@ struct AppRuntime {
     low_battery_notified: bool,
     last_pomo_ui_refresh: Instant,
     pending_auto_talk_actions: Option<Vec<DialogueAction>>,
+    pending_narrate_path: Option<PathBuf>,
     aivm_busy_label: Option<String>,
     calendar_state: Arc<Mutex<crate::calendar_sync::CalendarSyncState>>,
     calendar_last_sync: Instant,
@@ -4013,6 +4265,7 @@ enum UiWindowTarget {
     Communicate,
     Menu,
     Settings,
+    Diary,
 }
 
 impl AppRuntime {
@@ -4039,6 +4292,8 @@ impl AppRuntime {
             Some(UiWindowTarget::Menu)
         } else if self.settings.as_ref().is_some_and(|s| s.ws.window.id() == window_id) {
             Some(UiWindowTarget::Settings)
+        } else if self.diary.as_ref().is_some_and(|d| d.ws.window.id() == window_id) {
+            Some(UiWindowTarget::Diary)
         } else {
             None
         }
@@ -4080,6 +4335,11 @@ impl AppRuntime {
                 .settings
                 .as_ref()
                 .map(|s| s.ws.window.scale_factor().max(1.0))
+                .unwrap_or(1.0),
+            Some(UiWindowTarget::Diary) => self
+                .diary
+                .as_ref()
+                .map(|d| d.ws.window.scale_factor().max(1.0))
                 .unwrap_or(1.0),
             None => 1.0,
         }
@@ -4378,6 +4638,12 @@ impl AppRuntime {
             "active_shell": cfg.active_shell_id,
             "voice_tts": cfg.voice_tts,
             "tts_engine": cfg.tts_engine,
+            "kindle_tts_engine": cfg.kindle_tts_engine,
+            "effective_kindle_tts_engine": crate::config_store::resolve_kindle_tts_engine(
+                &cfg.kindle_tts_engine,
+                &cfg.tts_engine,
+            ),
+            "kindle_voice_speaker": cfg.kindle_voice_speaker,
             "voice_speed": cfg.voice_speed,
             "voice_intonation": cfg.voice_intonation,
             "engine_label": eng_lbl,
@@ -4428,6 +4694,8 @@ impl AppRuntime {
             "hourly_chime": cfg.hourly_chime,
             "voice_tts": cfg.voice_tts,
             "tts_engine": cfg.tts_engine,
+            "kindle_tts_engine": cfg.kindle_tts_engine,
+            "kindle_voice_speaker": cfg.kindle_voice_speaker,
             "active_shell_id": cfg.active_shell_id,
             "active_balloon_id": cfg.active_balloon_id,
             "provider": cfg.provider,
@@ -4534,6 +4802,18 @@ impl AppRuntime {
         };
         let kero_archetype_label =
             crate::i18n::kero_archetype_label(ui_lang, arch.short_code()).to_string();
+        let kindle_tts_engine_label =
+            crate::i18n::tts_engine_label(ui_lang, &cfg.kindle_tts_engine);
+        let kindle_voice_label = match cfg.kindle_voice_speaker {
+            None => format!("{} [{eng_lbl}]", s.voice_auto_prefix),
+            Some(sid) => {
+                if let Some(v) = all_voices.iter().find(|v| v.style_id == sid) {
+                    format!("{} [{eng_lbl}]", v.label)
+                } else {
+                    format!("ID {sid} [{eng_lbl}]")
+                }
+            }
+        };
         let config_path_display = self.config_store.file_path.display().to_string();
         let interests_list = self.config_store.active_interests();
         let interests_summary = if interests_list.is_empty() {
@@ -4605,6 +4885,8 @@ impl AppRuntime {
             sakura_voice_label,
             kero_voice_label,
             kero_archetype_label,
+            kindle_tts_engine_label,
+            kindle_voice_label,
             recommended_local_ai_hint: crate::companion_extras::recommended_local_ai_summary(),
             local_ai_setup_busy: crate::companion_extras::is_local_ai_setup_running(),
             interests_summary,
@@ -4786,6 +5068,57 @@ impl AppRuntime {
                 sw.dragging_header = false;
                 sw.model.dragging_slider = None;
                 sw.ws.window.set_visible(false);
+            }
+        }
+    }
+
+    fn redraw_diary_window(&mut self) {
+        if !self.diary.as_ref().is_some_and(|d| d.visible) {
+            return;
+        }
+        let cfg = self.config_store.get();
+        let diary = crate::task_diary::current_diary();
+        let ui_lang = self.effective_ui_lang();
+        if let (Some(ref gpu), Some(ref mut dw)) = (&self.gpu, &mut self.diary) {
+            if !dw.resizing_corner {
+                dw.win_size =
+                    crate::task_diary::clamp_diary_size(cfg.diary_width, cfg.diary_height);
+            }
+            dw.redraw(&diary, &mut self.text_renderer, gpu, ui_lang);
+        }
+    }
+
+    fn open_diary_window(&mut self) {
+        let (mx, my, mw, mh) = self.desktop_safe_work_area();
+        let cfg = self.config_store.get();
+        let diary = crate::task_diary::current_diary();
+        let ui_lang = self.effective_ui_lang();
+        let Some(ref mut dw) = self.diary else { return };
+        dw.win_size = crate::task_diary::clamp_diary_size(cfg.diary_width, cfg.diary_height);
+        let w = dw.win_size.0 as f64;
+        let h = dw.win_size.1 as f64;
+        let was_visible = dw.visible;
+        if !was_visible {
+            let px = (mx + (mw - w) * 0.5).clamp(mx + 8.0, (mx + mw - w - 8.0).max(mx + 8.0));
+            let py = (my + (mh - h) * 0.42).clamp(my + 8.0, (my + mh - h - 8.0).max(my + 8.0));
+            dw.ws.window.set_outer_position(LogicalPosition::new(px, py));
+        }
+        dw.visible = true;
+        dw.dragging_header = false;
+        dw.resizing_corner = false;
+        dw.ws.window.set_visible(true);
+        if let Some(ref gpu) = self.gpu {
+            dw.redraw(&diary, &mut self.text_renderer, gpu, ui_lang);
+        }
+    }
+
+    fn hide_diary_window(&mut self) {
+        if let Some(ref mut dw) = self.diary {
+            if dw.visible {
+                dw.visible = false;
+                dw.dragging_header = false;
+                dw.resizing_corner = false;
+                dw.ws.window.set_visible(false);
             }
         }
     }
@@ -4993,6 +5326,53 @@ impl AppRuntime {
             None,
             MenuCommand::SelectKeroVoiceArchetype(slots[next].clone()),
         );
+    }
+
+    fn cycle_kindle_tts_engine(&mut self, delta: i32) {
+        let cur = self.config_store.get().kindle_tts_engine;
+        let pos = KINDLE_TTS_ENGINE_CHOICES
+            .iter()
+            .position(|(id, _)| *id == cur)
+            .unwrap_or(0) as isize;
+        let next = (pos + delta as isize)
+            .rem_euclid(KINDLE_TTS_ENGINE_CHOICES.len() as isize) as usize;
+        let next_id = KINDLE_TTS_ENGINE_CHOICES[next].0.to_string();
+        self.config_store.update(ConfigPatch {
+            kindle_tts_engine: Some(next_id.clone()),
+            kindle_voice_speaker: Some(None),
+            ..Default::default()
+        });
+        let cfg = self.config_store.get();
+        let eff = crate::config_store::resolve_kindle_tts_engine(&cfg.kindle_tts_engine, &cfg.tts_engine);
+        let vv_url = cfg.voicevox_url;
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            let _ = crate::companion_extras::ensure_tts_engine_ready_with_mode_blocking(
+                &vv_url, &eff, true,
+            );
+            let _ = proxy.send_event(UserEvent::RefreshMenus);
+        });
+        self.redraw_settings_panel();
+    }
+
+    fn cycle_kindle_voice_speaker(&mut self, delta: i32) {
+        let (_, all_voices) = crate::companion_extras::cached_tts_voices();
+        let options = Self::representative_voice_options(&all_voices, 20);
+        if options.is_empty() {
+            return;
+        }
+        let cur_id = self.config_store.get().kindle_voice_speaker;
+        let mut slots: Vec<Option<i64>> = vec![None];
+        for v in options {
+            slots.push(Some(v.style_id));
+        }
+        let pos = slots.iter().position(|s| *s == cur_id).unwrap_or(0) as isize;
+        let next = (pos + delta as isize).rem_euclid(slots.len() as isize) as usize;
+        self.config_store.update(ConfigPatch {
+            kindle_voice_speaker: Some(slots[next]),
+            ..Default::default()
+        });
+        self.redraw_settings_panel();
     }
 
     fn cycle_autotalk(&mut self, delta: i32) {
@@ -5668,6 +6048,14 @@ impl AppRuntime {
                 self.redraw_settings_panel();
                 return;
             }
+            SettingsAction::CycleKindleTtsEngine(d) => {
+                self.cycle_kindle_tts_engine(d);
+                return;
+            }
+            SettingsAction::CycleKindleVoice(d) => {
+                self.cycle_kindle_voice_speaker(d);
+                return;
+            }
             SettingsAction::SetVoiceSpeed(v) => {
                 self.config_store.update(ConfigPatch {
                     voice_speed: Some(v.clamp(0.75, 1.35)),
@@ -5946,6 +6334,14 @@ impl AppRuntime {
                 cmd: MenuCommand::ShowCalendarAgenda,
             },
             MenuRow {
+                label: match ui_lang {
+                    crate::i18n::UiLang::Ko => "📓 작업 다이어리".to_string(),
+                    crate::i18n::UiLang::Ja => "📓 作業ダイアリー".to_string(),
+                    crate::i18n::UiLang::En => "📓 Task Diary".to_string(),
+                },
+                cmd: MenuCommand::ToggleDiary,
+            },
+            MenuRow {
                 label: ui_s.menu_settings.to_string(),
                 cmd: MenuCommand::OpenSettings,
             },
@@ -5958,6 +6354,19 @@ impl AppRuntime {
                 cmd: MenuCommand::Separator,
             },
         ];
+        if crate::narrator::is_narration_active() {
+            rows.insert(
+                4,
+                MenuRow {
+                    label: match ui_lang {
+                        crate::i18n::UiLang::Ko => "⏹ 낭독 중지 (Aivis)".to_string(),
+                        crate::i18n::UiLang::Ja => "⏹ 朗読を停止 (Aivis)".to_string(),
+                        crate::i18n::UiLang::En => "⏹ Stop Reading (Aivis)".to_string(),
+                    },
+                    cmd: MenuCommand::StopNarration,
+                },
+            );
+        }
 
         // 1) Skins & Dress-up collapsible section
         let skins_open = self.expanded_menu_section == Some(MenuSection::Skins);
@@ -6075,6 +6484,34 @@ impl AppRuntime {
             rows.push(MenuRow {
                 label: format!("  {}", ui_s.menu_manage_voices),
                 cmd: MenuCommand::OpenSettingsTab(2),
+            });
+            rows.push(MenuRow {
+                label: if crate::narrator::is_narration_active() {
+                    match ui_lang {
+                        crate::i18n::UiLang::Ko => "  ⏹ 낭독 중지 (Aivis)".to_string(),
+                        crate::i18n::UiLang::Ja => "  ⏹ 朗読を停止 (Aivis)".to_string(),
+                        crate::i18n::UiLang::En => "  ⏹ Stop Reading (Aivis)".to_string(),
+                    }
+                } else {
+                    match ui_lang {
+                        crate::i18n::UiLang::Ko => "  📖 감정 낭독 (TXT/EPUB)…".to_string(),
+                        crate::i18n::UiLang::Ja => "  📖 感情朗読 (TXT/EPUB)…".to_string(),
+                        crate::i18n::UiLang::En => "  📖 Read Aloud (TXT/EPUB)…".to_string(),
+                    }
+                },
+                cmd: if crate::narrator::is_narration_active() {
+                    MenuCommand::StopNarration
+                } else {
+                    MenuCommand::NarrateFileDialog
+                },
+            });
+            rows.push(MenuRow {
+                label: match ui_lang {
+                    crate::i18n::UiLang::Ko => "  📚 Kindle 낭독 (브라우저)…".to_string(),
+                    crate::i18n::UiLang::Ja => "  📚 Kindle朗読 (ブラウザ)…".to_string(),
+                    crate::i18n::UiLang::En => "  📚 Read Kindle (Browser)…".to_string(),
+                },
+                cmd: MenuCommand::KindleNarrateMenu,
             });
         }
 
@@ -7442,6 +7879,52 @@ impl AppRuntime {
                     self.install_and_activate_nar(&path);
                 }
             }
+            MenuCommand::NarrateFileDialog => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Novel / Text / EPUB", &["epub", "txt", "md", "markdown"])
+                    .pick_file()
+                {
+                    self.start_emotional_narration_for_path(&path);
+                }
+            }
+            MenuCommand::KindleNarrateMenu => {
+                let cfg = self.config_store.get();
+                let ui_lang = self.effective_ui_lang();
+                let eng_lbl = crate::i18n::tts_engine_label(ui_lang, &cfg.kindle_tts_engine);
+                let (_, all_voices) = crate::companion_extras::cached_tts_voices();
+                let voice_lbl = match cfg.kindle_voice_speaker {
+                    None => crate::i18n::ui_strings(ui_lang).voice_auto_prefix.to_string(),
+                    Some(sid) => all_voices
+                        .iter()
+                        .find(|v| v.style_id == sid)
+                        .map(|v| v.label.clone())
+                        .unwrap_or_else(|| format!("ID {sid}")),
+                };
+                let msg = match ui_lang {
+                    crate::i18n::UiLang::Ko => format!("\\0\\s[5]브라우저 Kindle을 감정 낭독하고 자동으로 페이지를 넘겨드릴게요!\\n[음성: {eng_lbl} / {voice_lbl}]\\n\\q[📖 세로쓰기 책 낭독 시작 (←페이지 넘김),__kindle_start_rtl__]\\n\\q[📖 가로쓰기 책 낭독 시작 (→페이지 넘김),__kindle_start_ltr__]\\n\\q[⚙ Kindle 음성 라이브러리·모델 설정,__kindle_voice_settings__]\\n\\q[🌐 브라우저에서 Kindle 열기,__kindle_open__]\\e"),
+                    crate::i18n::UiLang::Ja => format!("\\0\\s[5]ブラウザの Kindle を感情朗読して自動でページをめくりますよ！\\n[音声: {eng_lbl} / {voice_lbl}]\\n\\q[📖 縦書き本を朗読開始 (←ページ送り),__kindle_start_rtl__]\\n\\q[📖 横書き本を朗読開始 (→ページ送り),__kindle_start_ltr__]\\n\\q[⚙ Kindle 音声ライブラリ・モデル設定,__kindle_voice_settings__]\\n\\q[🌐 ブラウザで Kindle を開く,__kindle_open__]\\e"),
+                    crate::i18n::UiLang::En => format!("\\0\\s[5]I can read your browser Kindle aloud with emotion and turn pages automatically!\\n[Voice: {eng_lbl} / {voice_lbl}]\\n\\q[📖 Start Vertical Book (←),__kindle_start_rtl__]\\n\\q[📖 Start Horizontal Book (→),__kindle_start_ltr__]\\n\\q[⚙ Kindle Voice Library & Model,__kindle_voice_settings__]\\n\\q[🌐 Open Kindle in Browser,__kindle_open__]\\e"),
+                };
+                let _ = self.proxy.send_event(UserEvent::PlayActionsNoBacklog(parse_dialogue(&msg)));
+            }
+            MenuCommand::StopNarration => {
+                let stopped = crate::narrator::stop_narration();
+                if stopped {
+                    let msg = match self.effective_ui_lang() {
+                        crate::i18n::UiLang::Ko => "\\0\\s[0]낭독을 멈췄어요!\\e",
+                        crate::i18n::UiLang::Ja => "\\0\\s[0]朗読を止めましたよ！\\e",
+                        crate::i18n::UiLang::En => "\\0\\s[0]Stopped reading aloud!\\e",
+                    };
+                    let _ = self.proxy.send_event(UserEvent::PlayActionsNoBacklog(parse_dialogue(msg)));
+                }
+            }
+            MenuCommand::ToggleDiary => {
+                if self.diary.as_ref().is_some_and(|d| d.visible) {
+                    self.hide_diary_window();
+                } else {
+                    self.open_diary_window();
+                }
+            }
             MenuCommand::ResetPositions => {
                 self.reset_character_positions();
             }
@@ -7460,6 +7943,7 @@ impl AppRuntime {
     }
 
     fn begin_graceful_quit(&mut self, event_loop: &ActiveEventLoop) {
+        crate::narrator::stop_narration();
         if self.smoke_mode || self.closing_at.is_some() {
             crate::companion_extras::stop_managed_tts_engine();
             crate::companion_extras::stop_managed_ollama_engine();
@@ -7568,7 +8052,77 @@ impl AppRuntime {
         );
     }
 
+    fn start_emotional_narration_for_path(&mut self, path: &Path) {
+        let ui_lang = self.effective_ui_lang();
+        match crate::narrator::load_narration_document(path, None) {
+            Ok(doc) => {
+                let cfg = self.config_store.get();
+                let (sak_sp, _, _) = self
+                    .config_store
+                    .get_shell_voice_profile(&cfg.active_shell_id);
+                let title = doc.title.clone();
+                let count = doc.utterances.len();
+                let proxy_b = self.proxy.clone();
+                let proxy_s = self.proxy.clone();
+                crate::narrator::start_narration_async(
+                    doc,
+                    crate::narrator::NarratorPreset::Auto,
+                    cfg.voicevox_url,
+                    cfg.tts_engine,
+                    sak_sp,
+                    cfg.voice_speed,
+                    cfg.voice_intonation,
+                    ui_lang,
+                    self.smoke_mode,
+                    Arc::new(move |actions| {
+                        let _ = proxy_b.send_event(UserEvent::PlayActionsNoBacklog(actions));
+                    }),
+                    Some(Arc::new(move |label| {
+                        let _ = proxy_s.send_event(UserEvent::StatusUpdate(label, true));
+                    })),
+                );
+                let intro = match ui_lang {
+                    crate::i18n::UiLang::Ko => format!("📖 「{title}」 감정 낭독 준비 중 ({count}문장)…"),
+                    crate::i18n::UiLang::Ja => format!("📖 「{title}」感情朗読を準備中（{count}文）…"),
+                    crate::i18n::UiLang::En => format!("📖 Preparing narration for \"{title}\" ({count} lines)…"),
+                };
+                self.pending_auto_talk_actions = None;
+                self.auto_talk_last = Instant::now();
+                self.apply_status_feedback(intro);
+            }
+            Err(err_msg) => {
+                let _ = self.proxy.send_event(UserEvent::PlayActionsNoBacklog(parse_dialogue(
+                    &format!("\\0\\s[3]{err_msg}\\e"),
+                )));
+            }
+        }
+    }
+
     fn spawn_dropped_file_inspection(&mut self, path: &Path) {
+        let is_epub = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("epub"));
+        if is_epub && !crate::companion_extras::is_blocked_drop_target(path) {
+            self.pending_narrate_path = Some(path.to_path_buf());
+            let fname = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("book.epub");
+            let msg = match self.effective_ui_lang() {
+                crate::i18n::UiLang::Ko => format!(
+                    "\\0\\s[5]「{fname}」 EPUB 책이네요! AivisSpeech 감정 낭독으로 읽어드릴까요?\\n\\q[📖 감정 낭독 시작 (Aivis),__narrate_pending_file__]\\n\\q[📝 파일 요약 보기,__inspect_pending_file__]\\e"
+                ),
+                crate::i18n::UiLang::Ja => format!(
+                    "\\0\\s[5]「{fname}」の EPUB ですね！AivisSpeech で感情朗読しますか？\\n\\q[📖 感情朗読を開始 (Aivis),__narrate_pending_file__]\\n\\q[📝 ファイル要約を見る,__inspect_pending_file__]\\e"
+                ),
+                crate::i18n::UiLang::En => format!(
+                    "\\0\\s[5]That's an EPUB book (\"{fname}\")! Shall I read it aloud with AivisSpeech emotion?\\n\\q[📖 Start Emotional Narration,__narrate_pending_file__]\\n\\q[📝 Inspect Summary,__inspect_pending_file__]\\e"
+                ),
+            };
+            let _ = self.proxy.send_event(UserEvent::PlayActionsNoBacklog(parse_dialogue(&msg)));
+            return;
+        }
         match crate::companion_extras::inspect_dropped_path(path) {
             Ok(payload) => {
                 self.apply_status_feedback(format!("「{}」確認中…", payload.file_name));
@@ -7960,6 +8514,74 @@ impl AppRuntime {
                     self.redraw_settings_panel();
                 }
             }
+            Some(UiWindowTarget::Diary) => {
+                let mut drag_pos: Option<(f64, f64)> = None;
+                let mut need_resize_redraw = false;
+                if let Some(ref mut dw) = self.diary {
+                    dw.last_local_cursor = Some(local);
+                    let (gx_r, gy_r, gw_r, gh_r) =
+                        crate::task_diary::diary_resize_grip_rect(dw.win_size.0, dw.win_size.1);
+                    let (cx, cy, cw, ch) =
+                        crate::task_diary::diary_close_rect(dw.win_size.0, dw.win_size.1);
+                    let in_grip = local.0 >= gx_r as f64
+                        && local.0 <= (gx_r + gw_r) as f64
+                        && local.1 >= gy_r as f64
+                        && local.1 <= (gy_r + gh_r) as f64;
+                    let in_close = local.0 >= cx as f64
+                        && local.0 <= (cx + cw) as f64
+                        && local.1 >= cy as f64
+                        && local.1 <= (cy + ch) as f64;
+                    dw.ws.window.set_cursor(if dw.resizing_corner || in_grip {
+                        CursorIcon::NwseResize
+                    } else if in_close {
+                        CursorIcon::Pointer
+                    } else {
+                        CursorIcon::Default
+                    });
+
+                    if dw.resizing_corner {
+                        if let Mouse::Position { x, y } = Mouse::get_mouse_position() {
+                            #[cfg(target_os = "macos")]
+                            let (gx, gy) = (x as f64, y as f64);
+                            #[cfg(not(target_os = "macos"))]
+                            let (gx, gy) = {
+                                let scale = dw.ws.window.scale_factor().max(1.0);
+                                (x as f64 / scale, y as f64 / scale)
+                            };
+                            let dx = gx - dw.drag_start_cursor.0;
+                            let dy = gy - dw.drag_start_cursor.1;
+                            let target_w = (dw.resize_start_size.0 as f64 + dx).round().max(1.0) as u32;
+                            let target_h = (dw.resize_start_size.1 as f64 + dy).round().max(1.0) as u32;
+                            let clamped = crate::task_diary::clamp_diary_size(target_w, target_h);
+                            if clamped != dw.win_size
+                                && dw.last_resize_redraw.elapsed() >= Duration::from_millis(28)
+                            {
+                                dw.win_size = clamped;
+                                dw.last_resize_redraw = Instant::now();
+                                need_resize_redraw = true;
+                            }
+                        }
+                    } else if dw.dragging_header {
+                        if let Mouse::Position { x, y } = Mouse::get_mouse_position() {
+                            #[cfg(target_os = "macos")]
+                            let (gx, gy) = (x as f64, y as f64);
+                            #[cfg(not(target_os = "macos"))]
+                            let (gx, gy) = {
+                                let scale = dw.ws.window.scale_factor().max(1.0);
+                                (x as f64 / scale, y as f64 / scale)
+                            };
+                            let dx = gx - dw.drag_start_cursor.0;
+                            let dy = gy - dw.drag_start_cursor.1;
+                            drag_pos = Some((dw.drag_start_pos.0 + dx, dw.drag_start_pos.1 + dy));
+                        }
+                    }
+                }
+                if need_resize_redraw {
+                    self.redraw_diary_window();
+                } else if let (Some((px, py)), Some(ref dw)) = (drag_pos, &self.diary) {
+                    dw.ws.window.set_outer_position(LogicalPosition::new(px, py));
+                }
+            }
             None => {}
         }
     }
@@ -8202,6 +8824,99 @@ impl AppRuntime {
                             self.playback.sakura_choices.clear();
                             self.playback.kero_choices.clear();
                             self.start_one_click_local_ai_setup();
+                        } else if cid == "__narrate_stop__" {
+                            self.playback.sakura_choices.clear();
+                            self.playback.kero_choices.clear();
+                            let _ = crate::narrator::stop_narration();
+                            let msg = match self.effective_ui_lang() {
+                                crate::i18n::UiLang::Ko => "\\0\\s[0]낭독을 멈췄어요!\\e",
+                                crate::i18n::UiLang::Ja => "\\0\\s[0]朗読を止めましたよ！\\e",
+                                crate::i18n::UiLang::En => "\\0\\s[0]Stopped reading aloud!\\e",
+                            };
+                            let _ = self.proxy.send_event(UserEvent::PlayActionsNoBacklog(parse_dialogue(msg)));
+                        } else if cid == "__kindle_open__" {
+                            self.playback.sakura_choices.clear();
+                            self.playback.kero_choices.clear();
+                            let _ = crate::narrator::open_kindle_in_browser(
+                                crate::narrator::DEFAULT_KINDLE_URL,
+                                self.smoke_mode,
+                            );
+                            let msg = match self.effective_ui_lang() {
+                                crate::i18n::UiLang::Ko => "\\0\\s[5]브라우저에서 Kindle을 열었어요! 읽을 책을 연 뒤 시작 버튼을 눌러 주세요.\\n\\q[📖 세로쓰기 책 낭독 시작 (←),__kindle_start_rtl__]\\n\\q[📖 가로쓰기 책 낭독 시작 (→),__kindle_start_ltr__]\\e",
+                                crate::i18n::UiLang::Ja => "\\0\\s[5]ブラウザで Kindle を開きました！読みたい本を開いたら開始ボタンを押してくださいね。\\n\\q[📖 縦書き本を朗読開始 (←),__kindle_start_rtl__]\\n\\q[📖 横書き本を朗読開始 (→),__kindle_start_ltr__]\\e",
+                                crate::i18n::UiLang::En => "\\0\\s[5]Opened Kindle in your browser! Open a book and press Start.\\n\\q[📖 Start Vertical (←),__kindle_start_rtl__]\\n\\q[📖 Start Horizontal (→),__kindle_start_ltr__]\\e",
+                            };
+                            let _ = self.proxy.send_event(UserEvent::PlayActionsNoBacklog(parse_dialogue(msg)));
+                        } else if cid == "__kindle_voice_settings__" {
+                            self.playback.sakura_choices.clear();
+                            self.playback.kero_choices.clear();
+                            self.open_settings_panel();
+                            if let Some(ref mut sw) = self.settings {
+                                sw.model.select_tab(2);
+                            }
+                            self.redraw_settings_panel();
+                        } else if cid == "__kindle_start_rtl__" || cid == "__kindle_start_ltr__" {
+                            self.playback.sakura_choices.clear();
+                            self.playback.kero_choices.clear();
+                            let dir = if cid == "__kindle_start_ltr__" {
+                                crate::narrator::KindlePageDirection::Ltr
+                            } else {
+                                crate::narrator::KindlePageDirection::Rtl
+                            };
+                            let cfg = self.config_store.get();
+                            let (sak_sp, _, _) = self
+                                .config_store
+                                .get_shell_voice_profile(&cfg.active_shell_id);
+                            let ui_lang = self.effective_ui_lang();
+                            let effective_engine = crate::config_store::resolve_kindle_tts_engine(
+                                &cfg.kindle_tts_engine,
+                                &cfg.tts_engine,
+                            );
+                            let proxy_b = self.proxy.clone();
+                            let proxy_s = self.proxy.clone();
+                            let kcfg = crate::narrator::KindleSessionConfig {
+                                direction: dir,
+                                speaker_id: cfg.kindle_voice_speaker,
+                                dry_run: self.smoke_mode,
+                                ..Default::default()
+                            };
+                            self.pending_auto_talk_actions = None;
+                            self.auto_talk_last = Instant::now();
+                            let _ = crate::narrator::start_kindle_narration_async(
+                                kcfg,
+                                cfg.voicevox_url,
+                                effective_engine,
+                                sak_sp,
+                                cfg.voice_speed,
+                                cfg.voice_intonation,
+                                ui_lang,
+                                Arc::new(move |actions| {
+                                    let _ = proxy_b.send_event(UserEvent::PlayActionsNoBacklog(actions));
+                                }),
+                                Some(Arc::new(move |label| {
+                                    let _ = proxy_s.send_event(UserEvent::StatusUpdate(label, true));
+                                })),
+                            );
+                        } else if cid == "__narrate_pending_file__" {
+                            self.playback.sakura_choices.clear();
+                            self.playback.kero_choices.clear();
+                            if let Some(p) = self.pending_narrate_path.take() {
+                                self.start_emotional_narration_for_path(&p);
+                            }
+                        } else if cid == "__inspect_pending_file__" {
+                            self.playback.sakura_choices.clear();
+                            self.playback.kero_choices.clear();
+                            if let Some(p) = self.pending_narrate_path.take() {
+                                if let Ok(payload) = crate::companion_extras::inspect_dropped_path(&p) {
+                                    self.apply_status_feedback(format!("「{}」確認中…", payload.file_name));
+                                    let eng = self.engine.clone();
+                                    let proxy = self.proxy.clone();
+                                    std::thread::spawn(move || {
+                                        let reply = eng.handle_dropped_payload(&payload);
+                                        let _ = proxy.send_event(UserEvent::PlayActions(reply.actions));
+                                    });
+                                }
+                            }
                         } else if cid == "__open_settings_ai__" {
                             self.playback.sakura_choices.clear();
                             self.playback.kero_choices.clear();
@@ -8467,6 +9182,106 @@ impl AppRuntime {
                     }
                     if was_interacting {
                         self.redraw_settings_panel();
+                    }
+                }
+            }
+            Some(UiWindowTarget::Diary) if button == MouseButton::Left => {
+                if state == ElementState::Pressed {
+                    let mut should_close = false;
+                    if let Some(ref mut dw) = self.diary {
+                        if let Some((lx, ly)) = dw.last_local_cursor {
+                            let (cx, cy, cw, ch) = crate::task_diary::diary_close_rect(
+                                dw.win_size.0,
+                                dw.win_size.1,
+                            );
+                            let (gx_r, gy_r, gw_r, gh_r) =
+                                crate::task_diary::diary_resize_grip_rect(
+                                    dw.win_size.0,
+                                    dw.win_size.1,
+                                );
+                            if lx >= cx as f64
+                                && lx <= (cx + cw) as f64
+                                && ly >= cy as f64
+                                && ly <= (cy + ch) as f64
+                            {
+                                should_close = true;
+                            } else if lx >= gx_r as f64
+                                && lx <= (gx_r + gw_r) as f64
+                                && ly >= gy_r as f64
+                                && ly <= (gy_r + gh_r) as f64
+                            {
+                                dw.resizing_corner = true;
+                                dw.dragging_header = false;
+                                dw.resize_start_size = dw.win_size;
+                                dw.last_resize_redraw = Instant::now() - Duration::from_millis(60);
+                                let scale = dw.ws.window.scale_factor().max(1.0);
+                                if let Mouse::Position { x, y } = Mouse::get_mouse_position() {
+                                    #[cfg(target_os = "macos")]
+                                    {
+                                        dw.drag_start_cursor = (x as f64, y as f64);
+                                    }
+                                    #[cfg(not(target_os = "macos"))]
+                                    {
+                                        dw.drag_start_cursor = (x as f64 / scale, y as f64 / scale);
+                                    }
+                                }
+                            } else {
+                                dw.dragging_header = true;
+                                dw.resizing_corner = false;
+                                let scale = dw.ws.window.scale_factor().max(1.0);
+                                if let Ok(outer) = dw.ws.window.outer_position() {
+                                    let wl = outer.to_logical::<f64>(scale);
+                                    dw.drag_start_pos = (wl.x, wl.y);
+                                }
+                                if let Mouse::Position { x, y } = Mouse::get_mouse_position() {
+                                    #[cfg(target_os = "macos")]
+                                    {
+                                        dw.drag_start_cursor = (x as f64, y as f64);
+                                    }
+                                    #[cfg(not(target_os = "macos"))]
+                                    {
+                                        dw.drag_start_cursor = (x as f64 / scale, y as f64 / scale);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if should_close {
+                        self.hide_diary_window();
+                    }
+                } else if state == ElementState::Released {
+                    let mut saved_size: Option<(u32, u32)> = None;
+                    if let Some(ref mut dw) = self.diary {
+                        if dw.resizing_corner {
+                            if let Mouse::Position { x, y } = Mouse::get_mouse_position() {
+                                #[cfg(target_os = "macos")]
+                                let (gx, gy) = (x as f64, y as f64);
+                                #[cfg(not(target_os = "macos"))]
+                                let (gx, gy) = {
+                                    let scale = dw.ws.window.scale_factor().max(1.0);
+                                    (x as f64 / scale, y as f64 / scale)
+                                };
+                                let dx = gx - dw.drag_start_cursor.0;
+                                let dy = gy - dw.drag_start_cursor.1;
+                                let target_w =
+                                    (dw.resize_start_size.0 as f64 + dx).round().max(1.0) as u32;
+                                let target_h =
+                                    (dw.resize_start_size.1 as f64 + dy).round().max(1.0) as u32;
+                                dw.win_size =
+                                    crate::task_diary::clamp_diary_size(target_w, target_h);
+                            }
+                            saved_size = Some(dw.win_size);
+                        }
+                        dw.dragging_header = false;
+                        dw.resizing_corner = false;
+                    }
+                    if let Some((nw, nh)) = saved_size {
+                        let _ = self.config_store.update(ConfigPatch {
+                            diary_width: Some(nw),
+                            diary_height: Some(nh),
+                            ..Default::default()
+                        });
+                        self.redraw_diary_window();
                     }
                 }
             }
@@ -10017,6 +10832,27 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                 .ok()
                 .map(|surf| WindowSurface::from_existing(surf, win, &gpu))
         });
+        let (init_diary_w, init_diary_h) =
+            crate::task_diary::clamp_diary_size(cfg.diary_width, cfg.diary_height);
+        let diary_ws = Self::create_borderless_window_opts(
+            event_loop,
+            "NanikaAi Task Diary",
+            init_diary_w,
+            init_diary_h,
+            true,
+            true,
+            false,
+            true,
+            true,
+            false,
+        )
+        .ok()
+        .and_then(|win| {
+            gpu._instance
+                .create_surface(Arc::clone(&win))
+                .ok()
+                .map(|surf| WindowSurface::from_existing(surf, win, &gpu))
+        });
 
         self.sakura = Some(CharacterWindowState {
             scope: Scope::Sakura,
@@ -10191,6 +11027,21 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                 last_render_bmp: RgbaBitmap::new_transparent(16, 16),
             });
         }
+        if let Some(dws) = diary_ws {
+            self.diary = Some(DiaryWindowState {
+                ws: dws,
+                visible: false,
+                win_size: (init_diary_w, init_diary_h),
+                dragging_header: false,
+                resizing_corner: false,
+                drag_start_cursor: (0.0, 0.0),
+                drag_start_pos: (0.0, 0.0),
+                resize_start_size: (init_diary_w, init_diary_h),
+                last_resize_redraw: Instant::now(),
+                last_local_cursor: None,
+                last_render_bmp: RgbaBitmap::new_transparent(16, 16),
+            });
+        }
 
         self.gpu = Some(gpu);
 
@@ -10330,6 +11181,11 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                 self.playback.enqueue(actions);
             }
             UserEvent::AutoTalkActions(actions) => {
+                if crate::narrator::is_narration_active() {
+                    // Drop in-flight auto-talk completely while emotional narration is playing
+                    self.pending_auto_talk_actions = None;
+                    return;
+                }
                 let menu_open = self.menu.as_ref().is_some_and(|m| m.visible);
                 let communicate_open = self.communicate.as_ref().is_some_and(|c| c.visible);
                 if menu_open || communicate_open {
@@ -10348,6 +11204,15 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                 self.apply_status_feedback(status);
                 self.redraw_settings_panel();
                 self.rebuild_tray_menu();
+            }
+            UserEvent::DiaryUpdated { open, close } => {
+                if close {
+                    self.hide_diary_window();
+                } else if open {
+                    self.open_diary_window();
+                } else {
+                    self.redraw_diary_window();
+                }
             }
             UserEvent::PlayActionsNoBacklog(actions) => {
                 if actions.iter().any(|a| a.scope == Scope::Sakura) {
@@ -10416,14 +11281,29 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                     .tts_engine
                     .as_deref()
                     .map(crate::config_store::normalize_tts_engine);
+                let norm_kindle_engine = req
+                    .kindle_tts_engine
+                    .as_deref()
+                    .map(crate::config_store::normalize_kindle_tts_engine);
+                let kindle_sp_patch = if req.clear_kindle_voice_speaker {
+                    Some(None)
+                } else if let Some(id) = req.kindle_voice_speaker {
+                    Some(Some(id))
+                } else {
+                    None
+                };
                 if req.voice_tts.is_some()
                     || norm_engine.is_some()
+                    || norm_kindle_engine.is_some()
+                    || kindle_sp_patch.is_some()
                     || req.voice_speed.is_some()
                     || req.voice_intonation.is_some()
                 {
                     self.config_store.update(ConfigPatch {
                         voice_tts: req.voice_tts,
                         tts_engine: norm_engine,
+                        kindle_tts_engine: norm_kindle_engine,
+                        kindle_voice_speaker: kindle_sp_patch,
                         voice_speed: req.voice_speed.map(|v| v.clamp(0.75, 1.35)),
                         voice_intonation: req.voice_intonation.map(|v| v.clamp(0.70, 1.50)),
                         ..Default::default()
@@ -10664,6 +11544,11 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                                 s.ws.resize(gpu, phys);
                             }
                         }
+                        Some(UiWindowTarget::Diary) => {
+                            if let Some(ref mut d) = self.diary {
+                                d.ws.resize(gpu, phys);
+                            }
+                        }
                         None => {}
                     }
                 }
@@ -10704,6 +11589,11 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
                         Some(UiWindowTarget::Settings) => {
                             if let Some(ref mut s) = self.settings {
                                 s.ws.render(gpu);
+                            }
+                        }
+                        Some(UiWindowTarget::Diary) => {
+                            if let Some(ref mut d) = self.diary {
+                                d.ws.render(gpu);
                             }
                         }
                         None => {}
@@ -10998,12 +11888,18 @@ impl ApplicationHandler<UserEvent> for AppRuntime {
 
         let menu_open = self.menu.as_ref().is_some_and(|m| m.visible);
         let communicate_open = self.communicate.as_ref().is_some_and(|c| c.visible);
-        let suppress_interruptions = should_suppress_interruptions_with_input(
+        let narration_active = crate::narrator::is_narration_active();
+        if narration_active {
+            self.auto_talk_last = Instant::now();
+            self.pending_auto_talk_actions = None;
+        }
+        let suppress_interruptions = should_suppress_interruptions_full(
             cfg_now.quiet_mode,
             eff_hidden,
             self.pomodoro.is_focusing(),
             menu_open,
             communicate_open,
+            narration_active,
         );
 
         // Poll due reminders & hourly chime every second when idle/not closing
@@ -11193,6 +12089,10 @@ pub fn run(smoke_test: bool) -> Result<(), String> {
     engine.set_interim_callback(Arc::new(move |actions| {
         let _ = interim_proxy.send_event(UserEvent::PlayActionsNoBacklog(actions));
     }));
+    let diary_proxy = proxy.clone();
+    crate::task_diary::set_diary_change_callback(Arc::new(move |open| {
+        let _ = diary_proxy.send_event(UserEvent::DiaryUpdated { open, close: false });
+    }));
 
     let cfg_dir_for_cal = config_store.config_dir.clone();
     let smoke_passed = Arc::new(Mutex::new(false));
@@ -11217,6 +12117,7 @@ pub fn run(smoke_test: bool) -> Result<(), String> {
         communicate: None,
         menu: None,
         settings: None,
+        diary: None,
         expanded_menu_section: None,
         playback: PlaybackQueue::new(),
         #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -11247,6 +12148,7 @@ pub fn run(smoke_test: bool) -> Result<(), String> {
         low_battery_notified: false,
         last_pomo_ui_refresh: Instant::now(),
         pending_auto_talk_actions: None,
+        pending_narrate_path: None,
         aivm_busy_label: None,
         calendar_state: {
             let mut st = crate::calendar_sync::CalendarSyncState::default();
@@ -11293,6 +12195,25 @@ pub fn should_suppress_interruptions_with_input(
 ) -> bool {
     should_suppress_interruptions(quiet_mode, eff_hidden, pomo_focusing, menu_open)
         || communicate_open
+}
+
+/// Full interruption suppression guard: also pauses auto-talk, chimes, and briefings
+/// while AivisSpeech emotional narration is actively reading aloud.
+pub fn should_suppress_interruptions_full(
+    quiet_mode: bool,
+    eff_hidden: bool,
+    pomo_focusing: bool,
+    menu_open: bool,
+    communicate_open: bool,
+    narration_active: bool,
+) -> bool {
+    should_suppress_interruptions_with_input(
+        quiet_mode,
+        eff_hidden,
+        pomo_focusing,
+        menu_open,
+        communicate_open,
+    ) || narration_active
 }
 
 /// Public snapshot helper for `/api/settings` (guarantees `api_key` and secret `calendar_ics_urls` are never exposed).

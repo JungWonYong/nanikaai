@@ -1904,7 +1904,7 @@ pub fn open_validated_browser_url(raw_url: &str, dry_run: bool) -> Result<String
     Ok(clean_url)
 }
 
-fn is_blocked_drop_target(path: &Path) -> bool {
+pub fn is_blocked_drop_target(path: &Path) -> bool {
     if is_sensitive_path(path) {
         return true;
     }

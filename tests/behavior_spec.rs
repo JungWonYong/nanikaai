@@ -1857,6 +1857,8 @@ fn spec_cfg_01_and_ui_06_home_dotdir_settings_panel_and_api() {
         sakura_voice_label: "自動".to_string(),
         kero_voice_label: "自動".to_string(),
         kero_archetype_label: "少年系".to_string(),
+        kindle_tts_engine_label: "標準エンジンに従う".to_string(),
+        kindle_voice_label: "自動".to_string(),
         recommended_local_ai_hint: "RAM 16GB → gemma4:e4b / llama3.2:3b".to_string(),
         local_ai_setup_busy: false,
         interests_summary: "未登録".to_string(),
@@ -2405,6 +2407,8 @@ fn spec_ui_07_ui_language_os_auto_fallback_and_switching() {
             sakura_voice_label: "Auto".to_string(),
             kero_voice_label: "Auto".to_string(),
             kero_archetype_label: "Boy".to_string(),
+            kindle_tts_engine_label: "Follow Default Engine".to_string(),
+            kindle_voice_label: "Auto".to_string(),
             recommended_local_ai_hint: "RAM 16GB -> gemma4:e4b".to_string(),
             local_ai_setup_busy: false,
             interests_summary: String::new(),
@@ -3682,7 +3686,7 @@ fn spec_ai_06_tiered_escalation_vision_and_cloud_fallback() {
 fn spec_ai_07_self_escalation_interim_reaction_and_input_focus_guard() {
     use nanikaai::agent_engine::{
         build_escalation_reaction_script, build_self_escalation_tool,
-        resolve_router_model_from_list, AgentEngine, RouteRole,
+        detect_self_escalation_hint, resolve_router_model_from_list, AgentEngine, RouteRole,
     };
     use nanikaai::builtin_tools::BuiltinToolRunner;
     use nanikaai::config_store::{ConfigPatch, ConfigStore};
@@ -3707,7 +3711,7 @@ fn spec_ai_07_self_escalation_interim_reaction_and_input_focus_guard() {
     ];
     assert_eq!(resolve_router_model_from_list("self", &installed).unwrap(), None);
 
-    // 3. Escalation waiting reaction scripts (KO/JA/EN + Vision) must be valid Sakura Script
+    // 3. Escalation waiting reaction scripts (KO/JA/EN + Vision) must be valid Sakura Script with deterministic variety
     let ko_reason = build_escalation_reaction_script(RouteRole::Reasoning, false, "이 알고리즘 증명해줘", "ko");
     assert!(ko_reason.contains("\\0\\s[3]") && ko_reason.contains("잠시만 기다려") && ko_reason.ends_with("\\e"));
     let ja_code = build_escalation_reaction_script(RouteRole::Coding, false, "Rustで実装して", "ja");
@@ -3716,6 +3720,61 @@ fn spec_ai_07_self_escalation_interim_reaction_and_input_focus_guard() {
     assert!(en_cloud.contains("\\0\\s[3]") && en_cloud.contains("cloud AI") && en_cloud.ends_with("\\e"));
     let ko_vis = build_escalation_reaction_script(RouteRole::Reasoning, true, "이 그림 봐줘", "ko");
     assert!(ko_vis.contains("고해상도") && ko_vis.ends_with("\\e"));
+
+    let mut ko_coding_variants = std::collections::HashSet::new();
+    for sample in ["a", "b", "c", "d", "e", "f"] {
+        ko_coding_variants.insert(build_escalation_reaction_script(
+            RouteRole::Coding,
+            false,
+            &format!("코드 {sample}"),
+            "ko",
+        ));
+    }
+    assert!(
+        ko_coding_variants.len() >= 2,
+        "expected multiple varied mascot waiting reactions across prompts"
+    );
+
+    // 3b. Self-escalation sensitivity hint guardrails (0% false positives on casual chat, accurate tier cues)
+    assert_eq!(detect_self_escalation_hint("안녕! 오늘 기분 어때?", true, true, true), None);
+    assert_eq!(detect_self_escalation_hint("파이썬이 뭔지 한 줄로 설명해줘", true, true, true), None);
+    assert_eq!(detect_self_escalation_hint("나 오늘 러스트 공부 시작했어! 응원해줘", true, true, true), None);
+    assert_eq!(
+        detect_self_escalation_hint(
+            "Rust에서 tokio::sync::Mutex를 async trait 메서드 안에서 안전하게 사용하는 코드 짜줘",
+            true,
+            true,
+            true
+        ),
+        Some("coding")
+    );
+    assert_eq!(
+        detect_self_escalation_hint(
+            "분산 시스템에서 Raft와 Paxos의 합의 알고리즘 트레이드오프를 깊이 비교 분석해줘",
+            true,
+            true,
+            true
+        ),
+        Some("reasoning")
+    );
+    assert_eq!(
+        detect_self_escalation_hint(
+            "제미나이 클라우드로 2026년 최신 AI 에이전트 동향 심층 리서치해줘",
+            true,
+            true,
+            true
+        ),
+        Some("cloud")
+    );
+    assert_eq!(
+        detect_self_escalation_hint(
+            "제미나이 클라우드로 2026년 최신 AI 에이전트 동향 심층 리서치해줘",
+            true,
+            true,
+            false
+        ),
+        None
+    );
 
     let esc_tool = build_self_escalation_tool(true, true, true).expect("self escalation tool");
     assert_eq!(esc_tool["function"]["name"], "escalate_to_expert");
@@ -3874,5 +3933,460 @@ fn spec_ai_07_self_escalation_interim_reaction_and_input_focus_guard() {
     let seq = called_models.lock().unwrap().clone();
     assert_eq!(seq, vec!["gemma4:e4b".to_string(), "gemma4:31b".to_string()]);
 
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn spec_comp_07_aivis_emotional_narration_epub_text_and_prosody() {
+    use nanikaai::companion_extras::TtsVoiceOption;
+    use nanikaai::narrator::{
+        build_utterances_from_text, compute_emotional_prosody, load_epub_document,
+        load_text_file_document, normalize_xhtml_block_for_tts, resolve_emotional_speaker,
+        synthesize_emotional_wav_bytes, Emotion, NarratorPreset, UtteranceKind,
+    };
+    use serde_json::json;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    // 1. EPUB3 <ruby> & bouten normalization
+    let (ruby_text, ruby_emph) =
+        normalize_xhtml_block_for_tts("<ruby>魔法<rp>(</rp><rt>まほう</rt><rp>)</rp></ruby>が光った！");
+    assert_eq!(ruby_text, "まほうが光った！");
+    assert!(!ruby_emph);
+
+    let (bouten_text, bouten_emph) =
+        normalize_xhtml_block_for_tts("<ruby class=\"bouten\">絶対<rt>﹅﹅</rt></ruby>に負けない！");
+    assert_eq!(bouten_text, "絶対に負けない！");
+    assert!(bouten_emph);
+
+    // 2. Utterance segmentation & 7-emotion detection (JA/KO/EN)
+    let novel = "# 第一話 朝の光\n\n「わあ、とっても嬉しいよ！笑顔になっちゃう！」\n（こ、怖い……震えが止まらない……）\n「ふざけるな！激怒するぞ！」\n그녀는 슬픔에 눈물을 흘렸다.";
+    let utts = build_utterances_from_text("ep_01", novel);
+    assert!(utts.len() >= 5, "expected heading + dialogue + monologue + dialogue + narration");
+    assert_eq!(utts[0].kind, UtteranceKind::Heading);
+    assert_eq!(utts[1].kind, UtteranceKind::Dialogue);
+    assert_eq!(utts[1].emotion, Emotion::Happy);
+    assert_eq!(utts[2].kind, UtteranceKind::Monologue);
+    assert_eq!(utts[2].emotion, Emotion::Fear);
+    assert_eq!(utts[3].kind, UtteranceKind::Dialogue);
+    assert_eq!(utts[3].emotion, Emotion::Angry);
+    assert_eq!(utts[4].emotion, Emotion::Sad);
+
+    // 3. Synthetic EPUB archive parsing + sensitive file guard
+    let tmp = std::env::temp_dir().join(format!("nanikaai_spec_comp_07_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+
+    let env_path = tmp.join(".env");
+    fs::write(&env_path, "SECRET=1").unwrap();
+    assert!(load_text_file_document(&env_path).is_err(), ".env must be blocked from narration");
+
+    let epub_path = tmp.join("sample_novel.epub");
+    {
+        let f = fs::File::create(&epub_path).unwrap();
+        let mut zw = zip::ZipWriter::new(f);
+        let opts = zip::write::SimpleFileOptions::default();
+        zw.start_file("OEBPS/content.opf", opts).unwrap();
+        zw.write_all(b"<package><metadata><dc:title>Test Fantasy Novel</dc:title></metadata></package>")
+            .unwrap();
+        zw.start_file("OEBPS/episodes/ep_0001.xhtml", opts).unwrap();
+        zw.write_all(
+            "<html><body><h1>第一章</h1><p>「<ruby>奇跡<rt>きせき</rt></ruby>だ！本当に嬉しい！」</p></body></html>"
+                .as_bytes(),
+        )
+        .unwrap();
+        zw.finish().unwrap();
+    }
+    let epub_doc = load_epub_document(&epub_path, Some("1")).expect("load synthetic epub");
+    assert_eq!(epub_doc.title, "Test Fantasy Novel");
+    assert_eq!(epub_doc.source_kind, "epub");
+    assert!(epub_doc.utterances.iter().any(|u| u.text.contains("きせきだ") && u.emotion == Emotion::Happy));
+
+    // 4. Narrator preset ranking & dynamic emotional style selection
+    let voices = vec![
+        TtsVoiceOption {
+            style_id: 1431611904,
+            speaker_name: "まい".to_string(),
+            style_name: "ノーマル".to_string(),
+            label: "まい (ノーマル)".to_string(),
+        },
+        TtsVoiceOption {
+            style_id: 1063997408,
+            speaker_name: "天深シノ".to_string(),
+            style_name: "ノーマル".to_string(),
+            label: "天深シノ (ノーマル)".to_string(),
+        },
+        TtsVoiceOption {
+            style_id: 1063997409,
+            speaker_name: "天深シノ".to_string(),
+            style_name: "じょうきげん".to_string(),
+            label: "天深シノ (じょうきげん)".to_string(),
+        },
+        TtsVoiceOption {
+            style_id: 1063997410,
+            speaker_name: "天深シノ".to_string(),
+            style_name: "ふきげん".to_string(),
+            label: "天深シノ (ふきげん)".to_string(),
+        },
+        TtsVoiceOption {
+            style_id: 1063997411,
+            speaker_name: "天深シノ".to_string(),
+            style_name: "ささやき".to_string(),
+            label: "天深シノ (ささやき)".to_string(),
+        },
+    ];
+    let (auto_id, auto_sp) = resolve_emotional_speaker(
+        &voices,
+        NarratorPreset::Auto,
+        UtteranceKind::Narration,
+        Emotion::Neutral,
+        None,
+    )
+    .unwrap();
+    assert_eq!(auto_id, 1431611904);
+    assert_eq!(auto_sp, "まい");
+
+    let (shino_happy, _) = resolve_emotional_speaker(
+        &voices,
+        NarratorPreset::Shino,
+        UtteranceKind::Dialogue,
+        Emotion::Happy,
+        None,
+    )
+    .unwrap();
+    assert_eq!(shino_happy, 1063997409);
+    let (shino_sad, _) = resolve_emotional_speaker(
+        &voices,
+        NarratorPreset::Shino,
+        UtteranceKind::Dialogue,
+        Emotion::Sad,
+        None,
+    )
+    .unwrap();
+    assert_eq!(shino_sad, 1063997411);
+    let (shino_angry, _) = resolve_emotional_speaker(
+        &voices,
+        NarratorPreset::Shino,
+        UtteranceKind::Dialogue,
+        Emotion::Angry,
+        None,
+    )
+    .unwrap();
+    assert_eq!(shino_angry, 1063997410);
+
+    // 5. Emotional prosody + mock AivisSpeech synthesis round-trip
+    let prosody = compute_emotional_prosody(&utts[3], NarratorPreset::Shino, 1.0, 1.0);
+    assert!(prosody.intonation_scale > 1.15);
+    assert!(prosody.volume_scale > 1.0);
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock aivis server");
+    let addr = listener.local_addr().unwrap();
+    let srv = thread::spawn(move || {
+        for _ in 0..2 {
+            let Ok((mut stream, _)) = listener.accept() else {
+                break;
+            };
+            let mut buf = [0u8; 8192];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]);
+            if req.starts_with("POST /audio_query") {
+                let body = json!({
+                    "speedScale": 1.0,
+                    "pitchScale": 0.0,
+                    "intonationScale": 1.0,
+                    "volumeScale": 1.0,
+                    "tempoDynamicsScale": 1.0
+                })
+                .to_string();
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            } else {
+                let mut fake_wav = vec![0u8; 64];
+                fake_wav[0..4].copy_from_slice(b"RIFF");
+                let hdr = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    fake_wav.len()
+                );
+                let _ = stream.write_all(hdr.as_bytes());
+                let _ = stream.write_all(&fake_wav);
+            }
+        }
+    });
+
+    let wav = synthesize_emotional_wav_bytes(&format!("http://{addr}"), shino_angry, "ふざけるな！", &prosody)
+        .expect("emotional wav synthesis");
+    assert!(wav.starts_with(b"RIFF") && wav.len() >= 44);
+
+    // 6. Auto-talk / chime interruption guard while emotional narration is active
+    assert!(nanikaai::gui::should_suppress_interruptions_full(
+        false, false, false, false, false, true
+    ));
+    assert!(!nanikaai::gui::should_suppress_interruptions_full(
+        false, false, false, false, false, false
+    ));
+
+    // 7. Kindle Cloud Reader URL allowlist, login detection, and OCR chrome filtering
+    use nanikaai::narrator::{
+        classify_kindle_tab_url, clean_kindle_ocr_text, validate_kindle_url, KindlePageDirection,
+        KindleTabState,
+    };
+    assert!(validate_kindle_url("https://read.amazon.co.jp").is_ok());
+    assert!(validate_kindle_url("https://read.amazon.com/kindle-library").is_ok());
+    assert!(validate_kindle_url("http://read.amazon.co.jp").is_err());
+    assert!(validate_kindle_url("https://evil.example.com/read.amazon.co.jp").is_err());
+    assert!(validate_kindle_url("http://127.0.0.1:9821").is_err());
+
+    assert_eq!(
+        classify_kindle_tab_url(
+            "Google Chrome",
+            "https://www.amazon.co.jp/ap/signin?openid.ns=http://specs.openid.net",
+            None
+        ),
+        KindleTabState::NeedsLogin {
+            browser: "Google Chrome".to_string(),
+            url: "https://www.amazon.co.jp/ap/signin?openid.ns=http://specs.openid.net".to_string(),
+        }
+    );
+    assert!(matches!(
+        classify_kindle_tab_url("Google Chrome", "https://read.amazon.co.jp/kindle-library", Some((0, 0, 1200, 900))),
+        KindleTabState::Library { .. }
+    ));
+    assert!(matches!(
+        classify_kindle_tab_url("Safari", "https://read.amazon.co.jp/?asin=B000000001", Some((0, 0, 1200, 900))),
+        KindleTabState::Ready { .. }
+    ));
+    assert_eq!(KindlePageDirection::parse(Some("rtl")), KindlePageDirection::Rtl);
+    assert_eq!(KindlePageDirection::parse(Some("ltr")), KindlePageDirection::Ltr);
+
+    let cleaned_ocr = clean_kindle_ocr_text("Kindle\n位置No. 124\n「魔法が光った！」\n42%\n3分");
+    assert_eq!(cleaned_ocr, "「魔法が光った！」");
+
+    // 8. Kindle sentence-skipping prevention: false-positive footer filter, line reflow,
+    //    2-page spread gutter detection, long dialogue splitting, and Kindle voice library/model settings
+    let keep_time_sentence = clean_kindle_ocr_text(
+        "5分後に扉が開いた。\n「今日はいい天気だね、\nみんなで散歩に行こうよ」\n章の残り 12分\n3分",
+    );
+    assert!(
+        keep_time_sentence.contains("5分後に扉が開いた。"),
+        "sentences starting with N分 must not be dropped: {keep_time_sentence}"
+    );
+    assert!(
+        keep_time_sentence.contains("「今日はいい天気だね、みんなで散歩に行こうよ」"),
+        "wrapped Kindle dialogue lines must reflow without breaking: {keep_time_sentence}"
+    );
+    assert!(!keep_time_sentence.contains("章の残り"));
+
+    // Long dialogue splitting (>110 chars) so TTS never times out & skips
+    let long_dlg = format!(
+        "「{}」",
+        "これはとても長いセリフのテスト文です。絶対に途中で省略されずに最後まで読み上げられます。".repeat(4)
+    );
+    let dlg_utts = build_utterances_from_text("kindle_p1", &long_dlg);
+    assert!(
+        dlg_utts.len() >= 2,
+        "long dialogue should split into multiple chunks to avoid TTS timeouts: {:?}",
+        dlg_utts.len()
+    );
+    let joined_dlg: String = dlg_utts.iter().map(|u| u.text.as_str()).collect();
+    assert!(joined_dlg.contains("最後まで読み上げられます。"));
+
+    // 2-page spread gutter detection (landscape image with clean center gutter and ink on both sides)
+    {
+        use image::{DynamicImage, GrayImage, Luma};
+        let mut spread = GrayImage::from_pixel(800, 600, Luma([250u8]));
+        for y in 80..520 {
+            for x in 100..340 {
+                if (x + y) % 7 == 0 {
+                    spread.put_pixel(x, y, Luma([30u8]));
+                }
+            }
+            for x in 460..700 {
+                if (x + y) % 7 == 0 {
+                    spread.put_pixel(x, y, Luma([30u8]));
+                }
+            }
+        }
+        let gutter = nanikaai::narrator::detect_spread_gutter_x(&DynamicImage::ImageLuma8(spread));
+        assert!(
+            gutter.is_some_and(|gx| (340..=460).contains(&gx)),
+            "expected center gutter for 2-page spread, got {gutter:?}"
+        );
+
+        let mut single = GrayImage::from_pixel(800, 600, Luma([250u8]));
+        for y in 80..520 {
+            for x in 200..600 {
+                if (x + y) % 5 == 0 {
+                    single.put_pixel(x, y, Luma([30u8]));
+                }
+            }
+        }
+        assert!(
+            nanikaai::narrator::detect_spread_gutter_x(&DynamicImage::ImageLuma8(single)).is_none(),
+            "single-page centered layout must not be split"
+        );
+    }
+
+    // Explicit Kindle voice model override + engine resolution + persistence
+    {
+        use nanikaai::companion_extras::TtsVoiceOption;
+        use nanikaai::config_store::{
+            normalize_kindle_tts_engine, resolve_kindle_tts_engine, ConfigPatch, ConfigStore,
+        };
+        use nanikaai::narrator::resolve_emotional_speaker_with_override;
+
+        assert_eq!(normalize_kindle_tts_engine("vv"), "voicevox");
+        assert_eq!(normalize_kindle_tts_engine("aivis"), "aivisspeech");
+        assert_eq!(normalize_kindle_tts_engine(""), "inherit");
+        assert_eq!(resolve_kindle_tts_engine("inherit", "aivisspeech"), "aivisspeech");
+        assert_eq!(resolve_kindle_tts_engine("inherit", "os"), "auto");
+        assert_eq!(resolve_kindle_tts_engine("voicevox", "aivisspeech"), "voicevox");
+
+        let voices = vec![
+            TtsVoiceOption {
+                style_id: 100,
+                speaker_name: "まい".to_string(),
+                style_name: "ノーマル".to_string(),
+                label: "まい (ノーマル)".to_string(),
+            },
+            TtsVoiceOption {
+                style_id: 201,
+                speaker_name: "ずんだもん".to_string(),
+                style_name: "ノーマル".to_string(),
+                label: "ずんだもん (ノーマル)".to_string(),
+            },
+            TtsVoiceOption {
+                style_id: 202,
+                speaker_name: "ずんだもん".to_string(),
+                style_name: "喜び".to_string(),
+                label: "ずんだもん (喜び)".to_string(),
+            },
+        ];
+        let picked = resolve_emotional_speaker_with_override(
+            &voices,
+            NarratorPreset::Auto,
+            UtteranceKind::Dialogue,
+            Emotion::Happy,
+            Some(201),
+            Some(100),
+        )
+        .expect("explicit Kindle speaker must resolve");
+        assert_eq!(picked.0, 202, "should adapt emotion style within chosen Kindle voice model");
+        assert_eq!(picked.1, "ずんだもん");
+
+        let cfg_dir = tmp.join("kindle_voice_cfg");
+        let store = ConfigStore::new(Some(cfg_dir.clone()));
+        store.update(ConfigPatch {
+            kindle_tts_engine: Some("voicevox".to_string()),
+            kindle_voice_speaker: Some(Some(201)),
+            ..Default::default()
+        });
+        let reloaded = ConfigStore::new(Some(cfg_dir)).get();
+        assert_eq!(reloaded.kindle_tts_engine, "voicevox");
+        assert_eq!(reloaded.kindle_voice_speaker, Some(201));
+    }
+
+    let _ = srv.join();
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn spec_acc_07_illustrated_open_book_task_diary_rendering_and_tools() {
+    use nanikaai::builtin_tools::{tools_schema, BuiltinToolRunner};
+    use nanikaai::config_store::{ConfigPatch, ConfigStore};
+    use nanikaai::gui::TextRenderer;
+    use nanikaai::i18n::UiLang;
+    use nanikaai::task_diary::{
+        clamp_diary_size, clear_diary, diary_close_rect, diary_resize_grip_rect,
+        format_progress_bar, plan_diary_tasks, render_diary_canvas, render_diary_canvas_sized,
+        update_diary_task, DiaryTaskStatus, DIARY_LOGICAL_H, DIARY_LOGICAL_W, DIARY_MAX_H,
+        DIARY_MAX_W, DIARY_MIN_H, DIARY_MIN_W,
+    };
+    use serde_json::json;
+
+    // 1. Character progress bar fills □ with ■ accurately
+    assert_eq!(format_progress_bar(0, 4, 10), "□□□□□□□□□□ 0% (0/4)");
+    assert_eq!(format_progress_bar(2, 4, 10), "■■■■■□□□□□ 50% (2/4)");
+    assert_eq!(format_progress_bar(4, 4, 10), "■■■■■■■■■■ 100% (4/4)");
+
+    // 2. Builtin tools schema exposes diary_plan & diary_update
+    let schema = tools_schema();
+    let arr = schema.as_array().expect("tools_schema array");
+    assert!(arr.iter().any(|t| t["function"]["name"] == "diary_plan"));
+    assert!(arr.iter().any(|t| t["function"]["name"] == "diary_update"));
+
+    // 3. BuiltinToolRunner plan + update round-trip
+    let tmp = std::env::temp_dir().join(format!("nanikaai_spec_acc_07_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+    let store = ConfigStore::new(Some(tmp.clone()));
+    let runner = BuiltinToolRunner::new(store.clone(), Some(tmp.clone()));
+
+    let plan_out = runner.execute(
+        "diary_plan",
+        &json!({
+            "title": "아침 루틴 체크",
+            "tasks": ["날씨 확인", "캘린더 일정 조회", "할 일 메모 정리"]
+        }),
+    );
+    assert!(plan_out.contains("\"ok\":true") && plan_out.contains("□□□□□□□□□□ 0% (0/3)"));
+
+    let upd_out = runner.execute(
+        "diary_update",
+        &json!({
+            "task_index": 1,
+            "status": "done",
+            "result": "도쿄 맑음 16°C"
+        }),
+    );
+    assert!(upd_out.contains("\"ok\":true") && upd_out.contains("33% (1/3)"));
+
+    let diary = update_diary_task(2, DiaryTaskStatus::Running, "일정 2건 확인 중", None);
+    assert_eq!(diary.tasks.len(), 3);
+    assert_eq!(diary.tasks[0].status, DiaryTaskStatus::Done);
+    assert_eq!(diary.tasks[1].status, DiaryTaskStatus::Running);
+    assert_eq!(diary.tasks[0].result, "도쿄 맑음 16°C");
+
+    // 4. Illustrated two-page open-book rendering produces rich non-empty RGBA bitmap (both pages + spine)
+    let mut tr = TextRenderer::new();
+    let bmp = render_diary_canvas(&diary, &mut tr, 1.0, UiLang::Ko);
+    assert_eq!(bmp.width, DIARY_LOGICAL_W);
+    assert_eq!(bmp.height, DIARY_LOGICAL_H);
+    let opaque_px = bmp
+        .data
+        .chunks_exact(4)
+        .filter(|px| px[3] > 200)
+        .count();
+    assert!(
+        opaque_px > 250_000,
+        "expected rich illustrated two-page diary canvas, got {opaque_px} opaque px"
+    );
+
+    // 5. Resizable diary bounds, dynamic hit-test rects, custom-size rendering & config persistence
+    assert_eq!(clamp_diary_size(200, 100), (DIARY_MIN_W, DIARY_MIN_H));
+    assert_eq!(clamp_diary_size(3000, 2000), (DIARY_MAX_W, DIARY_MAX_H));
+    let (cw, ch) = (960, 620);
+    let bmp_large = render_diary_canvas_sized(&diary, &mut tr, cw, ch, 1.0, UiLang::Ko);
+    assert_eq!(bmp_large.width, cw);
+    assert_eq!(bmp_large.height, ch);
+    let close_r = diary_close_rect(cw, ch);
+    let grip_r = diary_resize_grip_rect(cw, ch);
+    assert!(close_r.0 > 850.0 && grip_r.0 > 900.0 && grip_r.1 > 550.0);
+    let saved = store.update(ConfigPatch {
+        diary_width: Some(cw),
+        diary_height: Some(ch),
+        ..Default::default()
+    });
+    assert_eq!((saved.diary_width, saved.diary_height), (cw, ch));
+    let reloaded = ConfigStore::new(Some(tmp.clone())).get();
+    assert_eq!((reloaded.diary_width, reloaded.diary_height), (cw, ch));
+
+    let _ = plan_diary_tasks("Cleanup", &["done".to_string()]);
+    let cleared = clear_diary();
+    assert!(cleared.tasks.is_empty());
     let _ = fs::remove_dir_all(&tmp);
 }

@@ -272,6 +272,42 @@ pub fn tools_schema() -> Value {
                     }
                 }
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "diary_plan",
+                "description": "Open the illustrated two-page Task Diary window when a user request requires multiple tasks/steps (2+ tasks). Displays the task list, checkboxes, and progress bar on the left page, and execution results on the right page.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string", "description": "Short title for the multi-task plan"},
+                        "tasks": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Ordered list of 2 to 12 concise task titles"
+                        }
+                    },
+                    "required": ["title", "tasks"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "diary_update",
+                "description": "Update a task's status and execution result in the open-book Task Diary (left page checkbox/progress bar + right page execution result).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task_index": {"type": "integer", "description": "1-based index of the task to update"},
+                        "status": {"type": "string", "enum": ["pending", "running", "done", "failed"], "description": "Current status of the task"},
+                        "result": {"type": "string", "description": "Concise execution result shown on the right page"},
+                        "title": {"type": "string", "description": "Optional task title if appending a new task"}
+                    },
+                    "required": ["task_index", "status"]
+                }
+            }
         }
     ])
 }
@@ -834,8 +870,50 @@ impl BuiltinToolRunner {
             "complete_memo" => self.complete_memo(args),
             "delete_memo" => self.delete_memo(args),
             "list_upcoming_events" => self.list_upcoming_events(args),
+            "diary_plan" => self.diary_plan(args),
+            "diary_update" => self.diary_update(args),
             _ => json!({"ok": false, "error": format!("Unknown tool: {name}")}).to_string(),
         }
+    }
+
+    fn diary_plan(&self, args: &Value) -> String {
+        let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("Task Diary");
+        let tasks: Vec<String> = args
+            .get("tasks")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(str::trim).filter(|s| !s.is_empty()).map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if tasks.is_empty() {
+            return json!({"ok": false, "error": "tasks array must not be empty"}).to_string();
+        }
+        let diary = crate::task_diary::plan_diary_tasks(title, &tasks);
+        json!({
+            "ok": true,
+            "title": diary.title,
+            "count": diary.tasks.len(),
+            "progress": diary.progress_bar()
+        })
+        .to_string()
+    }
+
+    fn diary_update(&self, args: &Value) -> String {
+        let idx = args.get("task_index").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
+        let status_raw = args.get("status").and_then(|v| v.as_str()).unwrap_or("done");
+        let result = args.get("result").and_then(|v| v.as_str()).unwrap_or("");
+        let title = args.get("title").and_then(|v| v.as_str());
+        let st = crate::task_diary::DiaryTaskStatus::parse(status_raw);
+        let diary = crate::task_diary::update_diary_task(idx, st, result, title);
+        json!({
+            "ok": true,
+            "task_index": idx,
+            "status": status_raw,
+            "progress": diary.progress_bar()
+        })
+        .to_string()
     }
 
     fn add_memo(&self, text: &str) -> String {

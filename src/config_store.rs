@@ -162,6 +162,12 @@ fn default_remote_endpoint() -> String {
 fn default_model() -> String {
     "auto".to_string()
 }
+fn default_diary_width() -> u32 {
+    crate::task_diary::DIARY_LOGICAL_W
+}
+fn default_diary_height() -> u32 {
+    crate::task_diary::DIARY_LOGICAL_H
+}
 fn default_true() -> bool {
     true
 }
@@ -199,6 +205,10 @@ fn default_voicevox() -> String {
 
 fn default_tts_engine() -> String {
     "auto".to_string()
+}
+
+fn default_kindle_tts_engine() -> String {
+    "inherit".to_string()
 }
 
 fn default_ui_language() -> String {
@@ -375,6 +385,32 @@ pub fn normalize_tts_engine(raw: &str) -> String {
     }
 }
 
+pub fn normalize_kindle_tts_engine(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "inherit" | "default" => "inherit".to_string(),
+        "aivisspeech" | "aivis" => "aivisspeech".to_string(),
+        "voicevox" | "vv" => "voicevox".to_string(),
+        "coeiroink" => "coeiroink".to_string(),
+        "auto" => "auto".to_string(),
+        _ => "inherit".to_string(),
+    }
+}
+
+/// Resolve the effective TTS engine ID for Kindle narration (`"inherit"` follows `default_engine`).
+pub fn resolve_kindle_tts_engine(kindle_engine: &str, default_engine: &str) -> String {
+    let norm = normalize_kindle_tts_engine(kindle_engine);
+    if norm == "inherit" {
+        let def = normalize_tts_engine(default_engine);
+        if def == "os" {
+            "auto".to_string()
+        } else {
+            def
+        }
+    } else {
+        norm
+    }
+}
+
 pub fn normalize_kero_archetype_str(raw: &str) -> Option<String> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "boy" | "boyish" => Some("boy".to_string()),
@@ -470,6 +506,10 @@ pub struct AgentConfig {
     pub voice_tts: bool,
     #[serde(default = "default_tts_engine")]
     pub tts_engine: String,
+    #[serde(default = "default_kindle_tts_engine")]
+    pub kindle_tts_engine: String,
+    #[serde(default)]
+    pub kindle_voice_speaker: Option<i64>,
     #[serde(default = "default_voicevox")]
     pub voicevox_url: String,
     #[serde(default = "default_voice_speed")]
@@ -482,6 +522,10 @@ pub struct AgentConfig {
     pub balloon_opacity: f32,
     #[serde(default = "default_one_f32")]
     pub character_scale: f32,
+    #[serde(default = "default_diary_width")]
+    pub diary_width: u32,
+    #[serde(default = "default_diary_height")]
+    pub diary_height: u32,
     #[serde(default = "default_true")]
     pub opaque_on_hover: bool,
     #[serde(default = "default_true")]
@@ -575,12 +619,16 @@ impl Default for AgentConfig {
             hourly_chime: true,
             voice_tts: false,
             tts_engine: default_tts_engine(),
+            kindle_tts_engine: default_kindle_tts_engine(),
+            kindle_voice_speaker: None,
             voicevox_url: default_voicevox(),
             voice_speed: default_voice_speed(),
             voice_intonation: default_voice_intonation(),
             skin_opacity: 1.0,
             balloon_opacity: 1.0,
             character_scale: 1.0,
+            diary_width: default_diary_width(),
+            diary_height: default_diary_height(),
             opaque_on_hover: true,
             eye_tracking: true,
             lock_position: false,
@@ -640,12 +688,16 @@ pub struct ConfigPatch {
     pub hourly_chime: Option<bool>,
     pub voice_tts: Option<bool>,
     pub tts_engine: Option<String>,
+    pub kindle_tts_engine: Option<String>,
+    pub kindle_voice_speaker: Option<Option<i64>>,
     pub voicevox_url: Option<String>,
     pub voice_speed: Option<f32>,
     pub voice_intonation: Option<f32>,
     pub skin_opacity: Option<f32>,
     pub balloon_opacity: Option<f32>,
     pub character_scale: Option<f32>,
+    pub diary_width: Option<u32>,
+    pub diary_height: Option<u32>,
     pub opaque_on_hover: Option<bool>,
     pub eye_tracking: Option<bool>,
     pub lock_position: Option<bool>,
@@ -734,6 +786,13 @@ impl ConfigStore {
         let clamped_scale = clamp_character_scale(cfg.character_scale);
         if (clamped_scale - cfg.character_scale).abs() > 1e-4 {
             cfg.character_scale = clamped_scale;
+            changed = true;
+        }
+        let (clamped_dw, clamped_dh) =
+            crate::task_diary::clamp_diary_size(cfg.diary_width, cfg.diary_height);
+        if clamped_dw != cfg.diary_width || clamped_dh != cfg.diary_height {
+            cfg.diary_width = clamped_dw;
+            cfg.diary_height = clamped_dh;
             changed = true;
         }
         let clamped_interval = clamp_auto_talk_interval_sec(cfg.auto_talk_interval_sec);
@@ -890,6 +949,12 @@ impl ConfigStore {
         if let Some(v) = patch.tts_engine {
             guard.tts_engine = normalize_tts_engine(&v);
         }
+        if let Some(v) = patch.kindle_tts_engine {
+            guard.kindle_tts_engine = normalize_kindle_tts_engine(&v);
+        }
+        if let Some(v) = patch.kindle_voice_speaker {
+            guard.kindle_voice_speaker = v;
+        }
         if let Some(v) = patch.voicevox_url {
             guard.voicevox_url = v;
         }
@@ -907,6 +972,13 @@ impl ConfigStore {
         }
         if let Some(v) = patch.character_scale {
             guard.character_scale = clamp_character_scale(v);
+        }
+        if patch.diary_width.is_some() || patch.diary_height.is_some() {
+            let w = patch.diary_width.unwrap_or(guard.diary_width);
+            let h = patch.diary_height.unwrap_or(guard.diary_height);
+            let (cw, ch) = crate::task_diary::clamp_diary_size(w, h);
+            guard.diary_width = cw;
+            guard.diary_height = ch;
         }
         if let Some(v) = patch.opaque_on_hover {
             guard.opaque_on_hover = v;
